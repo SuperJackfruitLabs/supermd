@@ -1,5 +1,7 @@
 # supermd
 
+**[supermd.app](https://supermd.app)** · [Download](https://github.com/SuperJackfruitLabs/supermd/releases/latest)
+
 A native, GPU-rendered Markdown editor for macOS — the writing feel of
 Bear/Lettera on the engine philosophy of Zed. Plain CommonMark on disk,
 always.

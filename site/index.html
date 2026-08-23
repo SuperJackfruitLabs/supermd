@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>supermd — Markdown that gets out of the way</title>
+<meta name="description" content="A native, GPU-rendered Markdown editor for macOS. Syntax folds away as you write. Plain files, forever.">
+<meta property="og:title" content="supermd">
+<meta property="og:description" content="A native, GPU-rendered Markdown editor for macOS.">
+<meta property="og:url" content="https://supermd.app">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23dd4c4f'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #ffffff; --fg: #37352f; --strong: #1d1c19; --muted: #8f8d87;
+    --accent: #dd4c4f; --panel: #f7f6f4; --border: #e9e8e5; --code: #f6f5f3;
+    --kw: #a626a4; --fn: #4078f2; --str: #50a14f; --num: #986801;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1f1f1e; --fg: #d6d4cf; --strong: #f1efec; --muted: #8b8984;
+      --accent: #e25d5f; --panel: #262624; --border: #343432; --code: #2a2a28;
+      --kw: #c678dd; --fn: #61afef; --str: #98c379; --num: #d19a66;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 17px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  header { padding: 96px 0 56px; text-align: center; }
+  .mark {
+    width: 72px; height: 72px; border-radius: 17px; margin: 0 auto 28px;
+    background: linear-gradient(180deg, #e25d5f, #c93a3e);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 8px 28px rgba(221, 76, 79, .35);
+  }
+  .mark svg { width: 44px; height: 44px; }
+  h1 { font-size: 48px; letter-spacing: -0.02em; color: var(--strong); font-weight: 700; }
+  .tagline { font-size: 22px; color: var(--fg); margin-top: 12px; }
+  .sub { color: var(--muted); margin-top: 10px; font-size: 16px; }
+  .cta { margin-top: 36px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 13px 26px; border-radius: 10px;
+    font-weight: 600; font-size: 16px; text-decoration: none; transition: transform .12s ease;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.primary { background: var(--accent); color: #fff; box-shadow: 0 4px 18px rgba(221,76,79,.3); }
+  .btn.ghost { color: var(--strong); border: 1px solid var(--border); background: var(--panel); }
+  .note { margin-top: 14px; font-size: 13px; color: var(--muted); }
+
+  .mock {
+    margin: 64px auto 0; max-width: 760px; border: 1px solid var(--border);
+    border-radius: 12px; background: var(--bg); overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0,0,0,.10);
+    text-align: left; font-size: 15.5px;
+  }
+  .mock .bar {
+    height: 36px; background: var(--panel); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 14px; gap: 7px;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot:nth-child(1) { background: #ff5f57; } .dot:nth-child(2) { background: #febc2e; }
+  .dot:nth-child(3) { background: #28c840; }
+  .mock .tab { margin-left: 14px; font-size: 12.5px; color: var(--muted); }
+  .mock .doc { padding: 30px 40px 36px; }
+  .doc h2 { font-size: 26px; color: var(--strong); margin-bottom: 14px; letter-spacing: -.01em; }
+  .doc p { margin-bottom: 12px; }
+  .doc .cursor-line { background: color-mix(in srgb, var(--accent) 7%, transparent); border-radius: 4px; }
+  .doc .raw { color: var(--muted); }
+  .caret {
+    display: inline-block; width: 2px; height: 1.15em; background: var(--accent);
+    vertical-align: text-bottom; animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .doc .todo { list-style: none; margin-bottom: 12px; }
+  .doc .todo li::before { content: "✓ "; color: var(--accent); font-weight: 700; }
+  .doc .todo li.open::before { content: "○ "; color: var(--muted); }
+  .doc pre {
+    background: var(--code); border-radius: 8px; padding: 14px 16px; font-size: 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; overflow-x: auto; margin-bottom: 4px;
+  }
+  .kw { color: var(--kw); } .fn { color: var(--fn); } .str { color: var(--str); } .num { color: var(--num); }
+
+  section.features { padding: 88px 0 40px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px;
+  }
+  .card h3 { font-size: 17px; color: var(--strong); margin-bottom: 8px; }
+  .card p { font-size: 15px; color: var(--fg); }
+  .card .k { color: var(--accent); font-weight: 600; }
+
+  .plain { text-align: center; padding: 56px 0 72px; }
+  .plain h2 { font-size: 28px; color: var(--strong); letter-spacing: -.01em; }
+  .plain p { color: var(--muted); margin-top: 10px; max-width: 560px; margin-left: auto; margin-right: auto; }
+
+  footer {
+    border-top: 1px solid var(--border); padding: 36px 0 56px;
+    color: var(--muted); font-size: 14px; text-align: center;
+  }
+  footer a { color: var(--fg); text-decoration: none; border-bottom: 1px solid var(--border); }
+  footer a:hover { color: var(--accent); border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <div class="mark">
+    <svg viewBox="0 0 100 100"><path d="M25 72V32l14 22 11-17 11 17 14-22v40" stroke="white" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </div>
+  <h1>supermd</h1>
+  <p class="tagline">Markdown that gets out of the way.</p>
+  <p class="sub">A native, GPU-rendered editor for macOS. Syntax folds away as you write.<br>Plain CommonMark on disk — always.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download for macOS</a>
+    <a class="btn ghost" href="https://github.com/SuperJackfruitLabs/supermd">View on GitHub</a>
+  </div>
+  <p class="note">Free &amp; open source · Apache-2.0 · Apple&nbsp;Silicon · ~10&nbsp;MB</p>
+
+  <div class="mock" aria-hidden="true">
+    <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="tab">notes.md</span></div>
+    <div class="doc">
+      <h2>Monday planning</h2>
+      <p>Ship the beta to <strong>everyone</strong> and start collecting feedback.</p>
+      <p class="cursor-line">The release notes need <span class="raw">**</span><strong>one more pass</strong><span class="raw">**</span><span class="caret"></span> before we send them.</p>
+      <ul class="todo">
+        <li>Fix the sync conflict banner</li>
+        <li class="open">Record the demo video</li>
+      </ul>
+      <pre><span class="kw">fn</span> <span class="fn">ship</span>(build: Build) -&gt; Result&lt;()&gt; {
+    build.sign()?.notarize()?.release(<span class="str">"v0.0.1"</span>)
+}</pre>
+    </div>
+  </div>
+</header>
+
+<section class="features wrap">
+  <div class="grid">
+    <div class="card"><h3>Hybrid WYSIWYG</h3><p><span class="k">**Markers hide**</span> until your cursor touches them, then reveal in place. Headings, lists, quotes, links, checkboxes — styled live, raw on demand.</p></div>
+    <div class="card"><h3>Live tables &amp; images</h3><p>Tables render as real tables and images render inline while you edit. Touch one and it dissolves back to source.</p></div>
+    <div class="card"><h3>78 languages</h3><p>Tree-sitter highlighting in fenced blocks and standalone files. Code files get a real editor: gutter, auto-indent, monospace, full width.</p></div>
+    <div class="card"><h3>Your theme</h3><p>Six built-in themes with a live <span class="k">⌘T</span> picker — or drop your own TOML in <code>~/.supermd/themes</code>. Light and dark follow the system.</p></div>
+    <div class="card"><h3>Never lose a word</h3><p>Autosave with atomic writes, per-session backups, and external-change detection that never silently clobbers anything.</p></div>
+    <div class="card"><h3>Native &amp; fast</h3><p>Rust on GPUI — the GPU-accelerated framework behind Zed. Instant startup, 120&nbsp;fps scrolling, a ~10&nbsp;MB download.</p></div>
+  </div>
+</section>
+
+<section class="plain wrap">
+  <h2>Plain files, forever.</h2>
+  <p>No database, no lock-in, no export step. supermd edits the Markdown files already in your folders — and they stay exactly that.</p>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p><a href="https://github.com/SuperJackfruitLabs/supermd">GitHub</a> · <a href="https://github.com/SuperJackfruitLabs/supermd/releases">Releases</a> · <a href="https://github.com/SuperJackfruitLabs/supermd/issues">Issues</a></p>
+    <p style="margin-top:10px">© 2026 SuperJackfruitLabs · Apache-2.0</p>
+  </div>
+</footer>
+
+</body>
+</html>
