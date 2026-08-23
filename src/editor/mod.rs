@@ -66,6 +66,8 @@ pub struct Editor {
     provider: Provider,
     spans: Vec<StyleSpan>,
     line_kinds: Vec<LineKind>,
+    blocks: Vec<blocks::BlockInfo>,
+    projection: Vec<projection::Item>,
     path: PathBuf,
     pub save: SavePolicy,
     pub disk_mtime: Option<SystemTime>,
@@ -112,6 +114,8 @@ impl Editor {
             provider,
             spans: Vec::new(),
             line_kinds: Vec::new(),
+            blocks: Vec::new(),
+            projection: Vec::new(),
             path: path.to_path_buf(),
             save: SavePolicy::default(),
             disk_mtime: autosave::disk_mtime(path),
@@ -151,8 +155,38 @@ impl Editor {
             Provider::Plain => Vec::new(),
         };
         self.line_kinds = spans::line_kinds(&text, &self.spans);
+        self.blocks = match self.provider {
+            Provider::Markdown => blocks::blocks(&text),
+            _ => Vec::new(),
+        };
         self.layout_cache.clear();
-        self.list_state.reset(self.core.buffer.line_count());
+        self.projection = self.compute_projection();
+        self.list_state.reset(self.projection.len());
+    }
+
+    fn compute_projection(&self) -> Vec<projection::Item> {
+        let line_ranges: Vec<Range<usize>> = (0..self.core.buffer.line_count())
+            .map(|ix| self.core.buffer.line_range(ix))
+            .collect();
+        // Widgets are enabled kind-by-kind through Phase 4; currently: fences.
+        let enabled: Vec<blocks::BlockInfo> = self
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, blocks::BlockKind::Fence { .. }))
+            .cloned()
+            .collect();
+        projection::project(&line_ranges, &enabled, self.core.selection.range())
+    }
+
+    /// Recompute the projection for the current selection; reset the
+    /// list only when the item structure actually changed.
+    fn reproject(&mut self) {
+        let items = self.compute_projection();
+        if items != self.projection {
+            self.projection = items;
+            self.list_state.reset(self.projection.len());
+            self.reveal_cursor();
+        }
     }
 
     pub fn heading_lines(&self) -> Vec<(u8, String, usize)> {
@@ -176,8 +210,9 @@ impl Editor {
     }
 
     pub fn scroll_to_line(&mut self, ix: usize) {
+        let item = projection::item_of_line(&self.projection, ix);
         self.list_state
-            .scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+            .scroll_to(ListOffset { item_ix: item, offset_in_item: px(0.) });
     }
 
     // ── editing plumbing ───────────────────────────────────────────────
@@ -241,7 +276,8 @@ impl Editor {
 
     fn reveal_cursor(&mut self) {
         let line = self.core.buffer.line_of_byte(self.core.selection.head);
-        self.list_state.scroll_to_reveal_item(line);
+        let item = projection::item_of_line(&self.projection, line);
+        self.list_state.scroll_to_reveal_item(item);
     }
 
     fn move_head(&mut self, target: usize, extend: bool, cx: &mut Context<Self>) {
@@ -1165,6 +1201,43 @@ impl gpui::Element for LineElement {
     }
 }
 
+// Placeholder widgets — replaced by real table/image rendering in the
+// following tasks (unreachable while their block kinds are filtered out
+// of the projection).
+fn render_table(
+    editor: &Entity<Editor>,
+    item_ix: usize,
+    lines: Range<usize>,
+    t: &Theme,
+    _cx: &mut App,
+) -> gpui::AnyElement {
+    let _ = (editor, item_ix, lines);
+    div()
+        .px_3()
+        .py_2()
+        .text_color(t.fg_muted)
+        .child("[table]")
+        .into_any_element()
+}
+
+fn render_image(
+    editor: &Entity<Editor>,
+    item_ix: usize,
+    line: usize,
+    alt: &str,
+    dest: &str,
+    t: &Theme,
+    _cx: &mut App,
+) -> gpui::AnyElement {
+    let _ = (editor, item_ix, line, alt, dest);
+    div()
+        .px_3()
+        .py_2()
+        .text_color(t.fg_muted)
+        .child("[image]")
+        .into_any_element()
+}
+
 impl Focusable for Editor {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1173,6 +1246,7 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.reproject();
         let entity = cx.weak_entity();
         let t = theme(cx);
         div()
@@ -1221,54 +1295,88 @@ impl Render for Editor {
                         return div().into_any_element();
                     };
                     let t = theme(cx);
-                    let (line_range, text, runs, dl, font_size, line_height_px, is_code, line_count) = {
-                        let editor = editor_entity.read(cx);
-                        let (size_f, _, _, mult) = editor.line_typography(ix, &t);
-                        let (text, runs, dl) = editor.display_for_line(ix, &t);
-                        (
-                            editor.core.buffer.line_range(ix),
-                            text,
-                            runs,
-                            dl,
-                            px(size_f),
-                            px(size_f * mult),
-                            matches!(editor.line_kinds.get(ix), Some(LineKind::Code)),
-                            editor.core.buffer.line_count(),
-                        )
+                    let item = editor_entity.read(cx).projection.get(ix).cloned();
+                    let item_count = editor_entity.read(cx).projection.len();
+                    let column = |inner: gpui::AnyElement| {
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(760.))
+                                    .px(px(48.))
+                                    .when(ix == 0, |d| d.pt(px(40.)))
+                                    .when(ix + 1 == item_count, |d| d.pb(px(96.)))
+                                    .child(inner),
+                            )
+                            .into_any_element()
                     };
-                    let mouse_editor = editor_entity.clone();
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .justify_center()
-                        .child(
-                            div()
-                                .w_full()
-                                .max_w(px(760.))
-                                .px(px(48.))
-                                .when(ix == 0, |d| d.pt(px(40.)))
-                                .when(ix + 1 == line_count, |d| d.pb(px(96.)))
-                                .when(is_code, |d| d.bg(t.code_bg))
-                                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                                    mouse_editor.update(cx, |editor, cx| {
-                                        editor.on_line_mouse_down(ix, event, window, cx);
-                                    });
-                                })
-                                .child(LineElement {
-                                    editor: editor_entity.clone(),
-                                    line_ix: ix,
-                                    range: line_range,
+                    match item {
+                        Some(projection::Item::Line(line_ix)) => {
+                            let (line_range, text, runs, dl, font_size, line_height_px, is_code) = {
+                                let editor = editor_entity.read(cx);
+                                let (size_f, _, _, mult) = editor.line_typography(line_ix, &t);
+                                let (text, runs, dl) = editor.display_for_line(line_ix, &t);
+                                (
+                                    editor.core.buffer.line_range(line_ix),
                                     text,
                                     runs,
-                                    display: dl,
-                                    font_size,
-                                    line_height: line_height_px,
-                                    caret_color: t.accent,
-                                    selection_color: Hsla { a: 0.25, ..t.accent },
-                                }),
-                        )
-                        .into_any_element()
+                                    dl,
+                                    px(size_f),
+                                    px(size_f * mult),
+                                    matches!(editor.line_kinds.get(line_ix), Some(LineKind::Code)),
+                                )
+                            };
+                            let mouse_editor = editor_entity.clone();
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_row()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .max_w(px(760.))
+                                        .px(px(48.))
+                                        .when(ix == 0, |d| d.pt(px(40.)))
+                                        .when(ix + 1 == item_count, |d| d.pb(px(96.)))
+                                        .when(is_code, |d| d.bg(t.code_bg))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            move |event, window, cx| {
+                                                mouse_editor.update(cx, |editor, cx| {
+                                                    editor.on_line_mouse_down(
+                                                        line_ix, event, window, cx,
+                                                    );
+                                                });
+                                            },
+                                        )
+                                        .child(LineElement {
+                                            editor: editor_entity.clone(),
+                                            line_ix,
+                                            range: line_range,
+                                            text,
+                                            runs,
+                                            display: dl,
+                                            font_size,
+                                            line_height: line_height_px,
+                                            caret_color: t.accent,
+                                            selection_color: Hsla { a: 0.25, ..t.accent },
+                                        }),
+                                )
+                                .into_any_element()
+                        }
+                        Some(projection::Item::Table { lines }) => column(
+                            render_table(&editor_entity, ix, lines, &t, cx),
+                        ),
+                        Some(projection::Item::Image { line, alt, dest }) => column(
+                            render_image(&editor_entity, ix, line, &alt, &dest, &t, cx),
+                        ),
+                        None => div().into_any_element(),
+                    }
                 })
                 .size_full(),
             )
