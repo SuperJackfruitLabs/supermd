@@ -104,6 +104,12 @@ fn main() {
             KeyBinding::new("cmd-x", editor::Cut, Some("Editor")),
             KeyBinding::new("cmd-v", editor::Paste, Some("Editor")),
             KeyBinding::new("cmd-s", editor::SaveNow, Some("Editor")),
+            KeyBinding::new("cmd-f", editor::OpenFind, Some("Editor")),
+            KeyBinding::new("cmd-g", editor::FindNext, Some("Editor")),
+            KeyBinding::new("cmd-shift-g", editor::FindPrev, Some("Editor")),
+            KeyBinding::new("enter", editor::FindNext, Some("FindBar")),
+            KeyBinding::new("shift-enter", editor::FindPrev, Some("FindBar")),
+            KeyBinding::new("escape", editor::CloseFind, Some("FindBar")),
             // Finder overlay
             KeyBinding::new("up", finder::FinderUp, Some("Finder")),
             KeyBinding::new("down", finder::FinderDown, Some("Finder")),

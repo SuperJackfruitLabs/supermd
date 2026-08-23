@@ -41,9 +41,17 @@ actions!(
         MoveLeft, MoveRight, MoveUp, MoveDown, SelectLeft, SelectRight, SelectUp, SelectDown,
         MoveWordLeft, MoveWordRight, SelectWordLeft, SelectWordRight, LineStart, LineEnd,
         SelectLineStart, SelectLineEnd, DocStart, DocEnd, PageUp, PageDown, Backspace, Delete,
-        DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow
+        DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow,
+        OpenFind, FindNext, FindPrev, CloseFind
     ]
 );
+
+struct FindState {
+    input: Entity<crate::input::TextInput>,
+    matches: Vec<Range<usize>>,
+    active: usize,
+    _watch: gpui::Subscription,
+}
 
 const PAGE_LINES: usize = 40;
 
@@ -79,6 +87,7 @@ pub struct Editor {
     dragging: bool,
     preferred_x: Option<Pixels>,
     save_task: Option<gpui::Task<()>>,
+    find: Option<FindState>,
 }
 
 /// One backup registry per app session, shared by all editors.
@@ -127,6 +136,7 @@ impl Editor {
             dragging: false,
             preferred_x: None,
             save_task: None,
+            find: None,
         };
         editor.restyle(langs);
         editor
@@ -227,6 +237,14 @@ impl Editor {
             .ok();
         }));
         self.preferred_x = None;
+        if self.find.is_some() {
+            let query = self
+                .find
+                .as_ref()
+                .map(|s| s.input.read(cx).content.to_string())
+                .unwrap_or_default();
+            self.recompute_matches(&query);
+        }
         self.reveal_cursor();
         cx.notify();
     }
@@ -470,6 +488,75 @@ impl Editor {
 
     fn save_now(&mut self, _: &SaveNow, _: &mut Window, cx: &mut Context<Self>) {
         self.flush(cx);
+    }
+
+    // ── find in file ───────────────────────────────────────────────────
+
+    fn recompute_matches(&mut self, query: &str) {
+        let Some(state) = &mut self.find else {
+            return;
+        };
+        state.matches = find::find_matches(&self.core.buffer.text(), query);
+        let head = self.core.selection.head;
+        state.active = state
+            .matches
+            .iter()
+            .position(|m| m.start >= head)
+            .unwrap_or(0);
+    }
+
+    fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = &self.find {
+            window.focus(&state.input.read(cx).focus_handle);
+            return;
+        }
+        let input = cx.new(|cx| crate::input::TextInput::new("Find…", cx));
+        let watch = cx.observe(&input, |this: &mut Editor, input, cx| {
+            let query = input.read(cx).content.to_string();
+            this.recompute_matches(&query);
+            cx.notify();
+        });
+        window.focus(&input.read(cx).focus_handle);
+        self.find = Some(FindState { input, matches: Vec::new(), active: 0, _watch: watch });
+        cx.notify();
+    }
+
+    fn cycle_find(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let target = {
+            let Some(state) = &mut self.find else {
+                return;
+            };
+            if state.matches.is_empty() {
+                return;
+            }
+            let len = state.matches.len();
+            state.active = if forward {
+                (state.active + 1) % len
+            } else {
+                (state.active + len - 1) % len
+            };
+            state.matches[state.active].clone()
+        };
+        self.core.selection = Selection { anchor: target.start, head: target.end };
+        self.core.break_undo_group();
+        self.preferred_x = None;
+        self.reveal_cursor();
+        cx.notify();
+    }
+
+    fn find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_find(true, cx);
+    }
+
+    fn find_prev(&mut self, _: &FindPrev, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_find(false, cx);
+    }
+
+    fn close_find(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.take().is_some() {
+            window.focus(&self.focus_handle);
+            cx.notify();
+        }
     }
 
     // ── geometry: vertical movement + mouse ────────────────────────────
@@ -775,6 +862,20 @@ impl Editor {
                         {
                             a.italic = true;
                         }
+                    }
+                }
+            }
+        }
+
+        // Find matches get a background highlight; the active one stronger.
+        if let Some(state) = &self.find {
+            for (mi, m) in state.matches.iter().enumerate() {
+                let start = m.start.max(range.start);
+                let end = m.end.min(range.end);
+                if start < end {
+                    let bg = if mi == state.active { t.find_active_bg } else { t.find_match_bg };
+                    for a in &mut attrs[start - range.start..end - range.start] {
+                        a.bg = Some(bg);
                     }
                 }
             }
@@ -1391,6 +1492,32 @@ impl Render for Editor {
         self.reproject();
         let entity = cx.weak_entity();
         let t = theme(cx);
+
+        let find_bar = self.find.as_ref().map(|state| {
+            let total = state.matches.len();
+            let current = if total == 0 { 0 } else { state.active + 1 };
+            div()
+                .h(px(38.))
+                .w_full()
+                .flex_none()
+                .bg(t.panel_bg)
+                .border_b_1()
+                .border_color(t.border)
+                .key_context("FindBar")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .child(div().flex_1().child(state.input.clone()))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(t.fg_muted)
+                        .child(SharedString::from(format!("{current}/{total}"))),
+                )
+        });
+
         div()
             .size_full()
             .bg(t.bg)
@@ -1428,10 +1555,17 @@ impl Render for Editor {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::save_now))
+            .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_prev))
+            .on_action(cx.listener(Self::close_find))
             .on_mouse_move(cx.listener(Self::on_root_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
-            .child(
+            .flex()
+            .flex_col()
+            .children(find_bar)
+            .child(div().flex_1().min_h_0().child(
                 list(self.list_state.clone(), move |ix, _window, cx| {
                     let Some(editor_entity) = entity.upgrade() else {
                         return div().into_any_element();
@@ -1521,6 +1655,6 @@ impl Render for Editor {
                     }
                 })
                 .size_full(),
-            )
+            ))
     }
 }

@@ -35,6 +35,8 @@ pub struct Theme {
     pub panel_bg: Hsla,
     pub hover_bg: Hsla,
     pub selected_bg: Hsla,
+    pub find_match_bg: Hsla,
+    pub find_active_bg: Hsla,
 
     pub syntax: SyntaxColors,
 
@@ -65,6 +67,8 @@ impl Theme {
             panel_bg: rgb(0xf7f6f4).into(),
             hover_bg: rgb(0xedecea).into(),
             selected_bg: rgb(0xe6e4e0).into(),
+            find_match_bg: rgb(0xffe9a3).into(),
+            find_active_bg: rgb(0xffc94d).into(),
 
             syntax: SyntaxColors {
                 keyword: rgb(0xa626a4).into(),
@@ -106,6 +110,8 @@ impl Theme {
             panel_bg: rgb(0x262624).into(),
             hover_bg: rgb(0x30302e).into(),
             selected_bg: rgb(0x3a3a37).into(),
+            find_match_bg: rgb(0x51431a).into(),
+            find_active_bg: rgb(0x7a6220).into(),
 
             syntax: SyntaxColors {
                 keyword: rgb(0xc678dd).into(),
