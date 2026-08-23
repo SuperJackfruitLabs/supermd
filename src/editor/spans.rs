@@ -38,7 +38,10 @@ fn markdown_options() -> Options {
 
 pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
     let mut spans = Vec::new();
-    let mut fence_body: Option<Range<usize>> = None;
+
+    for (body, _) in fence_infos(source) {
+        spans.push(StyleSpan { range: body, kind: StyleKind::FenceContent });
+    }
 
     for (event, range) in Parser::new_ext(source, markdown_options()).into_offset_iter() {
         match event {
@@ -78,22 +81,6 @@ pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
                     }
                 }
             }
-            Event::Start(Tag::CodeBlock(_)) => fence_body = Some(range.start..range.start),
-            Event::Text(_) if fence_body.is_some() => {
-                let body = fence_body.as_mut().unwrap();
-                if body.is_empty() {
-                    *body = range;
-                } else {
-                    body.end = range.end;
-                }
-            }
-            Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
-                if let Some(body) = fence_body.take() {
-                    if !body.is_empty() {
-                        spans.push(StyleSpan { range: body, kind: StyleKind::FenceContent });
-                    }
-                }
-            }
             Event::Rule => spans.push(StyleSpan { range, kind: StyleKind::Rule }),
             _ => {}
         }
@@ -129,6 +116,114 @@ fn list_marker_len(item: &str) -> Option<usize> {
         i += 1;
     }
     Some(i)
+}
+
+use crate::highlight::Languages;
+
+pub const MAX_STYLED_BYTES: usize = 1_000_000;
+
+pub fn code_spans(source: &str, lang: &str, langs: &Languages) -> Vec<StyleSpan> {
+    if source.len() > MAX_STYLED_BYTES {
+        return Vec::new();
+    }
+    langs
+        .highlight(lang, source)
+        .into_iter()
+        .map(|(range, capture)| StyleSpan { range, kind: StyleKind::Syntax(capture) })
+        .collect()
+}
+
+pub fn markdown_spans_highlighted(source: &str, langs: &Languages) -> Vec<StyleSpan> {
+    if source.len() > MAX_STYLED_BYTES {
+        return Vec::new();
+    }
+    let mut spans = markdown_spans(source);
+    for (body, lang) in fence_infos(source) {
+        if let Some(lang) = lang {
+            for (range, capture) in langs.highlight(&lang, &source[body.clone()]) {
+                spans.push(StyleSpan {
+                    range: body.start + range.start..body.start + range.end,
+                    kind: StyleKind::Syntax(capture),
+                });
+            }
+        }
+    }
+    spans.sort_by_key(|s| (s.range.start, s.range.end));
+    spans
+}
+
+/// (body byte range, language) for every fenced/indented code block.
+fn fence_infos(source: &str) -> Vec<(Range<usize>, Option<String>)> {
+    use pulldown_cmark::{CodeBlockKind, TagEnd};
+    let mut out = Vec::new();
+    let mut current: Option<(Range<usize>, Option<String>)> = None;
+    for (event, range) in Parser::new_ext(source, markdown_options()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let lang = match kind {
+                    CodeBlockKind::Fenced(info) if !info.is_empty() => {
+                        Some(info.split_whitespace().next().unwrap_or("").to_string())
+                    }
+                    _ => None,
+                };
+                current = Some((range.start..range.start, lang));
+            }
+            Event::Text(_) => {
+                if let Some((body, _)) = current.as_mut() {
+                    if body.is_empty() {
+                        *body = range;
+                    } else {
+                        body.end = range.end;
+                    }
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(entry) = current.take() {
+                    if !entry.0.is_empty() {
+                        out.push(entry);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    Body,
+    Heading(u8),
+    Code,
+}
+
+pub fn line_kinds(source: &str, spans: &[StyleSpan]) -> Vec<LineKind> {
+    let mut kinds = Vec::new();
+    let mut offset = 0;
+    for line in source.split('\n') {
+        let range = offset..offset + line.len();
+        let mut kind = LineKind::Body;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            kind = LineKind::Code;
+        }
+        // A span intersects this line if it overlaps [start, end); empty
+        // lines count as one position wide so spans covering them match.
+        let effective_end = range.end.max(range.start + 1);
+        for span in spans {
+            if span.range.end <= range.start || span.range.start >= effective_end {
+                continue;
+            }
+            match span.kind {
+                StyleKind::Heading(n) => kind = LineKind::Heading(n),
+                StyleKind::FenceContent => kind = LineKind::Code,
+                _ => {}
+            }
+        }
+        kinds.push(kind);
+        offset = range.end + 1;
+    }
+    kinds
 }
 
 /// (byte offset, line) pairs over a str, offsets relative to the input.
@@ -226,5 +321,59 @@ mod tests {
     fn rule_span() {
         let src = "a\n\n---\n\nb\n";
         assert_eq!(spans_of_kind(src, |k| *k == StyleKind::Rule), vec![3..7]);
+    }
+
+    use crate::highlight::Languages;
+
+    #[test]
+    fn code_spans_highlight_rust() {
+        let langs = Languages::new();
+        let spans = code_spans("fn main() {}\n", "rust", &langs);
+        // "fn" must be captured as something (keyword) => a Syntax span at 0..2
+        assert!(spans
+            .iter()
+            .any(|s| s.range == (0..2) && matches!(s.kind, StyleKind::Syntax(_))));
+    }
+
+    #[test]
+    fn code_spans_unknown_language_is_empty() {
+        let langs = Languages::new();
+        assert!(code_spans("hello\n", "klingon", &langs).is_empty());
+    }
+
+    #[test]
+    fn fence_bodies_get_syntax_spans_at_absolute_offsets() {
+        let langs = Languages::new();
+        let src = "pre\n\n```rust\nfn main() {}\n```\n";
+        // fence body "fn main() {}\n" starts at byte 13
+        let spans = markdown_spans_highlighted(src, &langs);
+        assert!(spans
+            .iter()
+            .any(|s| s.range == (13..15) && matches!(s.kind, StyleKind::Syntax(_))));
+        // structural spans still present
+        assert!(spans.iter().any(|s| s.kind == StyleKind::FenceContent));
+    }
+
+    #[test]
+    fn oversized_source_returns_no_spans() {
+        let langs = Languages::new();
+        let big = "x".repeat(MAX_STYLED_BYTES + 1);
+        assert!(markdown_spans_highlighted(&big, &langs).is_empty());
+        assert!(code_spans(&big, "rust", &langs).is_empty());
+    }
+
+    #[test]
+    fn line_kinds_classify_heading_code_body() {
+        let src = "# Title\nbody\n```rust\nlet x = 1;\n```\ntail";
+        let langs = Languages::new();
+        let spans = markdown_spans_highlighted(src, &langs);
+        let kinds = line_kinds(src, &spans);
+        assert_eq!(kinds.len(), 6);
+        assert_eq!(kinds[0], LineKind::Heading(1));
+        assert_eq!(kinds[1], LineKind::Body);
+        assert_eq!(kinds[2], LineKind::Code); // ``` delimiter line renders mono
+        assert_eq!(kinds[3], LineKind::Code);
+        assert_eq!(kinds[4], LineKind::Code);
+        assert_eq!(kinds[5], LineKind::Body);
     }
 }
