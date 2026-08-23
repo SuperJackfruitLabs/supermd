@@ -53,6 +53,10 @@ tree-sitter-d = "0.8"
 [dev-dependencies]
 tempfile = "3"
 
+[profile.release]
+strip = true
+lto = "thin"
+
 # gpui is heavy; keep debug builds usable
 [profile.dev]
 opt-level = 1

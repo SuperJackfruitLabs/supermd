@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build macOS app + DMG
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test
+      - name: Bundle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash scripts/bundle_macos.sh "$VERSION"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/supermd-*.dmg \
+            --title "supermd $GITHUB_REF_NAME" \
+            --generate-notes
