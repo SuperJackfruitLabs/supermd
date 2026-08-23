@@ -89,6 +89,7 @@ pub struct Editor {
     save_task: Option<gpui::Task<()>>,
     find: Option<FindState>,
     scrollbar_dragging: bool,
+    scroll_anim: Option<gpui::Task<()>>,
 }
 
 /// One backup registry per app session, shared by all editors.
@@ -147,6 +148,7 @@ impl Editor {
             save_task: None,
             find: None,
             scrollbar_dragging: false,
+            scroll_anim: None,
         };
         editor.restyle(langs);
         editor
@@ -223,10 +225,43 @@ impl Editor {
             .collect()
     }
 
-    pub fn scroll_to_line(&mut self, ix: usize) {
+    pub fn scroll_to_line(&mut self, ix: usize, cx: &mut Context<Self>) {
         let item = projection::item_of_line(&self.projection, ix);
-        self.list_state
-            .scroll_to(ListOffset { item_ix: item, offset_in_item: px(0.) });
+        self.animate_scroll_to_item(item, cx);
+    }
+
+    /// Eased scroll in item space (~240 ms); short hops jump directly.
+    fn animate_scroll_to_item(&mut self, target: usize, cx: &mut Context<Self>) {
+        let start = self.list_state.logical_scroll_top().item_ix as f32;
+        let end = target as f32;
+        if (end - start).abs() < 2.0 {
+            self.list_state
+                .scroll_to(ListOffset { item_ix: target, offset_in_item: px(0.) });
+            cx.notify();
+            return;
+        }
+        self.scroll_anim = Some(cx.spawn(async move |this, cx| {
+            const FRAMES: u32 = 18;
+            for frame in 1..=FRAMES {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(12))
+                    .await;
+                let t = frame as f32 / FRAMES as f32;
+                let eased = 1.0 - (1.0 - t).powi(3);
+                let ix = (start + (end - start) * eased).round().max(0.) as usize;
+                if this
+                    .update(cx, |editor, cx| {
+                        editor
+                            .list_state
+                            .scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
     }
 
     // ── editing plumbing ───────────────────────────────────────────────

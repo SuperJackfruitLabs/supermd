@@ -685,6 +685,7 @@ impl Workspace {
             div()
                 .absolute()
                 .inset_0()
+                .occlude()
                 .bg(gpui::Hsla { h: 0., s: 0., l: 0., a: 0.35 })
                 .flex()
                 .items_center()
@@ -1029,14 +1030,12 @@ impl Workspace {
                                 .on_click(move |_: &ClickEvent, _window, cx| match &target {
                                     OutlineTarget::Reader(reader) => {
                                         reader.update(cx, |reader, cx| {
-                                            reader.scroll_to_block(target_ix);
-                                            cx.notify();
+                                            reader.scroll_to_block(target_ix, cx);
                                         });
                                     }
                                     OutlineTarget::Editor(editor) => {
                                         editor.update(cx, |editor, cx| {
-                                            editor.scroll_to_line(target_ix);
-                                            cx.notify();
+                                            editor.scroll_to_line(target_ix, cx);
                                         });
                                     }
                                 }),
@@ -1169,6 +1168,7 @@ impl Render for Workspace {
                     div()
                         .absolute()
                         .inset_0()
+                        .occlude()
                         .flex()
                         .flex_col()
                         .items_center()
