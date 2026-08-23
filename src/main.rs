@@ -29,10 +29,31 @@ use workspace::{
 
 actions!(app, [Quit]);
 
+/// Serves the embedded Seti SVGs to gpui's svg renderer.
+struct Assets;
+
+impl gpui::AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(name) = path
+            .strip_prefix("icons/seti/")
+            .and_then(|p| p.strip_suffix(".svg"))
+        {
+            if let Some((_, bytes)) = seti::ICONS.iter().find(|(n, _)| *n == name) {
+                return Ok(Some(std::borrow::Cow::Borrowed(*bytes)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn list(&self, _path: &str) -> anyhow::Result<Vec<gpui::SharedString>> {
+        Ok(Vec::new())
+    }
+}
+
 fn main() {
     let arg = std::env::args().nth(1).map(PathBuf::from);
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(Assets).run(move |cx: &mut App| {
         cx.set_global(ActiveTheme(Arc::new(Theme::light())));
         cx.set_global(highlight::SyntaxLanguages(Arc::new(
             highlight::Languages::new(),

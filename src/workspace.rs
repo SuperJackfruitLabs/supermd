@@ -10,6 +10,8 @@ use gpui::{
 
 use crate::editor::Editor;
 use crate::files::FileTree;
+use crate::seti::{self, SetiColor};
+use crate::theme::Theme;
 use crate::finder::{Finder, FinderEvent};
 use crate::highlight::languages;
 use crate::reader::Reader;
@@ -53,6 +55,24 @@ impl Tab {
             Tab::Reader(reader) => reader.read(cx).path.clone(),
             Tab::Editor { editor, .. } => Some(editor.read(cx).path().to_path_buf()),
         }
+    }
+}
+
+/// Seti's 12 palette variables mapped onto our theme so icons read well
+/// in both appearances.
+fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
+    let s = &t.syntax;
+    match color {
+        SetiColor::Blue => s.function,
+        SetiColor::Green => s.string,
+        SetiColor::Grey | SetiColor::Ignore => t.fg_muted,
+        SetiColor::GreyLight => t.fg,
+        SetiColor::Orange | SetiColor::SetiPrimary => s.constant,
+        SetiColor::Pink => s.property,
+        SetiColor::Purple => s.keyword,
+        SetiColor::Red => t.accent,
+        SetiColor::White => t.fg,
+        SetiColor::Yellow => s.kind,
     }
 }
 
@@ -474,6 +494,19 @@ impl Workspace {
                             .text_color(t.fg_muted)
                             .child(if expanded { "▼" } else { "▶" }),
                     )
+                })
+                .child({
+                    let (icon, tint) = if is_dir {
+                        ("folder", t.fg_muted)
+                    } else {
+                        let (icon, color) = seti::icon_for(&entry.name);
+                        (icon, seti_tint(color, &t))
+                    };
+                    gpui::svg()
+                        .path(SharedString::from(format!("icons/seti/{icon}.svg")))
+                        .size(px(15.))
+                        .flex_none()
+                        .text_color(tint)
                 })
                 .child(
                     div()
