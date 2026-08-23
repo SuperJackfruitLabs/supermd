@@ -80,6 +80,8 @@ fn main() {
             KeyBinding::new("cmd-e", TogglePreview, None),
             KeyBinding::new("cmd-shift-f", ToggleFocusMode, None),
             KeyBinding::new("cmd-1", workspace::FocusSidebar, None),
+            KeyBinding::new("cmd-/", workspace::ToggleShortcuts, None),
+            KeyBinding::new("escape", workspace::ToggleShortcuts, Some("Shortcuts")),
             // Sidebar navigation (while the sidebar is focused)
             KeyBinding::new("up", workspace::SidebarUp, Some("Sidebar")),
             KeyBinding::new("down", workspace::SidebarDown, Some("Sidebar")),
@@ -181,6 +183,13 @@ fn main() {
                     MenuItem::separator(),
                     MenuItem::action("Go to File…", ToggleFinder),
                 ],
+            },
+            Menu {
+                name: "Help".into(),
+                items: vec![MenuItem::action(
+                    "Keyboard Shortcuts",
+                    workspace::ToggleShortcuts,
+                )],
             },
         ]);
 

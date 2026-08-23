@@ -36,8 +36,55 @@ actions!(
         SidebarExpand,
         SidebarCollapse,
         SidebarOpen,
+        ToggleShortcuts,
     ]
 );
+
+/// Shown by the ⌘/ dialog. Kept adjacent to the actual bindings in
+/// main.rs — update both together.
+const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "General",
+        &[
+            ("⌘ N", "New file"),
+            ("⌘ O", "Open file or folder"),
+            ("⌘ P", "Go to file"),
+            ("⌘ F", "Find in file"),
+            ("⌘ E", "Toggle edit / preview"),
+            ("⌘ ⇧ F", "Focus mode"),
+            ("⌘ B", "Toggle sidebar"),
+            ("⌘ ⇧ O", "Toggle outline"),
+            ("⌘ 1", "Focus sidebar"),
+            ("⌘ W", "Close tab"),
+            ("⌃ Tab / ⌘ ⇧ ]", "Next tab"),
+            ("⌘ ⇧ [", "Previous tab"),
+            ("⌘ S", "Save now"),
+            ("⌘ /", "This dialog"),
+        ],
+    ),
+    (
+        "Editor",
+        &[
+            ("⌘ Z / ⌘ ⇧ Z", "Undo / redo"),
+            ("⌥ ← →", "Move by word"),
+            ("⌘ ← →", "Line start / end"),
+            ("⌘ ↑ ↓", "Document start / end"),
+            ("⌥ ⌫", "Delete word"),
+            ("⌘ G / ⌘ ⇧ G", "Next / previous match"),
+            ("Click ✓ / ○", "Toggle task checkbox"),
+            ("Click table / image", "Edit its source"),
+        ],
+    ),
+    (
+        "Sidebar",
+        &[
+            ("↑ ↓", "Move selection"),
+            ("→", "Expand folder"),
+            ("←", "Collapse / to parent"),
+            ("⏎", "Open"),
+        ],
+    ),
+];
 
 pub enum Tab {
     /// Read-only document (Welcome, and anything not editable).
@@ -105,6 +152,8 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
     sidebar_selected: usize,
+    shortcuts_focus: FocusHandle,
+    show_shortcuts: bool,
     last_title: String,
     _watcher: Option<notify::RecommendedWatcher>,
 }
@@ -147,6 +196,8 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
+            shortcuts_focus: cx.focus_handle(),
+            show_shortcuts: false,
             last_title: String::new(),
             _watcher: None,
         }
@@ -570,6 +621,113 @@ impl Workspace {
         }
     }
 
+    fn toggle_shortcuts(
+        &mut self,
+        _: &ToggleShortcuts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_shortcuts = !self.show_shortcuts;
+        if self.show_shortcuts {
+            window.focus(&self.shortcuts_focus);
+        } else {
+            self.focus_active(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn render_shortcuts(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.show_shortcuts {
+            return None;
+        }
+        let t = theme(cx);
+        let groups = SHORTCUTS.iter().map(|(title, rows)| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(t.fg_muted)
+                        .pb_1()
+                        .child(SharedString::from(title.to_uppercase())),
+                )
+                .children(rows.iter().map(|(keys, desc)| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(140.))
+                                .flex_none()
+                                .font_family(t.mono_family.clone())
+                                .text_size(px(11.))
+                                .text_color(t.fg_strong)
+                                .px_2()
+                                .py(px(2.))
+                                .bg(t.code_bg)
+                                .rounded_md()
+                                .child(SharedString::from(*keys)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(t.ui_size))
+                                .text_color(t.fg)
+                                .child(SharedString::from(*desc)),
+                        )
+                }))
+        });
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(gpui::Hsla { h: 0., s: 0., l: 0., a: 0.35 })
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.toggle_shortcuts(&ToggleShortcuts, window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .key_context("Shortcuts")
+                        .track_focus(&self.shortcuts_focus)
+                        .on_action(cx.listener(Self::toggle_shortcuts))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .w(px(520.))
+                        .max_h(px(620.))
+                        .id("shortcuts-panel")
+                        .overflow_y_scroll()
+                        .bg(t.panel_bg)
+                        .border_1()
+                        .border_color(t.border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .text_color(t.fg_strong)
+                                .child("Keyboard Shortcuts"),
+                        )
+                        .children(groups),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn toggle_focus_mode(
         &mut self,
         _: &ToggleFocusMode,
@@ -990,6 +1148,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::focus_sidebar))
+            .on_action(cx.listener(Self::toggle_shortcuts))
             .flex()
             .flex_row()
             .children(sidebar)
@@ -1003,6 +1162,7 @@ impl Render for Workspace {
                     .child(div().flex_1().min_h_0().child(content)),
             )
             .children(outline)
+            .children(self.render_shortcuts(cx))
             .when_some(self.finder.as_ref(), |root, (finder, _)| {
                 let finder = finder.clone();
                 root.child(
