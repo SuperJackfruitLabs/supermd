@@ -1470,11 +1470,11 @@ fn render_table(
             row = row.child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .px_3()
                     .py_2()
                     .text_size(px(t.body_size - 1.))
                     .line_height(relative(1.45))
-                    .overflow_hidden()
                     .child(SharedString::from(cell)),
             );
         }

@@ -228,6 +228,8 @@ fn quote(blocks: &[Block], t: &Theme) -> AnyElement {
         .child(div().w(px(3.)).rounded_full().bg(t.accent).flex_none())
         .child(
             div()
+                .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -271,6 +273,7 @@ fn list(start: Option<u64>, items: &[ListItem], t: &Theme) -> AnyElement {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -292,6 +295,7 @@ fn table(head: &[InlineText], rows: &[Vec<InlineText>], t: &Theme) -> AnyElement
             .children(cells.iter().map(|cell| {
                 div()
                     .flex_1()
+                    .min_w_0()
                     .px_3()
                     .py_2()
                     .text_size(px(t.body_size - 1.))
