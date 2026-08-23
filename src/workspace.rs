@@ -29,6 +29,7 @@ actions!(
         ToggleOutline,
         ToggleFinder,
         TogglePreview,
+        ToggleFocusMode,
     ]
 );
 
@@ -92,6 +93,8 @@ pub struct Workspace {
     active: usize,
     show_sidebar: bool,
     show_outline: bool,
+    focus_mode: bool,
+    pre_focus_panels: (bool, bool),
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
     focus_handle: FocusHandle,
     last_title: String,
@@ -130,6 +133,8 @@ impl Workspace {
             active: 0,
             show_sidebar: true,
             show_outline: true,
+            focus_mode: false,
+            pre_focus_panels: (true, true),
             finder: None,
             focus_handle: cx.focus_handle(),
             last_title: String::new(),
@@ -465,6 +470,25 @@ impl Workspace {
         cx.notify();
     }
 
+    fn toggle_focus_mode(
+        &mut self,
+        _: &ToggleFocusMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focus_mode {
+            self.focus_mode = false;
+            (self.show_sidebar, self.show_outline) = self.pre_focus_panels;
+        } else {
+            self.pre_focus_panels = (self.show_sidebar, self.show_outline);
+            self.focus_mode = true;
+            self.show_sidebar = false;
+            self.show_outline = false;
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
         self.show_sidebar = !self.show_sidebar;
         cx.notify();
@@ -586,7 +610,7 @@ impl Workspace {
     }
 
     fn render_tab_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.tabs.is_empty() {
+        if self.tabs.is_empty() || self.focus_mode {
             return None;
         }
         let t = theme(cx);
@@ -852,6 +876,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::toggle_finder))
             .on_action(cx.listener(Self::toggle_preview))
+            .on_action(cx.listener(Self::toggle_focus_mode))
             .flex()
             .flex_row()
             .children(sidebar)

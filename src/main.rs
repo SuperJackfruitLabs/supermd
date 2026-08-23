@@ -23,8 +23,8 @@ use gpui::{
 
 use theme::{apply_system_appearance, ActiveTheme, Theme};
 use workspace::{
-    CloseTab, NewFile, NextTab, OpenDialog, PrevTab, ToggleFinder, ToggleOutline, TogglePreview,
-    ToggleSidebar, Workspace,
+    CloseTab, NewFile, NextTab, OpenDialog, PrevTab, ToggleFinder, ToggleFocusMode, ToggleOutline,
+    TogglePreview, ToggleSidebar, Workspace,
 };
 
 actions!(app, [Quit]);
@@ -78,6 +78,7 @@ fn main() {
             KeyBinding::new("cmd-shift-o", ToggleOutline, None),
             KeyBinding::new("cmd-p", ToggleFinder, None),
             KeyBinding::new("cmd-e", TogglePreview, None),
+            KeyBinding::new("cmd-shift-f", ToggleFocusMode, None),
             // Text input (any focused TextInput)
             KeyBinding::new("backspace", input::Backspace, Some("TextInput")),
             KeyBinding::new("delete", input::Delete, Some("TextInput")),
@@ -166,6 +167,7 @@ fn main() {
                 name: "View".into(),
                 items: vec![
                     MenuItem::action("Toggle Edit/Preview", TogglePreview),
+                    MenuItem::action("Focus Mode", ToggleFocusMode),
                     MenuItem::separator(),
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),
                     MenuItem::action("Toggle Outline", ToggleOutline),
