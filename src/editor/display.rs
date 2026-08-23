@@ -160,6 +160,36 @@ fn collect_directives(
                     }
                 }
             }
+            StyleKind::Heading(_) => {
+                if start_on_line {
+                    let l = span.range.start - line_start;
+                    let hashes = line[l..].bytes().take_while(|b| *b == b'#').count();
+                    if (1..=6).contains(&hashes) {
+                        let mut n = hashes;
+                        if line.as_bytes().get(l + hashes).copied() == Some(b' ') {
+                            n += 1;
+                        }
+                        out.push((
+                            span.range.start..span.range.start + n,
+                            Action::Hide(Bias::Right),
+                        ));
+                    }
+                }
+            }
+            StyleKind::ListMarker => {
+                if start_on_line && end_on_line {
+                    let l = span.range.start - line_start;
+                    if matches!(line.as_bytes().get(l), Some(b'-' | b'*' | b'+')) {
+                        out.push((span.range.clone(), Action::Replace("• ")));
+                    }
+                    // Ordered markers (digits) are never transformed.
+                }
+            }
+            StyleKind::QuoteMarker => {
+                if start_on_line && end_on_line {
+                    out.push((span.range.clone(), Action::Replace("▍")));
+                }
+            }
             _ => {}
         }
     }
@@ -401,6 +431,45 @@ mod tests {
         // And line 1: only the leading delimiter is local.
         let dl = display_line("**bold", 84, &[span(84..100, StyleKind::Strong)], 0..0);
         assert_eq!(dl.text, "bold");
+    }
+
+    #[test]
+    fn bullet_replacement_and_mapping() {
+        let dl = display_line("- item", 0, &[span(0..2, StyleKind::ListMarker)], 100..100);
+        assert_eq!(dl.text, "• item"); // "• " is 4 bytes
+        assert_eq!(src_to_disp(&dl, 0), 0);
+        assert_eq!(src_to_disp(&dl, 1), 4); // interior of replacement -> disp end
+        assert_eq!(src_to_disp(&dl, 2), 4);
+        assert_eq!(disp_to_src(&dl, 0), 0);
+        assert_eq!(disp_to_src(&dl, 2), 2); // inside bullet glyph -> content start
+        assert_eq!(disp_to_src(&dl, 4), 2);
+    }
+
+    #[test]
+    fn bullet_reveals_with_cursor_in_marker() {
+        let dl = display_line("- item", 0, &[span(0..2, StyleKind::ListMarker)], 1..1);
+        assert_eq!(dl.text, "- item");
+    }
+
+    #[test]
+    fn ordered_marker_never_transforms() {
+        let dl = display_line("1. item", 0, &[span(0..3, StyleKind::ListMarker)], 100..100);
+        assert_eq!(dl.text, "1. item");
+    }
+
+    #[test]
+    fn quote_marker_becomes_bar() {
+        let dl = display_line("> quoted", 0, &[span(0..1, StyleKind::QuoteMarker)], 100..100);
+        assert_eq!(dl.text, "▍ quoted");
+    }
+
+    #[test]
+    fn heading_hashes_hide_when_cursor_off_line() {
+        let dl = display_line("## Title", 0, &[span(0..8, StyleKind::Heading(2))], 100..100);
+        assert_eq!(dl.text, "Title");
+        // Cursor anywhere on the line (span covers it) reveals.
+        let dl = display_line("## Title", 0, &[span(0..8, StyleKind::Heading(2))], 5..5);
+        assert_eq!(dl.text, "## Title");
     }
 
     #[test]
