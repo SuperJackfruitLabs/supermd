@@ -148,6 +148,12 @@ impl EditorCore {
         self.apply(self.selection.range(), text, now);
     }
 
+    /// Apply an arbitrary replacement through the normal history path.
+    /// The cursor lands at the end of the inserted text.
+    pub fn replace_range(&mut self, range: Range<usize>, text: &str, now: Instant) {
+        self.apply(range, text, now);
+    }
+
     pub fn backspace(&mut self, now: Instant) {
         let range = if self.selection.is_cursor() {
             movement::prev_grapheme(&self.buffer, self.selection.head)..self.selection.head
@@ -308,6 +314,17 @@ mod tests {
         ed.insert("b", start + Duration::from_millis(50));
         ed.undo();
         assert_eq!(ed.buffer.text(), "xxa");
+    }
+
+    #[test]
+    fn replace_range_edits_through_history() {
+        let mut ed = EditorCore::new("- [x] done");
+        ed.set_cursor(8);
+        ed.replace_range(2..5, "[ ]", t0());
+        assert_eq!(ed.buffer.text(), "- [ ] done");
+        assert_eq!(ed.selection, Selection::cursor(5));
+        assert!(ed.undo());
+        assert_eq!(ed.buffer.text(), "- [x] done");
     }
 
     #[test]
