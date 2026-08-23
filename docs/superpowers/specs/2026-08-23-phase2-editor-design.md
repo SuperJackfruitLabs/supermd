@@ -131,10 +131,11 @@ fn style_spans(source: &str, ...) -> Vec<(Range<usize>, StyleKind)>
 
 ## Workspace integration
 
-- A tab holds an `Entity<Editor>` plus an optional preview
-  `Entity<Reader>`; `⌘E` toggles edit/preview per tab (preview re-parses
-  from the current buffer, so it is always fresh). Real tables/images
-  live in preview.
+- Tab content becomes an enum: an editor tab (`Entity<Editor>` plus an
+  optional preview `Entity<Reader>`) or a reader-only tab (Welcome, and
+  files that cannot be edited). `⌘E` toggles edit/preview on editor tabs
+  (preview re-parses from the current buffer, so it is always fresh).
+  Real tables/images live in preview.
 - Sidebar and finder open files into edit mode by default. The Welcome
   tab remains a read-only Reader.
 - Outline panel in edit mode is driven by heading spans; clicking
