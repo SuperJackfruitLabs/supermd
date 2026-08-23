@@ -29,6 +29,7 @@ pub struct Finder {
     selected: usize,
     last_query: String,
     preview: Option<(usize, PreviewContent)>,
+    scroll: gpui::UniformListScrollHandle,
     _watch_input: Subscription,
 }
 
@@ -77,6 +78,7 @@ impl Finder {
             selected: 0,
             last_query: String::new(),
             preview: None,
+            scroll: gpui::UniformListScrollHandle::default(),
             _watch_input: watch,
         };
         finder.rescore("");
@@ -89,8 +91,15 @@ impl Finder {
             self.last_query = query.clone();
             self.rescore(&query);
             self.selected = 0;
+            self.scroll
+                .scroll_to_item(0, gpui::ScrollStrategy::Top);
         }
         cx.notify();
+    }
+
+    fn reveal_selected(&self) {
+        self.scroll
+            .scroll_to_item(self.selected, gpui::ScrollStrategy::Center);
     }
 
     fn rescore(&mut self, query: &str) {
@@ -119,6 +128,7 @@ impl Finder {
     fn up(&mut self, _: &FinderUp, _: &mut Window, cx: &mut Context<Self>) {
         if !self.matches.is_empty() {
             self.selected = (self.selected + self.matches.len() - 1) % self.matches.len();
+            self.reveal_selected();
             cx.notify();
         }
     }
@@ -126,6 +136,7 @@ impl Finder {
     fn down(&mut self, _: &FinderDown, _: &mut Window, cx: &mut Context<Self>) {
         if !self.matches.is_empty() {
             self.selected = (self.selected + 1) % self.matches.len();
+            self.reveal_selected();
             cx.notify();
         }
     }
@@ -242,6 +253,7 @@ impl Render for Finder {
                         let is_selected = ix == selected;
                         div()
                             .id(ix)
+                            .w_full()
                             .h(px(30.))
                             .px_3()
                             .flex()
@@ -273,6 +285,7 @@ impl Render for Finder {
                     .collect::<Vec<_>>()
             }),
         )
+        .track_scroll(self.scroll.clone())
         .h_full();
 
         div()
