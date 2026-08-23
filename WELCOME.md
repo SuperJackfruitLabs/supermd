@@ -32,7 +32,8 @@ fn main() {
 | 0 | Read-only renderer | Done |
 | 1 | Workspace: sidebar, tabs, TOC | Done |
 | 2 | Styled-source editing + autosave | Done |
-| 3 | Hybrid WYSIWYG | Next |
+| 3 | Hybrid WYSIWYG (markers hide) | Done |
+| 4 | Tables, images, doc projection | Next |
 
 ### Near-term tasks
 
@@ -41,7 +42,8 @@ fn main() {
 - [x] Tree-sitter syntax highlighting in code blocks
 - [x] Folder-as-workspace sidebar
 - [x] In-place styled editing with autosave (⌘E toggles preview)
-- [ ] Hide syntax markers away from the cursor (Phase 3)
+- [x] Hide syntax markers away from the cursor — click around this line's **bold** and `code` to watch them fold
+- [ ] Real tables and inline images while editing (Phase 4)
 
 ---
 
