@@ -1,4 +1,4 @@
-# supermd
+# SuperMD
 
 **[supermd.app](https://supermd.app)** · [Download](https://github.com/SuperJackfruitLabs/supermd/releases/latest)
 

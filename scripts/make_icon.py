@@ -44,9 +44,9 @@ def pixel(x, y):
     edge = max(0.0, min(1.0, 0.5 - d_rect))
     t = y / SIZE
     bg = (
-        int(0xE2 + (0xC9 - 0xE2) * t),
-        int(0x5D + (0x3A - 0x5D) * t),
-        int(0x5F + (0x3E - 0x5F) * t),
+        int(0xE5 + (0xC9 - 0xE5) * t),
+        int(0xA6 + (0x82 - 0xA6) * t),
+        int(0x3B + (0x1C - 0x3B) * t),
     )
     d_m = min(sd_segment(x, y, *s) for s in SEGS) - STROKE
     if d_m < 1.0:

@@ -1,4 +1,4 @@
-# Welcome to supermd
+# Welcome to SuperMD
 
 A **pixel-perfect** Markdown reader and editor, built native in Rust on [GPUI](https://gpui.rs) — the GPU-accelerated framework behind Zed.
 

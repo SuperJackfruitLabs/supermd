@@ -22,8 +22,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>supermd</string>
-    <key>CFBundleDisplayName</key><string>supermd</string>
+    <key>CFBundleName</key><string>SuperMD</string>
+    <key>CFBundleDisplayName</key><string>SuperMD</string>
     <key>CFBundleIdentifier</key><string>com.superjackfruitlabs.supermd</string>
     <key>CFBundleVersion</key><string>${VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>

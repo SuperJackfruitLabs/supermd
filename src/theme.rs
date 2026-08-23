@@ -54,21 +54,21 @@ impl Theme {
         Self {
             is_dark: false,
 
-            bg: rgb(0xffffff).into(),
-            fg: rgb(0x37352f).into(),
-            fg_strong: rgb(0x1d1c19).into(),
-            fg_muted: rgb(0x8f8d87).into(),
-            accent: rgb(0xdd4c4f).into(),
-            link: rgb(0xdd4c4f).into(),
-            code_bg: rgb(0xf6f5f3).into(),
-            code_fg: rgb(0x484744).into(),
-            border: rgb(0xe9e8e5).into(),
+            bg: rgb(0xfdfbf6).into(),
+            fg: rgb(0x33302a).into(),
+            fg_strong: rgb(0x211f1a).into(),
+            fg_muted: rgb(0x918b7d).into(),
+            accent: rgb(0xc9821c).into(),
+            link: rgb(0xc9821c).into(),
+            code_bg: rgb(0xf6f2e9).into(),
+            code_fg: rgb(0x4a463d).into(),
+            border: rgb(0xeae5d8).into(),
 
-            panel_bg: rgb(0xf7f6f4).into(),
-            hover_bg: rgb(0xedecea).into(),
-            selected_bg: rgb(0xe6e4e0).into(),
-            find_match_bg: rgb(0xffe9a3).into(),
-            find_active_bg: rgb(0xffc94d).into(),
+            panel_bg: rgb(0xf8f5ec).into(),
+            hover_bg: rgb(0xf0ebdf).into(),
+            selected_bg: rgb(0xe8e1d0).into(),
+            find_match_bg: rgb(0xf6e3a8).into(),
+            find_active_bg: rgb(0xecc153).into(),
 
             syntax: SyntaxColors {
                 keyword: rgb(0xa626a4).into(),
@@ -97,21 +97,21 @@ impl Theme {
         Self {
             is_dark: true,
 
-            bg: rgb(0x1f1f1e).into(),
-            fg: rgb(0xd6d4cf).into(),
-            fg_strong: rgb(0xf1efec).into(),
-            fg_muted: rgb(0x8b8984).into(),
-            accent: rgb(0xe25d5f).into(),
-            link: rgb(0xe25d5f).into(),
-            code_bg: rgb(0x2a2a28).into(),
-            code_fg: rgb(0xccc9c2).into(),
-            border: rgb(0x343432).into(),
+            bg: rgb(0x211f1a).into(),
+            fg: rgb(0xd9d4c8).into(),
+            fg_strong: rgb(0xf2ede2).into(),
+            fg_muted: rgb(0x8f897a).into(),
+            accent: rgb(0xe5a63b).into(),
+            link: rgb(0xe5a63b).into(),
+            code_bg: rgb(0x2b2822).into(),
+            code_fg: rgb(0xcfc9ba).into(),
+            border: rgb(0x383428).into(),
 
-            panel_bg: rgb(0x262624).into(),
-            hover_bg: rgb(0x30302e).into(),
-            selected_bg: rgb(0x3a3a37).into(),
-            find_match_bg: rgb(0x51431a).into(),
-            find_active_bg: rgb(0x7a6220).into(),
+            panel_bg: rgb(0x262420).into(),
+            hover_bg: rgb(0x2f2c25).into(),
+            selected_bg: rgb(0x3a362c).into(),
+            find_match_bg: rgb(0x574a1c).into(),
+            find_active_bg: rgb(0x7d6a24).into(),
 
             syntax: SyntaxColors {
                 keyword: rgb(0xc678dd).into(),
@@ -256,10 +256,12 @@ impl LoadedTheme {
 }
 
 /// Builtin theme TOML sources, lights first.
-pub fn builtin_theme_sources() -> [&'static str; 6] {
+pub fn builtin_theme_sources() -> [&'static str; 8] {
     [
+        include_str!("../assets/themes/jackfruit-light.toml"),
         include_str!("../assets/themes/paper.toml"),
         include_str!("../assets/themes/solarized-light.toml"),
+        include_str!("../assets/themes/jackfruit-dark.toml"),
         include_str!("../assets/themes/graphite.toml"),
         include_str!("../assets/themes/solarized-dark.toml"),
         include_str!("../assets/themes/nord.toml"),
@@ -311,8 +313,10 @@ mod theme_file_tests {
         assert_eq!(
             names,
             [
+                "Jackfruit Light",
                 "Paper",
                 "Solarized Light",
+                "Jackfruit Dark",
                 "Graphite",
                 "Solarized Dark",
                 "Nord",
@@ -320,8 +324,8 @@ mod theme_file_tests {
             ]
         );
         assert!(!themes[0].theme.is_dark);
-        assert!(themes[2].theme.is_dark);
-        assert_eq!(themes.iter().filter(|t| t.theme.is_dark).count(), 4);
+        assert!(themes[3].theme.is_dark);
+        assert_eq!(themes.iter().filter(|t| t.theme.is_dark).count(), 5);
     }
 
     #[test]
@@ -372,7 +376,7 @@ attribute = "#d19a66"
             "name = \"Broken\"\nappearance = \"light\"\n",
         )
         .unwrap();
-        let good = builtin_theme_sources()[0].replace("Paper", "My Paper");
+        let good = builtin_theme_sources()[1].replace("Paper", "My Paper");
         std::fs::write(dir.path().join("good.toml"), good).unwrap();
         let themes = load_custom_themes(dir.path());
         assert_eq!(themes.len(), 1);

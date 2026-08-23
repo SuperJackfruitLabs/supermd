@@ -313,8 +313,8 @@ impl Workspace {
 
     fn sync_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let title = match self.tabs.get(self.active) {
-            Some(tab) => format!("supermd — {}", tab.title(cx)),
-            None => "supermd".to_string(),
+            Some(tab) => format!("SuperMD — {}", tab.title(cx)),
+            None => "SuperMD".to_string(),
         };
         if title != self.last_title {
             window.set_window_title(&title);

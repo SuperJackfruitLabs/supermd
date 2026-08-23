@@ -4,22 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>supermd — Markdown that gets out of the way</title>
+<title>SuperMD — Markdown that gets out of the way</title>
 <meta name="description" content="A native, GPU-rendered Markdown editor for macOS. Syntax folds away as you write. Plain files, forever.">
-<meta property="og:title" content="supermd">
+<meta property="og:title" content="SuperMD">
 <meta property="og:description" content="A native, GPU-rendered Markdown editor for macOS.">
 <meta property="og:url" content="https://supermd.app">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23dd4c4f'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   :root {
-    --bg: #ffffff; --fg: #37352f; --strong: #1d1c19; --muted: #8f8d87;
-    --accent: #dd4c4f; --panel: #f7f6f4; --border: #e9e8e5; --code: #f6f5f3;
+    --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
+    --accent: #c9821c; --panel: #f8f5ec; --border: #eae5d8; --code: #f6f2e9;
     --kw: #a626a4; --fn: #4078f2; --str: #50a14f; --num: #986801;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #1f1f1e; --fg: #d6d4cf; --strong: #f1efec; --muted: #8b8984;
-      --accent: #e25d5f; --panel: #262624; --border: #343432; --code: #2a2a28;
+      --bg: #211f1a; --fg: #d9d4c8; --strong: #f2ede2; --muted: #8f897a;
+      --accent: #e5a63b; --panel: #262420; --border: #383428; --code: #2b2822;
       --kw: #c678dd; --fn: #61afef; --str: #98c379; --num: #d19a66;
     }
   }
@@ -33,9 +33,9 @@
   header.wrap { padding: 96px 24px 56px; text-align: center; }
   .mark {
     width: 72px; height: 72px; border-radius: 17px; margin: 0 auto 28px;
-    background: linear-gradient(180deg, #e25d5f, #c93a3e);
+    background: linear-gradient(180deg, #e5a63b, #c9821c);
     display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 8px 28px rgba(221, 76, 79, .35);
+    box-shadow: 0 8px 28px rgba(201, 130, 28, .35);
   }
   .mark svg { width: 44px; height: 44px; }
   h1 { font-size: 48px; letter-spacing: -0.02em; color: var(--strong); font-weight: 700; }
@@ -47,7 +47,7 @@
     font-weight: 600; font-size: 16px; text-decoration: none; transition: transform .12s ease;
   }
   .btn:hover { transform: translateY(-1px); }
-  .btn.primary { background: var(--accent); color: #fff; box-shadow: 0 4px 18px rgba(221,76,79,.3); }
+  .btn.primary { background: var(--accent); color: #fff; box-shadow: 0 4px 18px rgba(201,130,28,.3); }
   .btn.ghost { color: var(--strong); border: 1px solid var(--border); background: var(--panel); }
   .note { margin-top: 14px; font-size: 13px; color: var(--muted); }
 
@@ -112,7 +112,7 @@
   <div class="mark">
     <svg viewBox="0 0 100 100"><path d="M25 72V32l14 22 11-17 11 17 14-22v40" stroke="white" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </div>
-  <h1>supermd</h1>
+  <h1>Super<span style="color:var(--accent);font-weight:800">MD</span></h1>
   <p class="tagline">Markdown that gets out of the way.</p>
   <p class="sub">A native, GPU-rendered editor for macOS. Syntax folds away as you write.<br>Plain CommonMark on disk — always.</p>
   <div class="cta">
@@ -151,7 +151,7 @@
 
 <section class="plain wrap">
   <h2>Plain files, forever.</h2>
-  <p>No database, no lock-in, no export step. supermd edits the Markdown files already in your folders — and they stay exactly that.</p>
+  <p>No database, no lock-in, no export step. SuperMD edits the Markdown files already in your folders — and they stay exactly that.</p>
 </section>
 
 <footer>

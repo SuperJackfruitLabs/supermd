@@ -13,8 +13,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            light_theme: "Paper".into(),
-            dark_theme: "Graphite".into(),
+            light_theme: "Jackfruit Light".into(),
+            dark_theme: "Jackfruit Dark".into(),
         }
     }
 }
@@ -55,8 +55,8 @@ mod tests {
         assert_eq!(load(dir.path()), Settings::default());
         std::fs::write(dir.path().join("settings.toml"), "not [valid").unwrap();
         assert_eq!(load(dir.path()), Settings::default());
-        assert_eq!(Settings::default().light_theme, "Paper");
-        assert_eq!(Settings::default().dark_theme, "Graphite");
+        assert_eq!(Settings::default().light_theme, "Jackfruit Light");
+        assert_eq!(Settings::default().dark_theme, "Jackfruit Dark");
     }
 
     #[test]
@@ -72,7 +72,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("settings.toml"), "dark_theme = \"Nord\"\n").unwrap();
         let s = load(dir.path());
-        assert_eq!(s.light_theme, "Paper");
+        assert_eq!(s.light_theme, "Jackfruit Light");
         assert_eq!(s.dark_theme, "Nord");
     }
 }

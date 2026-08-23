@@ -173,11 +173,11 @@ fn main() {
 
         cx.set_menus(vec![
             Menu {
-                name: "supermd".into(),
+                name: "SuperMD".into(),
                 items: vec![
                     MenuItem::os_submenu("Services", SystemMenuType::Services),
                     MenuItem::separator(),
-                    MenuItem::action("Quit supermd", Quit),
+                    MenuItem::action("Quit SuperMD", Quit),
                 ],
             },
             Menu {
@@ -219,7 +219,7 @@ fn main() {
             .open_window(
                 WindowOptions {
                     titlebar: Some(TitlebarOptions {
-                        title: Some("supermd".into()),
+                        title: Some("SuperMD".into()),
                         // Client-side decorations: we draw the top bar,
                         // native traffic lights overlay it.
                         appears_transparent: true,
