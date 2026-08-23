@@ -1134,12 +1134,11 @@ impl Workspace {
         )
     }
 
-    fn render_tab_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.tabs.is_empty() || self.focus_mode {
-            return None;
-        }
+    /// The custom title bar: traffic-light inset, tabs, drag regions.
+    fn render_titlebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let active = self.active;
+        let show_tabs = !self.tabs.is_empty() && !self.focus_mode;
 
         let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
             let title = tab.title(cx);
@@ -1200,20 +1199,32 @@ impl Workspace {
                 }))
         });
 
-        Some(
-            div()
-                .h(px(34.))
-                .flex_none()
-                .w_full()
-                .bg(t.panel_bg)
-                .border_b_1()
-                .border_color(t.border)
-                .flex()
-                .flex_row()
-                .overflow_hidden()
-                .children(tabs)
-                .into_any_element(),
-        )
+        div()
+            .h(px(34.))
+            .flex_none()
+            .w_full()
+            .bg(t.panel_bg)
+            .when(!self.focus_mode, |d| d.border_b_1().border_color(t.border))
+            .flex()
+            .flex_row()
+            .overflow_hidden()
+            .child(
+                // Traffic-light inset; draggable.
+                div()
+                    .w(px(76.))
+                    .h_full()
+                    .flex_none()
+                    .window_control_area(gpui::WindowControlArea::Drag),
+            )
+            .when(show_tabs, |d| d.children(tabs))
+            .child(
+                // Remaining space drags the window.
+                div()
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(gpui::WindowControlArea::Drag),
+            )
+            .into_any_element()
     }
 
     fn render_outline(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1358,7 +1369,7 @@ impl Render for Workspace {
         self.sync_title(window, cx);
         let t = theme(cx);
         let sidebar = self.render_sidebar(cx);
-        let tab_bar = self.render_tab_bar(cx);
+        let titlebar = self.render_titlebar(cx);
         let outline = self.render_outline(cx);
         let content: AnyElement = match self.tabs.get(self.active) {
             Some(Tab::Reader(reader)) => reader.clone().into_any_element(),
@@ -1420,18 +1431,27 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
             .flex()
-            .flex_row()
-            .children(sidebar)
+            .flex_col()
+            .child(titlebar)
             .child(
                 div()
                     .flex_1()
-                    .h_full()
+                    .min_h_0()
+                    .w_full()
                     .flex()
-                    .flex_col()
-                    .children(tab_bar)
-                    .child(div().flex_1().min_h_0().child(content)),
+                    .flex_row()
+                    .children(sidebar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().flex_1().min_h_0().child(content)),
+                    )
+                    .children(outline),
             )
-            .children(outline)
             .children(self.render_shortcuts(cx))
             .children(self.render_theme_picker(cx))
             .when_some(self.finder.as_ref(), |root, (finder, _)| {

@@ -220,7 +220,10 @@ fn main() {
                 WindowOptions {
                     titlebar: Some(TitlebarOptions {
                         title: Some("supermd".into()),
-                        ..Default::default()
+                        // Client-side decorations: we draw the top bar,
+                        // native traffic lights overlay it.
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(12.), px(10.))),
                     }),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
