@@ -15,6 +15,8 @@ pub enum StyleKind {
     InlineCode,
     Link,
     ListMarker,
+    /// The `[x]` / `[ ]` of a task-list item (checked state carried).
+    TaskMarker(bool),
     QuoteMarker,
     FenceContent,
     /// A ``` or ~~~ fence line (never hidden; rendered faded).
@@ -93,6 +95,9 @@ pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
                         });
                     }
                 }
+            }
+            Event::TaskListMarker(done) => {
+                spans.push(StyleSpan { range, kind: StyleKind::TaskMarker(done) })
             }
             Event::Rule => spans.push(StyleSpan { range, kind: StyleKind::Rule }),
             _ => {}
@@ -389,6 +394,14 @@ mod tests {
         let big = "x".repeat(MAX_STYLED_BYTES + 1);
         assert!(markdown_spans_highlighted(&big, &langs).is_empty());
         assert!(code_spans(&big, "rust", &langs).is_empty());
+    }
+
+    #[test]
+    fn task_markers_spanned_with_checked_state() {
+        let src = "- [x] done\n- [ ] todo\n";
+        let spans = markdown_spans(src);
+        assert!(spans.contains(&StyleSpan { range: 2..5, kind: StyleKind::TaskMarker(true) }));
+        assert!(spans.contains(&StyleSpan { range: 13..16, kind: StyleKind::TaskMarker(false) }));
     }
 
     #[test]

@@ -717,6 +717,9 @@ impl Editor {
                         a.underline = true;
                     }
                     StyleKind::ListMarker | StyleKind::QuoteMarker => a.color = t.accent,
+                    StyleKind::TaskMarker(checked) => {
+                        a.color = if *checked { t.accent } else { t.fg_muted };
+                    }
                     StyleKind::Rule => a.color = t.fg_muted,
                     StyleKind::FenceContent => a.color = t.code_fg,
                     StyleKind::FenceDelimiter => {
