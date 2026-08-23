@@ -168,20 +168,7 @@ impl Editor {
         let line_ranges: Vec<Range<usize>> = (0..self.core.buffer.line_count())
             .map(|ix| self.core.buffer.line_range(ix))
             .collect();
-        // Widgets are enabled kind-by-kind through Phase 4; currently:
-        // fences and tables (images land in the next task).
-        let enabled: Vec<blocks::BlockInfo> = self
-            .blocks
-            .iter()
-            .filter(|b| {
-                matches!(
-                    b.kind,
-                    blocks::BlockKind::Fence { .. } | blocks::BlockKind::Table
-                )
-            })
-            .cloned()
-            .collect();
-        projection::project(&line_ranges, &enabled, self.core.selection.range())
+        projection::project(&line_ranges, &self.blocks, self.core.selection.range())
     }
 
     /// Recompute the projection for the current selection; reset the
@@ -1286,6 +1273,9 @@ fn render_table(
     container.into_any_element()
 }
 
+/// The rendered image for an untouched whole-line image block. Local
+/// paths resolve against the file's directory; missing files fall back
+/// to the raw markup with a warning tint. Click dissolves to source.
 fn render_image(
     editor: &Entity<Editor>,
     item_ix: usize,
@@ -1293,14 +1283,57 @@ fn render_image(
     alt: &str,
     dest: &str,
     t: &Theme,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> gpui::AnyElement {
-    let _ = (editor, item_ix, line, alt, dest);
+    let is_remote = dest.starts_with("http://") || dest.starts_with("https://");
+    let local_path = (!is_remote).then(|| {
+        editor
+            .read(cx)
+            .path()
+            .parent()
+            .map(|dir| dir.join(dest))
+            .unwrap_or_else(|| PathBuf::from(dest))
+    });
+
+    let handle = editor.clone();
+    let on_click = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+        handle.update(cx, |editor, cx| {
+            let start = editor.core.buffer.line_range(line).start;
+            editor.core.set_cursor(start);
+            editor.core.break_undo_group();
+            window.focus(&editor.focus_handle);
+            cx.notify();
+        });
+    };
+
+    let available = match &local_path {
+        Some(path) => path.exists(),
+        None => true, // remote: let gpui's loader handle it
+    };
+    if !available {
+        return div()
+            .id(("img", item_ix))
+            .my_1()
+            .cursor_pointer()
+            .on_click(on_click)
+            .font_family(t.mono_family.clone())
+            .text_size(px(t.code_size))
+            .text_color(Hsla { a: 0.8, ..t.accent })
+            .child(SharedString::from(format!("![{alt}]({dest}) — file not found")))
+            .into_any_element();
+    }
+
+    let image = match local_path {
+        Some(path) => gpui::img(path),
+        None => gpui::img(dest.to_string()),
+    };
     div()
-        .px_3()
-        .py_2()
-        .text_color(t.fg_muted)
-        .child("[image]")
+        .id(("img", item_ix))
+        .my_1()
+        .w_full()
+        .cursor_pointer()
+        .on_click(on_click)
+        .child(image.w_full().max_h(px(420.)).rounded_md())
         .into_any_element()
 }
 
