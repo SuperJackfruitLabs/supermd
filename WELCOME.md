@@ -38,6 +38,7 @@ fn main() {
 | 6 | Seti icons, 36 languages, image tabs | Done |
 | 7 | Pre-release UX: focus mode, ⌘/, nav | Done |
 | 8 | Code-first: gutter, 77 langs (inkjet) | Done |
+| 9 | Themes (⌘T), full lang mapping, XML | Done |
 
 This very table is a live widget now — click a row to edit its raw pipes.
 

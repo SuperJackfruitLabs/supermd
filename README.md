@@ -21,10 +21,14 @@ Built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   outline panel, fuzzy file finder (⌘P), find in file (⌘F), pretty
   preview toggle (⌘E), image viewer tabs, light/dark following the
   system.
-- **77 languages highlighted** via tree-sitter (inkjet + Helix
-  queries), in fenced blocks and standalone files alike. Code files get
-  a real code editor: monospace, full width, line-number gutter,
-  auto-indent.
+- **78 languages highlighted** via tree-sitter (inkjet + Helix
+  queries, plus an extras registry), in fenced blocks and standalone
+  files alike. Code files get a real code editor: monospace, full
+  width, line-number gutter, auto-indent.
+- **Themes** — six built-in (Paper, Graphite, Solarized ×2, Nord,
+  Gruvbox Dark), live picker on ⌘T, custom themes as TOML files in
+  `~/.supermd/themes/`. Your light and dark picks follow the system
+  appearance automatically.
 - **Safe by default** — autosave with atomic writes, per-session
   backups in `~/.supermd/backups`, external-change detection that never
   silently clobbers anything, and live reload of clean buffers when
