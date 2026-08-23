@@ -55,7 +55,15 @@ fn main() {
     let arg = std::env::args().nth(1).map(PathBuf::from);
 
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        cx.set_global(ActiveTheme(Arc::new(Theme::light())));
+        let mut themes = theme::builtin_themes();
+        themes.extend(theme::load_custom_themes(&settings::themes_dir()));
+        let theme_state = theme::ThemeState {
+            themes,
+            settings: settings::load(&settings::config_dir()),
+            system_dark: false,
+        };
+        cx.set_global(ActiveTheme(theme_state.resolve()));
+        cx.set_global(theme_state);
         cx.set_global(highlight::SyntaxLanguages(Arc::new(
             highlight::Languages::new(),
         )));
@@ -82,6 +90,11 @@ fn main() {
             KeyBinding::new("cmd-shift-f", ToggleFocusMode, None),
             KeyBinding::new("cmd-1", workspace::FocusSidebar, None),
             KeyBinding::new("cmd-/", workspace::ToggleShortcuts, None),
+            KeyBinding::new("cmd-t", workspace::ToggleThemePicker, None),
+            KeyBinding::new("up", workspace::ThemePickerUp, Some("ThemePicker")),
+            KeyBinding::new("down", workspace::ThemePickerDown, Some("ThemePicker")),
+            KeyBinding::new("enter", workspace::ThemePickerConfirm, Some("ThemePicker")),
+            KeyBinding::new("escape", workspace::ThemePickerCancel, Some("ThemePicker")),
             KeyBinding::new("cmd-=", workspace::ZoomIn, None),
             KeyBinding::new("cmd--", workspace::ZoomOut, None),
             KeyBinding::new("cmd-0", workspace::ZoomReset, None),
@@ -181,6 +194,7 @@ fn main() {
                 items: vec![
                     MenuItem::action("Toggle Edit/Preview", TogglePreview),
                     MenuItem::action("Focus Mode", ToggleFocusMode),
+                    MenuItem::action("Theme…", workspace::ToggleThemePicker),
                     MenuItem::separator(),
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),
                     MenuItem::action("Toggle Outline", ToggleOutline),

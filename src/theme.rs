@@ -380,16 +380,49 @@ attribute = "#d19a66"
     }
 }
 
+/// All known themes + the user's choices + current system appearance.
+pub struct ThemeState {
+    pub themes: Vec<LoadedTheme>,
+    pub settings: crate::settings::Settings,
+    pub system_dark: bool,
+}
+
+impl Global for ThemeState {}
+
+impl ThemeState {
+    pub fn resolve(&self) -> Arc<Theme> {
+        let want = if self.system_dark {
+            &self.settings.dark_theme
+        } else {
+            &self.settings.light_theme
+        };
+        self.themes
+            .iter()
+            .find(|t| &t.name == want && t.theme.is_dark == self.system_dark)
+            .or_else(|| {
+                self.themes
+                    .iter()
+                    .find(|t| t.theme.is_dark == self.system_dark)
+            })
+            .map(|t| t.theme.clone())
+            .unwrap_or_else(|| {
+                Arc::new(if self.system_dark { Theme::dark() } else { Theme::light() })
+            })
+    }
+}
+
+/// Re-resolve the active theme from state (after settings or appearance
+/// changes).
+pub fn refresh_active_theme(cx: &mut App) {
+    let theme = cx.global::<ThemeState>().resolve();
+    cx.set_global(ActiveTheme(theme));
+}
+
 pub fn apply_system_appearance(appearance: WindowAppearance, cx: &mut App) {
     let dark = matches!(
         appearance,
         WindowAppearance::Dark | WindowAppearance::VibrantDark
     );
-    if cx.global::<ActiveTheme>().0.is_dark != dark {
-        cx.set_global(ActiveTheme(Arc::new(if dark {
-            Theme::dark()
-        } else {
-            Theme::light()
-        })));
-    }
+    cx.global_mut::<ThemeState>().system_dark = dark;
+    refresh_active_theme(cx);
 }

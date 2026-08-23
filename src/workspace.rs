@@ -37,6 +37,11 @@ actions!(
         SidebarCollapse,
         SidebarOpen,
         ToggleShortcuts,
+        ToggleThemePicker,
+        ThemePickerUp,
+        ThemePickerDown,
+        ThemePickerConfirm,
+        ThemePickerCancel,
         ZoomIn,
         ZoomOut,
         ZoomReset,
@@ -63,6 +68,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌘ ⇧ [", "Previous tab"),
             ("⌘ S", "Save now"),
             ("⌘ + / − / 0", "Zoom image tab"),
+            ("⌘ T", "Theme picker"),
             ("⌘ /", "This dialog"),
         ],
     ),
@@ -138,6 +144,13 @@ fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
     }
 }
 
+struct ThemePickerState {
+    /// Theme indices in display order (lights, then darks).
+    order: Vec<usize>,
+    pos: usize,
+    saved_theme: std::sync::Arc<Theme>,
+}
+
 #[derive(Clone)]
 enum OutlineTarget {
     Reader(Entity<Reader>),
@@ -158,6 +171,8 @@ pub struct Workspace {
     sidebar_selected: usize,
     shortcuts_focus: FocusHandle,
     show_shortcuts: bool,
+    theme_picker: Option<ThemePickerState>,
+    theme_picker_focus: FocusHandle,
     last_title: String,
     _watcher: Option<notify::RecommendedWatcher>,
 }
@@ -202,6 +217,8 @@ impl Workspace {
             sidebar_selected: 0,
             shortcuts_focus: cx.focus_handle(),
             show_shortcuts: false,
+            theme_picker: None,
+            theme_picker_focus: cx.focus_handle(),
             last_title: String::new(),
             _watcher: None,
         }
@@ -623,6 +640,217 @@ impl Workspace {
         } else {
             self.open_path(&entry.path, window, cx);
         }
+    }
+
+    // ── theme picker ────────────────────────────────────────────────────
+
+    fn toggle_theme_picker(
+        &mut self,
+        _: &ToggleThemePicker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.theme_picker.is_some() {
+            self.theme_picker_cancel(&ThemePickerCancel, window, cx);
+            return;
+        }
+        let state = cx.global::<crate::theme::ThemeState>();
+        let mut order: Vec<usize> = (0..state.themes.len())
+            .filter(|&i| !state.themes[i].theme.is_dark)
+            .collect();
+        order.extend((0..state.themes.len()).filter(|&i| state.themes[i].theme.is_dark));
+        let current = theme(cx);
+        let pos = order
+            .iter()
+            .position(|&i| std::sync::Arc::ptr_eq(&state.themes[i].theme, &current))
+            .unwrap_or(0);
+        self.theme_picker = Some(ThemePickerState { order, pos, saved_theme: current });
+        window.focus(&self.theme_picker_focus);
+        cx.notify();
+    }
+
+    fn theme_picker_apply(&mut self, pos: usize, cx: &mut Context<Self>) {
+        let Some(picker) = &mut self.theme_picker else {
+            return;
+        };
+        picker.pos = pos;
+        let ix = picker.order[picker.pos];
+        let theme = cx.global::<crate::theme::ThemeState>().themes[ix].theme.clone();
+        cx.set_global(crate::theme::ActiveTheme(theme));
+        cx.notify();
+    }
+
+    fn theme_picker_up(&mut self, _: &ThemePickerUp, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(picker) = &self.theme_picker {
+            let pos = picker.pos.saturating_sub(1);
+            self.theme_picker_apply(pos, cx);
+        }
+    }
+
+    fn theme_picker_down(&mut self, _: &ThemePickerDown, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(picker) = &self.theme_picker {
+            let pos = (picker.pos + 1).min(picker.order.len().saturating_sub(1));
+            self.theme_picker_apply(pos, cx);
+        }
+    }
+
+    fn theme_picker_confirm(
+        &mut self,
+        _: &ThemePickerConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.theme_picker.take() else {
+            return;
+        };
+        let ix = picker.order[picker.pos];
+        {
+            let state = cx.global_mut::<crate::theme::ThemeState>();
+            let picked = &state.themes[ix];
+            if picked.theme.is_dark {
+                state.settings.dark_theme = picked.name.clone();
+            } else {
+                state.settings.light_theme = picked.name.clone();
+            }
+            if let Err(err) =
+                crate::settings::save(&crate::settings::config_dir(), &state.settings)
+            {
+                eprintln!("supermd: cannot save settings: {err}");
+            }
+        }
+        crate::theme::refresh_active_theme(cx);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn theme_picker_cancel(
+        &mut self,
+        _: &ThemePickerCancel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(picker) = self.theme_picker.take() {
+            cx.set_global(crate::theme::ActiveTheme(picker.saved_theme));
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn render_theme_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let picker = self.theme_picker.as_ref()?;
+        let t = theme(cx);
+        let state = cx.global::<crate::theme::ThemeState>();
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut last_dark: Option<bool> = None;
+        for (pos, &ix) in picker.order.iter().enumerate() {
+            let loaded = &state.themes[ix];
+            let is_dark = loaded.theme.is_dark;
+            if last_dark != Some(is_dark) {
+                last_dark = Some(is_dark);
+                rows.push(
+                    div()
+                        .px_2()
+                        .pt_2()
+                        .pb_1()
+                        .text_size(px(10.))
+                        .text_color(t.fg_muted)
+                        .child(if is_dark { "DARK" } else { "LIGHT" })
+                        .into_any_element(),
+                );
+            }
+            let chosen = if is_dark {
+                state.settings.dark_theme == loaded.name
+            } else {
+                state.settings.light_theme == loaded.name
+            };
+            let selected = pos == picker.pos;
+            rows.push(
+                div()
+                    .id(("theme-row", pos))
+                    .w_full()
+                    .px_2()
+                    .py(px(4.))
+                    .rounded_md()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(t.selected_bg))
+                    .when(!selected, |d| d.hover(|s| s.bg(t.hover_bg)))
+                    .child(
+                        div()
+                            .size(px(14.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(t.border)
+                            .bg(loaded.theme.bg),
+                    )
+                    .child(div().size(px(14.)).rounded_full().bg(loaded.theme.accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg)
+                            .child(SharedString::from(loaded.name.clone())),
+                    )
+                    .when(chosen, |d| {
+                        d.child(div().text_size(px(11.)).text_color(t.accent).child("✓"))
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.theme_picker_apply(pos, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(gpui::Hsla { h: 0., s: 0., l: 0., a: 0.25 })
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.theme_picker_cancel(&ThemePickerCancel, window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .key_context("ThemePicker")
+                        .track_focus(&self.theme_picker_focus)
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .w(px(340.))
+                        .max_h(px(480.))
+                        .id("theme-picker-panel")
+                        .overflow_y_scroll()
+                        .bg(t.panel_bg)
+                        .border_1()
+                        .border_color(t.border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .p_2()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_size(px(13.))
+                                .text_color(t.fg_strong)
+                                .child("Theme    ↑↓ preview · ⏎ apply · esc cancel"),
+                        )
+                        .children(rows),
+                )
+                .into_any_element(),
+        )
     }
 
     fn adjust_zoom(&mut self, factor: Option<f32>, cx: &mut Context<Self>) {
@@ -1183,6 +1411,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::focus_sidebar))
             .on_action(cx.listener(Self::toggle_shortcuts))
+            .on_action(cx.listener(Self::toggle_theme_picker))
+            .on_action(cx.listener(Self::theme_picker_up))
+            .on_action(cx.listener(Self::theme_picker_down))
+            .on_action(cx.listener(Self::theme_picker_confirm))
+            .on_action(cx.listener(Self::theme_picker_cancel))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
@@ -1200,6 +1433,7 @@ impl Render for Workspace {
             )
             .children(outline)
             .children(self.render_shortcuts(cx))
+            .children(self.render_theme_picker(cx))
             .when_some(self.finder.as_ref(), |root, (finder, _)| {
                 let finder = finder.clone();
                 root.child(
