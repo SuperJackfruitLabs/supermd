@@ -5,6 +5,9 @@ mod highlight;
 mod input;
 mod markdown;
 mod reader;
+mod seti;
+#[cfg(test)]
+mod seti_tests;
 mod theme;
 mod view;
 mod workspace;
