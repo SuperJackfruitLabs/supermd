@@ -289,7 +289,7 @@ pub fn display_line(
     let mut segs: Vec<Seg> = Vec::new();
     let mut cursor = line_start;
 
-    let mut push_verbatim = |from: usize, to: usize, text: &mut String, segs: &mut Vec<Seg>| {
+    let push_verbatim = |from: usize, to: usize, text: &mut String, segs: &mut Vec<Seg>| {
         if from < to {
             let disp_start = text.len();
             text.push_str(&line[from - line_start..to - line_start]);

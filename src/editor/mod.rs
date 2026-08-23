@@ -56,7 +56,7 @@ struct CachedLine {
     line: WrappedLine,
     origin: Point<Pixels>,
     line_height: Pixels,
-    range: Range<usize>,
+    display: display::DisplayLine,
 }
 
 pub struct Editor {
@@ -451,7 +451,7 @@ impl Editor {
         let mut preferred_x = self.preferred_x;
         let target = if let Some(entry) = self.layout_cache.get(&line_ix) {
             let lh = entry.line_height;
-            let local = head.saturating_sub(entry.range.start);
+            let local = display::src_to_disp(&entry.display, head);
             let pos = entry
                 .line
                 .position_for_index(local, lh)
@@ -464,7 +464,7 @@ impl Editor {
                 let ix = match entry.line.closest_index_for_position(point(x, target_y), lh) {
                     Ok(i) | Err(i) => i,
                 };
-                entry.range.start + ix.min(entry.range.len())
+                display::disp_to_src(&entry.display, ix)
             } else {
                 let neighbor = line_ix as isize + dir;
                 if neighbor < 0 {
@@ -484,7 +484,7 @@ impl Editor {
                             let ix = match n.line.closest_index_for_position(point(x, ny), nh) {
                                 Ok(i) | Err(i) => i,
                             };
-                            n.range.start + ix.min(n.range.len())
+                            display::disp_to_src(&n.display, ix)
                         }
                         None => {
                             let r = self.core.buffer.line_range(neighbor);
@@ -521,7 +521,7 @@ impl Editor {
             let ix = match entry.line.closest_index_for_position(local, entry.line_height) {
                 Ok(i) | Err(i) => i,
             };
-            let offset = entry.range.start + ix.min(entry.range.len());
+            let offset = display::disp_to_src(&entry.display, ix);
             if position.y >= entry.origin.y && position.y < entry.origin.y + height {
                 return Some(offset);
             }
@@ -648,22 +648,12 @@ impl Editor {
         })
     }
 
-    /// The styled TextRuns for one line (covering every byte of it).
-    fn line_runs(&self, ix: usize, t: &Theme) -> (SharedString, Vec<TextRun>) {
+    /// Source-space style attributes for one line, one entry per byte.
+    fn line_attrs(&self, ix: usize, t: &Theme) -> (String, Vec<Attr>) {
         let range = self.core.buffer.line_range(ix);
         let text = self.core.buffer.line_text(ix);
         let (_, base_weight, family, _) = self.line_typography(ix, t);
 
-        #[derive(Clone, PartialEq)]
-        struct Attr {
-            color: Hsla,
-            weight: FontWeight,
-            italic: bool,
-            family: SharedString,
-            bg: Option<Hsla>,
-            underline: bool,
-            strike: bool,
-        }
         let default_attr = Attr {
             color: t.fg,
             weight: base_weight,
@@ -727,41 +717,98 @@ impl Editor {
             }
         }
 
-        let font_of = |a: &Attr| Font {
-            family: a.family.clone(),
-            features: FontFeatures::default(),
-            fallbacks: None,
-            weight: a.weight,
-            style: if a.italic { FontStyle::Italic } else { FontStyle::Normal },
-        };
-
-        let mut runs: Vec<TextRun> = Vec::new();
-        let mut i = 0;
-        while i < attrs.len() {
-            let mut j = i + 1;
-            while j < attrs.len() && attrs[j] == attrs[i] {
-                j += 1;
-            }
-            let a = &attrs[i];
-            runs.push(TextRun {
-                len: j - i,
-                font: font_of(a),
-                color: a.color,
-                background_color: a.bg,
-                underline: a.underline.then_some(UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(a.color),
-                    wavy: false,
-                }),
-                strikethrough: a.strike.then_some(StrikethroughStyle {
-                    thickness: px(1.),
-                    color: Some(t.fg_muted),
-                }),
-            });
-            i = j;
-        }
-        (SharedString::from(text), runs)
+        (text, attrs)
     }
+
+    /// Display text, styled runs, and the source↔display map for a line.
+    fn display_for_line(
+        &self,
+        ix: usize,
+        t: &Theme,
+    ) -> (SharedString, Vec<TextRun>, display::DisplayLine) {
+        let range = self.core.buffer.line_range(ix);
+        let (text, attrs) = self.line_attrs(ix, t);
+        let dl = display::display_line(
+            &text,
+            range.start,
+            &self.spans,
+            self.core.selection.range(),
+        );
+
+        let mut disp_attrs: Vec<Attr> = Vec::with_capacity(dl.text.len());
+        for seg in &dl.segs {
+            match seg.kind {
+                display::SegKind::Verbatim => {
+                    let s = seg.src.start - range.start;
+                    let e = seg.src.end - range.start;
+                    disp_attrs.extend_from_slice(&attrs[s..e]);
+                }
+                display::SegKind::Replacement => {
+                    if let Some(attr) = attrs.get(seg.src.start - range.start) {
+                        for _ in 0..seg.disp.len() {
+                            disp_attrs.push(attr.clone());
+                        }
+                    }
+                }
+                display::SegKind::Hidden(_) => {}
+            }
+        }
+
+        (
+            SharedString::from(dl.text.clone()),
+            runs_from_attrs(&disp_attrs, t),
+            dl,
+        )
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct Attr {
+    color: Hsla,
+    weight: FontWeight,
+    italic: bool,
+    family: SharedString,
+    bg: Option<Hsla>,
+    underline: bool,
+    strike: bool,
+}
+
+/// Compress per-byte attributes into TextRuns.
+fn runs_from_attrs(attrs: &[Attr], t: &Theme) -> Vec<TextRun> {
+    let font_of = |a: &Attr| Font {
+        family: a.family.clone(),
+        features: FontFeatures::default(),
+        fallbacks: None,
+        weight: a.weight,
+        style: if a.italic { FontStyle::Italic } else { FontStyle::Normal },
+    };
+
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut i = 0;
+    while i < attrs.len() {
+        let mut j = i + 1;
+        while j < attrs.len() && attrs[j] == attrs[i] {
+            j += 1;
+        }
+        let a = &attrs[i];
+        runs.push(TextRun {
+            len: j - i,
+            font: font_of(a),
+            color: a.color,
+            background_color: a.bg,
+            underline: a.underline.then_some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(a.color),
+                wavy: false,
+            }),
+            strikethrough: a.strike.then_some(StrikethroughStyle {
+                thickness: px(1.),
+                color: Some(t.fg_muted),
+            }),
+        });
+        i = j;
+    }
+    runs
 }
 
 // ── IME / text input protocol ──────────────────────────────────────────
@@ -857,7 +904,7 @@ impl EntityInputHandler for Editor {
         let range = self.range_from_utf16(&range_utf16);
         let line_ix = self.core.buffer.line_of_byte(range.start);
         let entry = self.layout_cache.get(&line_ix)?;
-        let local = range.start.saturating_sub(entry.range.start);
+        let local = display::src_to_disp(&entry.display, range.start);
         let pos = entry.line.position_for_index(local, entry.line_height)?;
         Some(Bounds::new(
             point(entry.origin.x + pos.x, entry.origin.y + pos.y),
@@ -884,6 +931,7 @@ struct LineElement {
     range: Range<usize>,
     text: SharedString,
     runs: Vec<TextRun>,
+    display: display::DisplayLine,
     font_size: Pixels,
     line_height: Pixels,
     caret_color: Hsla,
@@ -996,8 +1044,8 @@ impl gpui::Element for LineElement {
         if sel_start < sel_end || (selection.start < self.range.start
             && selection.end > self.range.end)
         {
-            let local_start = sel_start - self.range.start;
-            let local_end = sel_end - self.range.start;
+            let local_start = display::src_to_disp(&self.display, sel_start);
+            let local_end = display::src_to_disp(&self.display, sel_end);
             if let (Some(p1), Some(p2)) = (
                 line.position_for_index(local_start, lh),
                 line.position_for_index(local_end, lh),
@@ -1050,7 +1098,7 @@ impl gpui::Element for LineElement {
             if !editor.core.selection.is_cursor() {
                 return None;
             }
-            let local = head - self.range.start;
+            let local = display::src_to_disp(&self.display, head);
             let pos = line.position_for_index(local, lh)?;
             Some(fill(
                 Bounds::new(
@@ -1104,12 +1152,12 @@ impl gpui::Element for LineElement {
         }
 
         let line_height = self.line_height;
-        let range = self.range.clone();
         let line_ix = self.line_ix;
+        let display = self.display.clone();
         self.editor.update(cx, |editor, _| {
             editor.layout_cache.insert(
                 line_ix,
-                CachedLine { line, origin: bounds.origin, line_height, range },
+                CachedLine { line, origin: bounds.origin, line_height, display },
             );
         });
     }
@@ -1171,14 +1219,15 @@ impl Render for Editor {
                         return div().into_any_element();
                     };
                     let t = theme(cx);
-                    let (line_range, text, runs, font_size, line_height_px, is_code, line_count) = {
+                    let (line_range, text, runs, dl, font_size, line_height_px, is_code, line_count) = {
                         let editor = editor_entity.read(cx);
                         let (size_f, _, _, mult) = editor.line_typography(ix, &t);
-                        let (text, runs) = editor.line_runs(ix, &t);
+                        let (text, runs, dl) = editor.display_for_line(ix, &t);
                         (
                             editor.core.buffer.line_range(ix),
                             text,
                             runs,
+                            dl,
                             px(size_f),
                             px(size_f * mult),
                             matches!(editor.line_kinds.get(ix), Some(LineKind::Code)),
@@ -1210,6 +1259,7 @@ impl Render for Editor {
                                     range: line_range,
                                     text,
                                     runs,
+                                    display: dl,
                                     font_size,
                                     line_height: line_height_px,
                                     caret_color: t.accent,
