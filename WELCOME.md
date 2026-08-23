@@ -34,6 +34,7 @@ fn main() {
 | 2 | Styled-source editing + autosave | Done |
 | 3 | Hybrid WYSIWYG (markers hide) | Done |
 | 4 | Tables, images, doc projection | Done |
+| 5 | Polish: ✓ checkboxes, ⌘F, watching, chrome | Done |
 
 This very table is a live widget now — click a row to edit its raw pipes.
 
@@ -48,6 +49,8 @@ This very table is a live widget now — click a row to edit its raw pipes.
 - [x] In-place styled editing with autosave (⌘E toggles preview)
 - [x] Hide syntax markers away from the cursor — click around this line's **bold** and `code` to watch them fold
 - [x] Real tables and inline images while editing; fence lines collapse too
+- [x] Click these checkboxes to toggle them — ⌘Z undoes
+- [ ] Try ⌘F to find, ⌘N for a new note, and edit a file in another app to watch it reload
 
 ---
 
