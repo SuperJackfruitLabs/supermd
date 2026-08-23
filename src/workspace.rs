@@ -576,6 +576,8 @@ impl Workspace {
             let title = tab.title(cx);
             let is_preview = matches!(tab, Tab::Editor { preview: Some(_), .. });
             let is_active = ix == active;
+            let (icon, color) = seti::icon_for(&title);
+            let tint = seti_tint(color, &t);
             div()
                 .id(SharedString::from(format!("tab-{ix}")))
                 .flex()
@@ -589,6 +591,13 @@ impl Workspace {
                 .cursor_pointer()
                 .when(is_active, |d| d.bg(t.bg))
                 .when(!is_active, |d| d.hover(|s| s.bg(t.hover_bg)))
+                .child(
+                    gpui::svg()
+                        .path(SharedString::from(format!("icons/seti/{icon}.svg")))
+                        .size(px(18.))
+                        .flex_none()
+                        .text_color(if is_active { tint } else { t.fg_muted }),
+                )
                 .child(
                     div()
                         .text_size(px(t.ui_size))
