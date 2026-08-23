@@ -18,6 +18,7 @@ use crate::theme::theme;
 actions!(
     workspace,
     [
+        NewFile,
         OpenDialog,
         CloseTab,
         NextTab,
@@ -69,6 +70,7 @@ pub struct Workspace {
     show_outline: bool,
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
     focus_handle: FocusHandle,
+    last_title: String,
 }
 
 impl Workspace {
@@ -105,6 +107,18 @@ impl Workspace {
             show_outline: true,
             finder: None,
             focus_handle: cx.focus_handle(),
+            last_title: String::new(),
+        }
+    }
+
+    fn sync_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = match self.tabs.get(self.active) {
+            Some(tab) => format!("supermd — {}", tab.title(cx)),
+            None => "supermd".to_string(),
+        };
+        if title != self.last_title {
+            window.set_window_title(&title);
+            self.last_title = title;
         }
     }
 
@@ -174,6 +188,9 @@ impl Workspace {
         match Editor::read_file(path) {
             Ok(text) => {
                 self.flush_tab(self.active, cx);
+                if let Some(tree) = &mut self.tree {
+                    tree.expand_to(path);
+                }
                 let langs = languages(cx);
                 let path = path.to_path_buf();
                 let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
@@ -187,6 +204,29 @@ impl Workspace {
     }
 
     // ── actions ────────────────────────────────────────────────────────
+
+    fn new_file(&mut self, _: &NewFile, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tree) = &self.tree else {
+            return; // single-file mode: no workspace to create into
+        };
+        let root = tree.root.clone();
+        let existing: Vec<String> = std::fs::read_dir(&root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(String::from))
+            .collect();
+        let name = crate::files::pick_untitled(&existing);
+        let path = root.join(&name);
+        if let Err(err) = std::fs::write(&path, "") {
+            eprintln!("supermd: cannot create {}: {err}", path.display());
+            return;
+        }
+        if let Some(tree) = &mut self.tree {
+            tree.refresh();
+        }
+        self.open_path(&path, window, cx);
+    }
 
     fn open_dialog(&mut self, _: &OpenDialog, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
@@ -610,7 +650,8 @@ impl Focusable for Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_title(window, cx);
         let t = theme(cx);
         let sidebar = self.render_sidebar(cx);
         let tab_bar = self.render_tab_bar(cx);
@@ -631,6 +672,7 @@ impl Render for Workspace {
             .font_family(t.body_family.clone())
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::new_file))
             .on_action(cx.listener(Self::open_dialog))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))

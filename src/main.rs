@@ -20,7 +20,7 @@ use gpui::{
 
 use theme::{apply_system_appearance, ActiveTheme, Theme};
 use workspace::{
-    CloseTab, NextTab, OpenDialog, PrevTab, ToggleFinder, ToggleOutline, TogglePreview,
+    CloseTab, NewFile, NextTab, OpenDialog, PrevTab, ToggleFinder, ToggleOutline, TogglePreview,
     ToggleSidebar, Workspace,
 };
 
@@ -44,6 +44,7 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-o", OpenDialog, None),
+            KeyBinding::new("cmd-n", NewFile, None),
             KeyBinding::new("cmd-w", CloseTab, None),
             KeyBinding::new("ctrl-tab", NextTab, None),
             KeyBinding::new("ctrl-shift-tab", PrevTab, None),
@@ -131,6 +132,7 @@ fn main() {
             Menu {
                 name: "File".into(),
                 items: vec![
+                    MenuItem::action("New File", NewFile),
                     MenuItem::action("Open…", OpenDialog),
                     MenuItem::separator(),
                     MenuItem::action("Close Tab", CloseTab),

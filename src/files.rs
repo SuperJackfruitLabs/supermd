@@ -106,6 +106,22 @@ impl FileTree {
         }
     }
 
+    /// Drop cached listings so the next render re-reads the disk.
+    pub fn refresh(&mut self) {
+        self.children.clear();
+    }
+
+    /// Expand every ancestor directory of `path` (so the row for a just-
+    /// opened file is present in the visible tree).
+    pub fn expand_to(&mut self, path: &Path) {
+        for ancestor in path.ancestors().skip(1) {
+            if !ancestor.starts_with(&self.root) || ancestor == self.root {
+                break;
+            }
+            self.expanded.insert(ancestor.to_path_buf());
+        }
+    }
+
     /// All files under the root (for the fuzzy finder). Bounded to keep
     /// pathological folders from stalling the UI.
     pub fn all_files(&self, limit: usize) -> Vec<PathBuf> {
@@ -132,5 +148,52 @@ impl FileTree {
             }
         }
         out
+    }
+}
+
+/// First free untitled name: "Untitled.md", then "Untitled 2.md", …
+pub fn pick_untitled(existing: &[String]) -> String {
+    let taken = |name: &str| existing.iter().any(|e| e == name);
+    if !taken("Untitled.md") {
+        return "Untitled.md".into();
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("Untitled {n}.md");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_to_opens_all_ancestors() {
+        let mut tree = FileTree::new(PathBuf::from("/root"));
+        tree.expand_to(Path::new("/root/a/b/c.md"));
+        assert!(tree.is_expanded(Path::new("/root/a")));
+        assert!(tree.is_expanded(Path::new("/root/a/b")));
+        assert!(!tree.is_expanded(Path::new("/root/a/b/c.md")));
+    }
+
+    #[test]
+    fn expand_to_ignores_paths_outside_root() {
+        let mut tree = FileTree::new(PathBuf::from("/root"));
+        tree.expand_to(Path::new("/elsewhere/x/y.md"));
+        assert!(!tree.is_expanded(Path::new("/elsewhere/x")));
+    }
+
+    #[test]
+    fn untitled_picks_first_free_name() {
+        assert_eq!(pick_untitled(&[]), "Untitled.md");
+        assert_eq!(pick_untitled(&["Untitled.md".into()]), "Untitled 2.md");
+        assert_eq!(
+            pick_untitled(&["Untitled.md".into(), "Untitled 2.md".into()]),
+            "Untitled 3.md"
+        );
     }
 }
