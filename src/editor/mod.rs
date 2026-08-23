@@ -61,6 +61,23 @@ enum Provider {
     Plain,
 }
 
+/// Digits needed for the last line number (gutter width).
+fn gutter_cols(line_count: usize) -> usize {
+    line_count.max(1).to_string().len()
+}
+
+#[cfg(test)]
+mod gutter_tests {
+    #[test]
+    fn gutter_cols_counts_digits_of_last_line() {
+        assert_eq!(super::gutter_cols(1), 1);
+        assert_eq!(super::gutter_cols(9), 1);
+        assert_eq!(super::gutter_cols(10), 2);
+        assert_eq!(super::gutter_cols(9999), 4);
+        assert_eq!(super::gutter_cols(0), 1);
+    }
+}
+
 /// Geometry of a painted line, kept for mouse hit-testing, IME rects,
 /// and vertical cursor movement.
 struct CachedLine {
@@ -888,8 +905,16 @@ impl Editor {
 
     // ── styling ────────────────────────────────────────────────────────
 
+    /// Code and plain files render mono, full width, with a gutter.
+    pub fn is_code_mode(&self) -> bool {
+        matches!(self.provider, Provider::Code(_) | Provider::Plain)
+    }
+
     /// (font size, base weight, family, line height multiple) for a line.
     fn line_typography(&self, ix: usize, t: &Theme) -> (f32, FontWeight, SharedString, f32) {
+        if self.is_code_mode() {
+            return (t.code_size, FontWeight::NORMAL, t.mono_family.clone(), 1.55);
+        }
         match self.line_kinds.get(ix) {
             Some(LineKind::Heading(n)) => {
                 let weight = if *n <= 2 { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
@@ -1754,7 +1779,17 @@ impl Render for Editor {
                     };
                     match item {
                         Some(projection::Item::Line(line_ix)) => {
-                            let (line_range, text, runs, dl, font_size, line_height_px, is_code) = {
+                            let (
+                                line_range,
+                                text,
+                                runs,
+                                dl,
+                                font_size,
+                                line_height_px,
+                                is_code,
+                                code_mode,
+                                line_count,
+                            ) = {
                                 let editor = editor_entity.read(cx);
                                 let (size_f, _, _, mult) = editor.line_typography(line_ix, &t);
                                 let (text, runs, dl) = editor.display_for_line(line_ix, &t);
@@ -1766,46 +1801,82 @@ impl Render for Editor {
                                     px(size_f),
                                     px(size_f * mult),
                                     matches!(editor.line_kinds.get(line_ix), Some(LineKind::Code)),
+                                    editor.is_code_mode(),
+                                    editor.core.buffer.line_count(),
                                 )
                             };
                             let mouse_editor = editor_entity.clone();
-                            div()
-                                .w_full()
-                                .flex()
-                                .flex_row()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .max_w(px(760.))
-                                        .px(px(48.))
-                                        .when(ix == 0, |d| d.pt(px(40.)))
-                                        .when(ix + 1 == item_count, |d| d.pb(px(96.)))
-                                        .when(is_code, |d| d.bg(t.code_bg))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            move |event, window, cx| {
-                                                mouse_editor.update(cx, |editor, cx| {
-                                                    editor.on_line_mouse_down(
-                                                        line_ix, event, window, cx,
-                                                    );
-                                                });
-                                            },
-                                        )
-                                        .child(LineElement {
-                                            editor: editor_entity.clone(),
-                                            line_ix,
-                                            range: line_range,
-                                            text,
-                                            runs,
-                                            display: dl,
-                                            font_size,
-                                            line_height: line_height_px,
-                                            caret_color: t.accent,
-                                            selection_color: Hsla { a: 0.25, ..t.accent },
-                                        }),
-                                )
-                                .into_any_element()
+                            let line_el = LineElement {
+                                editor: editor_entity.clone(),
+                                line_ix,
+                                range: line_range,
+                                text,
+                                runs,
+                                display: dl,
+                                font_size,
+                                line_height: line_height_px,
+                                caret_color: t.accent,
+                                selection_color: Hsla { a: 0.25, ..t.accent },
+                            };
+                            let on_down = move |event: &MouseDownEvent,
+                                                window: &mut Window,
+                                                cx: &mut App| {
+                                mouse_editor.update(cx, |editor, cx| {
+                                    editor.on_line_mouse_down(line_ix, event, window, cx);
+                                });
+                            };
+                            if code_mode {
+                                let cols = gutter_cols(line_count);
+                                let gutter_w = px(cols as f32 * 8.0 + 24.0);
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .flex_row()
+                                    .when(ix == 0, |d| d.pt(px(16.)))
+                                    .when(ix + 1 == item_count, |d| d.pb(px(64.)))
+                                    .child(
+                                        div()
+                                            .w(gutter_w)
+                                            .flex_none()
+                                            .pr(px(10.))
+                                            .flex()
+                                            .justify_end()
+                                            .font_family(t.mono_family.clone())
+                                            .text_size(px(t.code_size - 2.))
+                                            .line_height(relative(1.55 * t.code_size / (t.code_size - 2.)))
+                                            .text_color(Hsla { a: 0.5, ..t.fg_muted })
+                                            .child(SharedString::from(
+                                                (line_ix + 1).to_string(),
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .pr(px(16.))
+                                            .on_mouse_down(MouseButton::Left, on_down)
+                                            .child(line_el),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .max_w(px(760.))
+                                            .px(px(48.))
+                                            .when(ix == 0, |d| d.pt(px(40.)))
+                                            .when(ix + 1 == item_count, |d| d.pb(px(96.)))
+                                            .when(is_code, |d| d.bg(t.code_bg))
+                                            .on_mouse_down(MouseButton::Left, on_down)
+                                            .child(line_el),
+                                    )
+                                    .into_any_element()
+                            }
                         }
                         Some(projection::Item::Table { lines }) => column(
                             render_table(&editor_entity, ix, lines, &t, cx),
