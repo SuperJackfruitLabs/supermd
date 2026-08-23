@@ -697,6 +697,9 @@ impl Editor {
                     StyleKind::ListMarker | StyleKind::QuoteMarker => a.color = t.accent,
                     StyleKind::Rule => a.color = t.fg_muted,
                     StyleKind::FenceContent => a.color = t.code_fg,
+                    StyleKind::FenceDelimiter => {
+                        a.color = Hsla { a: 0.55, ..t.fg_muted };
+                    }
                     StyleKind::Syntax(capture) => {
                         if let Some(c) = Self::syntax_color(*capture, t) {
                             a.color = c;

@@ -17,6 +17,8 @@ pub enum StyleKind {
     ListMarker,
     QuoteMarker,
     FenceContent,
+    /// A ``` or ~~~ fence line (never hidden; rendered faded).
+    FenceDelimiter,
     Rule,
     /// Tree-sitter capture index into `highlight::CAPTURE_NAMES`.
     Syntax(u8),
@@ -39,8 +41,19 @@ fn markdown_options() -> Options {
 pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
     let mut spans = Vec::new();
 
-    for (body, _) in fence_infos(source) {
-        spans.push(StyleSpan { range: body, kind: StyleKind::FenceContent });
+    for fence in fence_infos(source) {
+        if fence.fenced {
+            let mut open = fence.block.start..fence.body.start;
+            let mut close = fence.body.end..fence.block.end;
+            trim_trailing_newline(source, &mut open);
+            trim_trailing_newline(source, &mut close);
+            for delim in [open, close] {
+                if delim.start < delim.end {
+                    spans.push(StyleSpan { range: delim, kind: StyleKind::FenceDelimiter });
+                }
+            }
+        }
+        spans.push(StyleSpan { range: fence.body, kind: StyleKind::FenceContent });
     }
 
     for (event, range) in Parser::new_ext(source, markdown_options()).into_offset_iter() {
@@ -138,8 +151,9 @@ pub fn markdown_spans_highlighted(source: &str, langs: &Languages) -> Vec<StyleS
         return Vec::new();
     }
     let mut spans = markdown_spans(source);
-    for (body, lang) in fence_infos(source) {
-        if let Some(lang) = lang {
+    for fence in fence_infos(source) {
+        if let Some(lang) = fence.lang {
+            let body = fence.body;
             for (range, capture) in langs.highlight(&lang, &source[body.clone()]) {
                 spans.push(StyleSpan {
                     range: body.start + range.start..body.start + range.end,
@@ -152,35 +166,50 @@ pub fn markdown_spans_highlighted(source: &str, langs: &Languages) -> Vec<StyleS
     spans
 }
 
-/// (body byte range, language) for every fenced/indented code block.
-fn fence_infos(source: &str) -> Vec<(Range<usize>, Option<String>)> {
+/// One code block: whole-block range, body range, info-string language,
+/// and whether it is fenced (indented blocks have no delimiters).
+struct FenceInfo {
+    block: Range<usize>,
+    body: Range<usize>,
+    lang: Option<String>,
+    fenced: bool,
+}
+
+fn fence_infos(source: &str) -> Vec<FenceInfo> {
     use pulldown_cmark::{CodeBlockKind, TagEnd};
     let mut out = Vec::new();
-    let mut current: Option<(Range<usize>, Option<String>)> = None;
+    let mut current: Option<FenceInfo> = None;
     for (event, range) in Parser::new_ext(source, markdown_options()).into_offset_iter() {
         match event {
             Event::Start(Tag::CodeBlock(kind)) => {
-                let lang = match kind {
-                    CodeBlockKind::Fenced(info) if !info.is_empty() => {
-                        Some(info.split_whitespace().next().unwrap_or("").to_string())
-                    }
-                    _ => None,
+                let (lang, fenced) = match kind {
+                    CodeBlockKind::Fenced(info) if !info.is_empty() => (
+                        Some(info.split_whitespace().next().unwrap_or("").to_string()),
+                        true,
+                    ),
+                    CodeBlockKind::Fenced(_) => (None, true),
+                    CodeBlockKind::Indented => (None, false),
                 };
-                current = Some((range.start..range.start, lang));
+                current = Some(FenceInfo {
+                    block: range.clone(),
+                    body: range.start..range.start,
+                    lang,
+                    fenced,
+                });
             }
             Event::Text(_) => {
-                if let Some((body, _)) = current.as_mut() {
-                    if body.start == body.end {
-                        *body = range;
+                if let Some(fence) = current.as_mut() {
+                    if fence.body.start == fence.body.end {
+                        fence.body = range;
                     } else {
-                        body.end = range.end;
+                        fence.body.end = range.end;
                     }
                 }
             }
             Event::End(TagEnd::CodeBlock) => {
-                if let Some(entry) = current.take() {
-                    if entry.0.start != entry.0.end {
-                        out.push(entry);
+                if let Some(fence) = current.take() {
+                    if fence.body.start != fence.body.end {
+                        out.push(fence);
                     }
                 }
             }
@@ -360,6 +389,30 @@ mod tests {
         let big = "x".repeat(MAX_STYLED_BYTES + 1);
         assert!(markdown_spans_highlighted(&big, &langs).is_empty());
         assert!(code_spans(&big, "rust", &langs).is_empty());
+    }
+
+    #[test]
+    fn fence_delimiters_spanned() {
+        let src = "```rust\nlet x = 1;\n```\n";
+        assert_eq!(
+            spans_of_kind(src, |k| *k == StyleKind::FenceDelimiter),
+            vec![0..7, 19..22]
+        );
+    }
+
+    #[test]
+    fn tilde_fence_delimiters() {
+        let src = "~~~\ncode\n~~~\n";
+        assert_eq!(
+            spans_of_kind(src, |k| *k == StyleKind::FenceDelimiter),
+            vec![0..3, 9..12]
+        );
+    }
+
+    #[test]
+    fn indented_code_has_no_delimiters() {
+        let src = "para\n\n    indented code\n";
+        assert!(spans_of_kind(src, |k| *k == StyleKind::FenceDelimiter).is_empty());
     }
 
     #[test]
