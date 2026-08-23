@@ -1,3 +1,4 @@
+mod editor;
 mod files;
 mod finder;
 mod highlight;
