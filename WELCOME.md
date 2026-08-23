@@ -36,6 +36,8 @@ fn main() {
 | 4 | Tables, images, doc projection | Done |
 | 5 | Polish: ✓ checkboxes, ⌘F, watching, chrome | Done |
 | 6 | Seti icons, 36 languages, image tabs | Done |
+| 7 | Pre-release UX: focus mode, ⌘/, nav | Done |
+| 8 | Code-first: gutter, 77 langs (inkjet) | Done |
 
 This very table is a live widget now — click a row to edit its raw pipes.
 
