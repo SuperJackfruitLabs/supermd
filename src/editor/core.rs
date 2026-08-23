@@ -2,10 +2,34 @@
 //! one selection, and the undo history.
 
 use std::ops::Range;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::buffer::{Buffer, Edit};
 use super::movement;
+
+pub const GROUP_WINDOW: Duration = Duration::from_millis(700);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    Insert,
+    Delete,
+}
+
+struct UndoGroup {
+    /// Edits in application order.
+    edits: Vec<Edit>,
+    selection_before: Selection,
+    selection_after: Selection,
+}
+
+#[derive(Default)]
+struct History {
+    undo: Vec<UndoGroup>,
+    redo: Vec<UndoGroup>,
+    last_kind: Option<EditKind>,
+    last_at: Option<Instant>,
+    broken: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
@@ -30,6 +54,7 @@ impl Selection {
 pub struct EditorCore {
     pub buffer: Buffer,
     pub selection: Selection,
+    history: History,
 }
 
 impl EditorCore {
@@ -37,7 +62,39 @@ impl EditorCore {
         Self {
             buffer: Buffer::from_text(text),
             selection: Selection::cursor(0),
+            history: History::default(),
         }
+    }
+
+    pub fn break_undo_group(&mut self) {
+        self.history.broken = true;
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(group) = self.history.undo.pop() else {
+            return false;
+        };
+        for edit in group.edits.iter().rev() {
+            let range = edit.range.start..edit.range.start + edit.new.len();
+            self.buffer.replace(range, &edit.old);
+        }
+        self.selection = group.selection_before;
+        self.history.redo.push(group);
+        self.history.broken = true;
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(group) = self.history.redo.pop() else {
+            return false;
+        };
+        for edit in &group.edits {
+            self.buffer.replace(edit.range.clone(), &edit.new);
+        }
+        self.selection = group.selection_after;
+        self.history.undo.push(group);
+        self.history.broken = true;
+        true
     }
 
     pub fn set_cursor(&mut self, offset: usize) {
@@ -57,10 +114,34 @@ impl EditorCore {
         self.buffer.slice(self.selection.range())
     }
 
-    fn apply(&mut self, range: Range<usize>, text: &str, _now: Instant) -> Edit {
+    fn apply(&mut self, range: Range<usize>, text: &str, now: Instant) {
+        let selection_before = self.selection;
+        let kind = if text.is_empty() { EditKind::Delete } else { EditKind::Insert };
         let edit = self.buffer.replace(range.clone(), text);
         self.selection = Selection::cursor(range.start + text.len());
-        edit
+
+        let coalesce = !self.history.broken
+            && self.history.last_kind == Some(kind)
+            && self
+                .history
+                .last_at
+                .is_some_and(|at| now.duration_since(at) <= GROUP_WINDOW)
+            && !self.history.undo.is_empty();
+        if coalesce {
+            let group = self.history.undo.last_mut().unwrap();
+            group.edits.push(edit);
+            group.selection_after = self.selection;
+        } else {
+            self.history.undo.push(UndoGroup {
+                edits: vec![edit],
+                selection_before,
+                selection_after: self.selection,
+            });
+        }
+        self.history.redo.clear();
+        self.history.last_kind = Some(kind);
+        self.history.last_at = Some(now);
+        self.history.broken = false;
     }
 
     pub fn insert(&mut self, text: &str, now: Instant) {
@@ -154,5 +235,88 @@ mod tests {
         assert_eq!(sel.range(), 2..9);
         assert!(!sel.is_cursor());
         assert!(Selection::cursor(4).is_cursor());
+    }
+
+    use std::time::Duration;
+
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
+    #[test]
+    fn undo_reverts_and_redo_reapplies() {
+        let mut ed = EditorCore::new("abc");
+        ed.set_cursor(3);
+        ed.insert("d", t0());
+        assert!(ed.undo());
+        assert_eq!(ed.buffer.text(), "abc");
+        assert_eq!(ed.selection, Selection::cursor(3));
+        assert!(ed.redo());
+        assert_eq!(ed.buffer.text(), "abcd");
+        assert_eq!(ed.selection, Selection::cursor(4));
+        assert!(!ed.redo());
+    }
+
+    #[test]
+    fn rapid_typing_coalesces_into_one_group() {
+        let mut ed = EditorCore::new("");
+        let start = t0();
+        ed.insert("h", start);
+        ed.insert("e", start + Duration::from_millis(100));
+        ed.insert("y", start + Duration::from_millis(200));
+        assert!(ed.undo());
+        assert_eq!(ed.buffer.text(), "");
+        assert!(!ed.undo());
+    }
+
+    #[test]
+    fn pause_breaks_group() {
+        let mut ed = EditorCore::new("");
+        let start = t0();
+        ed.insert("hi", start);
+        ed.insert(" there", start + Duration::from_millis(1500));
+        ed.undo();
+        assert_eq!(ed.buffer.text(), "hi");
+        ed.undo();
+        assert_eq!(ed.buffer.text(), "");
+    }
+
+    #[test]
+    fn kind_change_breaks_group() {
+        let mut ed = EditorCore::new("");
+        let start = t0();
+        ed.insert("hey", start);
+        ed.backspace(start + Duration::from_millis(50));
+        ed.insert("y", start + Duration::from_millis(100));
+        assert_eq!(ed.buffer.text(), "hey");
+        ed.undo(); // undoes the trailing "y" insert
+        assert_eq!(ed.buffer.text(), "he");
+        ed.undo(); // undoes the backspace
+        assert_eq!(ed.buffer.text(), "hey");
+        ed.undo(); // undoes the initial insert
+        assert_eq!(ed.buffer.text(), "");
+    }
+
+    #[test]
+    fn cursor_jump_breaks_group() {
+        let mut ed = EditorCore::new("xx");
+        let start = t0();
+        ed.set_cursor(2);
+        ed.insert("a", start);
+        ed.set_cursor(0);
+        ed.break_undo_group();
+        ed.insert("b", start + Duration::from_millis(50));
+        ed.undo();
+        assert_eq!(ed.buffer.text(), "xxa");
+    }
+
+    #[test]
+    fn new_edit_clears_redo() {
+        let mut ed = EditorCore::new("");
+        ed.insert("a", t0());
+        ed.undo();
+        ed.insert("b", t0());
+        assert!(!ed.redo());
+        assert_eq!(ed.buffer.text(), "b");
     }
 }
