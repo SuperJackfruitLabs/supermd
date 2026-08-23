@@ -96,6 +96,50 @@ pub fn blocks(source: &str) -> Vec<BlockInfo> {
     out
 }
 
+/// Split a table row into trimmed cells on unescaped pipes; edge pipes
+/// don't produce empty edge cells. Escapes are kept verbatim (the cell
+/// text is still raw source this phase).
+pub fn parse_row(line: &str) -> Vec<String> {
+    let mut cells = vec![String::new()];
+    let mut escaped = false;
+    for ch in line.chars() {
+        if escaped {
+            cells.last_mut().unwrap().push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                cells.last_mut().unwrap().push(ch);
+                escaped = true;
+            }
+            '|' => cells.push(String::new()),
+            c => cells.last_mut().unwrap().push(c),
+        }
+    }
+    let mut cells: Vec<String> = cells.into_iter().map(|c| c.trim().to_string()).collect();
+    let trimmed = line.trim();
+    if trimmed.starts_with('|') && cells.first().is_some_and(|c| c.is_empty()) {
+        cells.remove(0);
+    }
+    if trimmed.ends_with('|')
+        && !trimmed.ends_with("\\|")
+        && cells.last().is_some_and(|c| c.is_empty())
+    {
+        cells.pop();
+    }
+    cells
+}
+
+/// A row of only dashes/colons cells (`| --- | :-: |`).
+pub fn is_separator_row(line: &str) -> bool {
+    let cells = parse_row(line);
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            !c.is_empty() && c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':'))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +208,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fence, None);
+    }
+
+    #[test]
+    fn parse_row_basic_and_edge_pipes() {
+        assert_eq!(parse_row("| a | b |"), vec!["a", "b"]);
+        assert_eq!(parse_row("a | b"), vec!["a", "b"]);
+        assert_eq!(parse_row("| a |  | c |"), vec!["a", "", "c"]);
+    }
+
+    #[test]
+    fn parse_row_escaped_pipe() {
+        assert_eq!(parse_row(r"| a \| x | b |"), vec![r"a \| x", "b"]);
+    }
+
+    #[test]
+    fn separator_rows() {
+        assert!(is_separator_row("| --- | --- |"));
+        assert!(is_separator_row("|:-:|----:|"));
+        assert!(!is_separator_row("| a | b |"));
+        assert!(!is_separator_row(""));
     }
 
     #[test]
