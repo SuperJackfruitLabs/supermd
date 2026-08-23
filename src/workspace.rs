@@ -487,14 +487,16 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|s| s.bg(t.hover_bg))
                 .when(is_active, |d| d.bg(t.selected_bg))
-                .when(is_dir, |d| {
-                    d.child(
-                        div()
-                            .text_size(px(9.))
-                            .text_color(t.fg_muted)
-                            .child(if expanded { "▼" } else { "▶" }),
-                    )
-                })
+                .child(
+                    // Fixed chevron slot on every row so icons align in a
+                    // column whether or not the row is a directory.
+                    div()
+                        .w(px(10.))
+                        .flex_none()
+                        .text_size(px(9.))
+                        .text_color(t.fg_muted)
+                        .when(is_dir, |d| d.child(if expanded { "▼" } else { "▶" })),
+                )
                 .child({
                     let (icon, tint) = if is_dir {
                         ("folder", t.fg_muted)
@@ -504,7 +506,7 @@ impl Workspace {
                     };
                     gpui::svg()
                         .path(SharedString::from(format!("icons/seti/{icon}.svg")))
-                        .size(px(15.))
+                        .size(px(16.))
                         .flex_none()
                         .text_color(tint)
                 })
