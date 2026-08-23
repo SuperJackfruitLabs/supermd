@@ -575,6 +575,45 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Checkbox toggle: a plain click on a ✓/○ glyph flips the source
+        // without moving the cursor into the line.
+        if !event.modifiers.shift {
+            let hit = self.layout_cache.get(&line_ix).and_then(|entry| {
+                let height = entry.line.size(entry.line_height).height;
+                let local = point(
+                    event.position.x - entry.origin.x,
+                    (event.position.y - entry.origin.y)
+                        .clamp(px(0.), (height - px(1.)).max(px(0.))),
+                );
+                let ix = match entry.line.closest_index_for_position(local, entry.line_height)
+                {
+                    Ok(i) | Err(i) => i,
+                };
+                entry
+                    .display
+                    .segs
+                    .iter()
+                    .find(|seg| {
+                        seg.toggle.is_some()
+                            && seg.disp.start <= ix
+                            && ix < seg.disp.end.max(seg.disp.start + 1)
+                    })
+                    .map(|seg| (seg.src.clone(), seg.toggle.unwrap()))
+            });
+            if let Some((src, checked)) = hit {
+                let saved = self.core.selection;
+                self.core.replace_range(
+                    src,
+                    if checked { "[ ]" } else { "[x]" },
+                    Instant::now(),
+                );
+                self.core.break_undo_group();
+                self.core.selection = saved;
+                self.after_edit(cx);
+                return;
+            }
+        }
+
         let offset = self
             .offset_at_point(event.position)
             .unwrap_or_else(|| self.core.buffer.line_range(line_ix).start);
