@@ -49,7 +49,7 @@ no changes. Phase 3's per-line transform continues to run inside every
 pub enum BlockKind {
     Table,
     Image { alt: String, dest: String },
-    Fence { open_line: Range<usize>, close_line: Range<usize> }, // byte ranges of delimiter lines
+    Fence { open_line: Range<usize>, close_line: Option<Range<usize>> }, // delimiter-line byte ranges; None when unclosed at EOF
 }
 pub struct BlockInfo { pub range: Range<usize>, pub kind: BlockKind }
 pub fn blocks(source: &str) -> Vec<BlockInfo>
