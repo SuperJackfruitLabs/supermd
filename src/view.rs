@@ -133,6 +133,9 @@ fn capture_color(capture: u8, t: &Theme) -> Option<Hsla> {
         "property" => s.property,
         "string" => s.string,
         "tag" => s.tag,
+        "namespace" => s.kind,
+        "label" => s.constant,
+        "special" => s.string,
         "variable" => match *name {
             "variable.builtin" => s.property,
             _ => return None,

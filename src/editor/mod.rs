@@ -915,6 +915,9 @@ impl Editor {
             "property" => s.property,
             "string" => s.string,
             "tag" => s.tag,
+            "namespace" => s.kind,
+            "label" => s.constant,
+            "special" => s.string,
             _ => return None,
         })
     }
