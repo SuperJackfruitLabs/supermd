@@ -370,6 +370,44 @@ mod tests {
     }
 
     #[test]
+    fn all_new_grammars_produce_spans() {
+        let langs = Languages::new();
+        let cases: &[(&str, &str)] = &[
+            ("yaml", "key: value\n"),
+            ("toml", "[section]\nkey = \"v\"\n"),
+            ("ruby", "def foo\n  1\nend\n"),
+            ("java", "class A { int x = 1; }\n"),
+            ("php", "<?php function f() { return 1; } ?>\n"),
+            ("cpp", "int main() { return 0; }\n"),
+            ("csharp", "class A { int x = 1; }\n"),
+            ("lua", "local x = 1\n"),
+            ("elixir", "defmodule A do\n  def f, do: 1\nend\n"),
+            ("haskell", "main = print 1\n"),
+            ("ocaml", "let x = 1\n"),
+            ("scala", "object A { val x = 1 }\n"),
+            ("zig", "const x = 1;\n"),
+            ("swift", "func f() -> Int { return 1 }\n"),
+            ("elm", "x = 1\n"),
+            ("erlang", "-module(a).\n"),
+            ("sql", "SELECT * FROM t;\n"),
+            ("xml", "<a b=\"c\">x</a>\n"),
+            ("regex", "[a-z]+|foo\n"),
+            ("nix", "{ x = 1; }\n"),
+            ("r", "x <- 1\n"),
+            ("gleam", "pub fn main() { 1 }\n"),
+            ("svelte", "<div class=\"a\">{name}</div>\n"),
+            ("dart", "void main() {}\n"),
+            ("d", "void main() {}\n"),
+        ];
+        for (lang, src) in cases {
+            assert!(
+                !langs.highlight(lang, src).is_empty(),
+                "no spans for {lang}"
+            );
+        }
+    }
+
+    #[test]
     fn code_spans_unknown_language_is_empty() {
         let langs = Languages::new();
         assert!(code_spans("hello\n", "klingon", &langs).is_empty());

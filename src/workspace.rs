@@ -504,9 +504,11 @@ impl Workspace {
                         let (icon, color) = seti::icon_for(&entry.name);
                         (icon, seti_tint(color, &t))
                     };
+                    // Seti glyphs carry ~30% internal padding, so the box
+                    // runs larger than the text for a matched visual size.
                     gpui::svg()
                         .path(SharedString::from(format!("icons/seti/{icon}.svg")))
-                        .size(px(16.))
+                        .size(px(20.))
                         .flex_none()
                         .text_color(tint)
                 })

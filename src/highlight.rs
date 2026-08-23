@@ -154,6 +154,50 @@ impl Languages {
             "",
             "",
         );
+        add("yaml", tree_sitter_yaml::LANGUAGE, tree_sitter_yaml::HIGHLIGHTS_QUERY, "", "");
+        add("toml", tree_sitter_toml_ng::LANGUAGE, tree_sitter_toml_ng::HIGHLIGHTS_QUERY, "", "");
+        add("ruby", tree_sitter_ruby::LANGUAGE, tree_sitter_ruby::HIGHLIGHTS_QUERY, "", "");
+        add("java", tree_sitter_java::LANGUAGE, tree_sitter_java::HIGHLIGHTS_QUERY, "", "");
+        add("php", tree_sitter_php::LANGUAGE_PHP, tree_sitter_php::HIGHLIGHTS_QUERY, "", "");
+        // C++'s bundled query holds only the additions over C's.
+        add(
+            "cpp",
+            tree_sitter_cpp::LANGUAGE,
+            &format!(
+                "{}\n{}",
+                tree_sitter_c::HIGHLIGHT_QUERY,
+                tree_sitter_cpp::HIGHLIGHT_QUERY
+            ),
+            "",
+            "",
+        );
+        add("csharp", tree_sitter_c_sharp::LANGUAGE, tree_sitter_c_sharp::HIGHLIGHTS_QUERY, "", "");
+        add("lua", tree_sitter_lua::LANGUAGE, tree_sitter_lua::HIGHLIGHTS_QUERY, "", "");
+        add("elixir", tree_sitter_elixir::LANGUAGE, tree_sitter_elixir::HIGHLIGHTS_QUERY, "", "");
+        add("haskell", tree_sitter_haskell::LANGUAGE, tree_sitter_haskell::HIGHLIGHTS_QUERY, "", "");
+        add("ocaml", tree_sitter_ocaml::LANGUAGE_OCAML, tree_sitter_ocaml::HIGHLIGHTS_QUERY, "", "");
+        add("scala", tree_sitter_scala::LANGUAGE, tree_sitter_scala::HIGHLIGHTS_QUERY, "", "");
+        add("zig", tree_sitter_zig::LANGUAGE, tree_sitter_zig::HIGHLIGHTS_QUERY, "", "");
+        add("swift", tree_sitter_swift::LANGUAGE, tree_sitter_swift::HIGHLIGHTS_QUERY, "", "");
+        add("elm", tree_sitter_elm::LANGUAGE, tree_sitter_elm::HIGHLIGHTS_QUERY, "", "");
+        add("erlang", tree_sitter_erlang::LANGUAGE, tree_sitter_erlang::HIGHLIGHTS_QUERY, "", "");
+        add("sql", tree_sitter_sequel::LANGUAGE, tree_sitter_sequel::HIGHLIGHTS_QUERY, "", "");
+        add("xml", tree_sitter_xml::LANGUAGE_XML, tree_sitter_xml::XML_HIGHLIGHT_QUERY, "", "");
+        add("regex", tree_sitter_regex::LANGUAGE, tree_sitter_regex::HIGHLIGHTS_QUERY, "", "");
+        add("nix", tree_sitter_nix::LANGUAGE, tree_sitter_nix::HIGHLIGHTS_QUERY, "", "");
+        add("r", tree_sitter_r::LANGUAGE, tree_sitter_r::HIGHLIGHTS_QUERY, "", "");
+        add("gleam", tree_sitter_gleam::LANGUAGE, tree_sitter_gleam::HIGHLIGHT_QUERY, "", "");
+        add("svelte", tree_sitter_svelte_ng::LANGUAGE, tree_sitter_svelte_ng::HIGHLIGHTS_QUERY, "", "");
+        add("dart", tree_sitter_dart::LANGUAGE, tree_sitter_dart::HIGHLIGHTS_QUERY, "", "");
+        // tree-sitter-d ships its query file but not the Rust const;
+        // vendored under assets/queries (see its README).
+        add(
+            "d",
+            tree_sitter_d::LANGUAGE,
+            include_str!("../assets/queries/d-highlights.scm"),
+            "",
+            "",
+        );
 
         Self { configs }
     }
@@ -166,6 +210,15 @@ impl Languages {
             "py" => "python",
             "sh" | "shell" | "zsh" => "bash",
             "golang" => "go",
+            "yml" => "yaml",
+            "rb" => "ruby",
+            "cs" | "c#" => "csharp",
+            "c++" | "cc" | "hpp" | "cxx" => "cpp",
+            "ex" | "exs" => "elixir",
+            "hs" => "haskell",
+            "ml" | "mli" => "ocaml",
+            "sc" => "scala",
+            "erl" | "hrl" => "erlang",
             other => other,
         };
         self.configs
