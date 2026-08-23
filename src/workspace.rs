@@ -40,6 +40,8 @@ pub enum Tab {
         editor: Entity<Editor>,
         preview: Option<Entity<Reader>>,
     },
+    /// Read-only image viewer.
+    Image { path: PathBuf, title: SharedString },
 }
 
 impl Tab {
@@ -47,6 +49,7 @@ impl Tab {
         match self {
             Tab::Reader(reader) => reader.read(cx).title.clone(),
             Tab::Editor { editor, .. } => editor.read(cx).title(),
+            Tab::Image { title, .. } => title.clone(),
         }
     }
 
@@ -54,6 +57,7 @@ impl Tab {
         match self {
             Tab::Reader(reader) => reader.read(cx).path.clone(),
             Tab::Editor { editor, .. } => Some(editor.read(cx).path().to_path_buf()),
+            Tab::Image { path, .. } => Some(path.clone()),
         }
     }
 }
@@ -293,6 +297,22 @@ impl Workspace {
             .position(|tab| tab.path(cx).as_deref() == Some(path))
         {
             self.set_active(ix, window, cx);
+            return;
+        }
+        if crate::files::is_image_path(path) {
+            self.flush_tab(self.active, cx);
+            if let Some(tree) = &mut self.tree {
+                tree.expand_to(path);
+            }
+            let title: SharedString = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+                .into();
+            self.tabs.push(Tab::Image { path: path.to_path_buf(), title });
+            self.active = self.tabs.len() - 1;
+            self.focus_active(window, cx);
+            cx.notify();
             return;
         }
         match Editor::read_file(path) {
@@ -682,6 +702,7 @@ impl Workspace {
                         .collect(),
                     OutlineTarget::Editor(editor.clone()),
                 ),
+                Tab::Image { .. } => return None,
             };
 
         if entries.len() < 2 {
@@ -798,6 +819,20 @@ impl Render for Workspace {
                 preview.clone().into_any_element()
             }
             Some(Tab::Editor { editor, preview: None }) => editor.clone().into_any_element(),
+            Some(Tab::Image { path, .. }) => div()
+                .size_full()
+                .bg(t.bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(32.))
+                .child(
+                    gpui::img(path.clone())
+                        .max_w_full()
+                        .max_h_full()
+                        .rounded_md(),
+                )
+                .into_any_element(),
             None => self.render_empty(cx),
         };
 

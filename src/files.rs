@@ -151,6 +151,18 @@ impl FileTree {
     }
 }
 
+/// Files the image viewer tab opens (everything else goes to the editor).
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico"
+            )
+        })
+}
+
 /// First free untitled name: "Untitled.md", then "Untitled 2.md", …
 pub fn pick_untitled(existing: &[String]) -> String {
     let taken = |name: &str| existing.iter().any(|e| e == name);
@@ -185,6 +197,16 @@ mod tests {
         let mut tree = FileTree::new(PathBuf::from("/root"));
         tree.expand_to(Path::new("/elsewhere/x/y.md"));
         assert!(!tree.is_expanded(Path::new("/elsewhere/x")));
+    }
+
+    #[test]
+    fn image_paths_detected_case_insensitively() {
+        for name in ["a.png", "b.JPG", "c.jpeg", "d.gif", "e.webp", "f.svg", "g.bmp", "h.ico"] {
+            assert!(is_image_path(Path::new(name)), "{name}");
+        }
+        for name in ["x.md", "y.rs", "z.pngx", "noext"] {
+            assert!(!is_image_path(Path::new(name)), "{name}");
+        }
     }
 
     #[test]
