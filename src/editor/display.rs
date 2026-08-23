@@ -160,6 +160,23 @@ fn collect_directives(
                     }
                 }
             }
+            StyleKind::Link => {
+                if start_on_line && end_on_line {
+                    let l = span.range.start - line_start;
+                    let e = span.range.end - line_start;
+                    if let Some(text_end) = scan_link(&line[l..e]) {
+                        // Hide "[" and "](dest)"; keep the inner text.
+                        out.push((
+                            span.range.start..span.range.start + 1,
+                            Action::Hide(Bias::Right),
+                        ));
+                        out.push((
+                            span.range.start + text_end..span.range.end,
+                            Action::Hide(Bias::Left),
+                        ));
+                    }
+                }
+            }
             StyleKind::Heading(_) => {
                 if start_on_line {
                     let l = span.range.start - line_start;
@@ -194,8 +211,9 @@ fn collect_directives(
         }
     }
 
-    // Sort, clamp to the line, drop empties and overlaps (first wins).
-    out.sort_by_key(|(range, _)| (range.start, range.end));
+    // Sort (outer directive first at equal starts), clamp to the line,
+    // drop empties and overlaps (first wins).
+    out.sort_by(|(a, _), (b, _)| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
     let mut result: Vec<(Range<usize>, Action)> = Vec::new();
     let mut last_end = line_start;
     for (range, action) in out {
@@ -208,6 +226,54 @@ fn collect_directives(
         result.push((start..end, action));
     }
     result
+}
+
+/// If `s` is exactly `[text](dest)`, return the byte offset of the `]`
+/// closing the text part (so `s[1..ret]` is the inner text and
+/// `s[ret..]` is the `](dest)` tail to hide). None if it doesn't scan.
+fn scan_link(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.first() != Some(&b'[') {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut i = 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if depth != 0 || i + 1 >= bytes.len() || bytes[i + 1] != b'(' {
+        return None;
+    }
+    let text_end = i; // index of ']'
+    let mut paren_depth = 1usize;
+    let mut j = i + 2;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'(' => paren_depth += 1,
+            b')' => {
+                paren_depth -= 1;
+                if paren_depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    if paren_depth != 0 || j + 1 != bytes.len() {
+        return None;
+    }
+    Some(text_end)
 }
 
 pub fn display_line(
@@ -470,6 +536,65 @@ mod tests {
         // Cursor anywhere on the line (span covers it) reveals.
         let dl = display_line("## Title", 0, &[span(0..8, StyleKind::Heading(2))], 5..5);
         assert_eq!(dl.text, "## Title");
+    }
+
+    #[test]
+    fn link_collapses_to_inner_text() {
+        // "see [zed](https://zed.dev) now" — Link span 4..26
+        let dl = display_line(
+            "see [zed](https://zed.dev) now",
+            0,
+            &[span(4..26, StyleKind::Link)],
+            100..100,
+        );
+        assert_eq!(dl.text, "see zed now");
+    }
+
+    #[test]
+    fn link_reveals_on_touch() {
+        let dl = display_line(
+            "see [zed](https://zed.dev) now",
+            0,
+            &[span(4..26, StyleKind::Link)],
+            8..8,
+        );
+        assert_eq!(dl.text, "see [zed](https://zed.dev) now");
+    }
+
+    #[test]
+    fn nested_brackets_in_link_text() {
+        // "[a[b]c](u)" span 0..10 -> inner "a[b]c"
+        let dl = display_line("[a[b]c](u)", 0, &[span(0..10, StyleKind::Link)], 100..100);
+        assert_eq!(dl.text, "a[b]c");
+    }
+
+    #[test]
+    fn unscannable_link_stays_visible() {
+        // Span deliberately not matching [text](dest) shape.
+        let dl = display_line("<https://x.y>", 0, &[span(0..13, StyleKind::Link)], 100..100);
+        assert_eq!(dl.text, "<https://x.y>");
+    }
+
+    #[test]
+    fn overlapping_directives_first_wins() {
+        // Two spans claiming overlapping delimiter bytes: the second's
+        // conflicting directive is dropped, output stays consistent.
+        // (Synthetic — real pulldown spans nest without delimiter overlap.)
+        let spans = [
+            span(0..7, StyleKind::Strong),
+            span(1..6, StyleKind::Emphasis),
+        ];
+        let dl = display_line("***it***", 0, &spans, 100..100);
+        assert_eq!(dl.text, "*it*");
+        for seg in &dl.segs {
+            if seg.kind == SegKind::Verbatim {
+                for src in seg.src.clone() {
+                    if src != seg.src.start {
+                        assert_eq!(disp_to_src(&dl, src_to_disp(&dl, src)), src);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
