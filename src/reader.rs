@@ -111,35 +111,43 @@ impl Reader {
     }
 
     pub fn scroll_to_block(&mut self, block_ix: usize, cx: &mut Context<Self>) {
-        let start = self.list_state.logical_scroll_top().item_ix as f32;
-        let end = block_ix as f32;
-        if (end - start).abs() < 2.0 {
-            self.list_state
-                .scroll_to(ListOffset { item_ix: block_ix, offset_in_item: px(0.) });
+        let state = self.list_state.clone();
+        let current = -state.scroll_px_offset_for_scrollbar().y;
+        state.scroll_to(ListOffset { item_ix: block_ix, offset_in_item: px(0.) });
+        let target_px = -state.scroll_px_offset_for_scrollbar().y;
+        if (target_px - current).abs() < px(24.) {
             cx.notify();
             return;
         }
+        state.set_offset_from_scrollbar(gpui::point(px(0.), -current));
         self.scroll_anim = Some(cx.spawn(async move |this, cx| {
-            const FRAMES: u32 = 18;
+            const FRAMES: u32 = 22;
             for frame in 1..=FRAMES {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(12))
+                    .timer(std::time::Duration::from_millis(11))
                     .await;
                 let t = frame as f32 / FRAMES as f32;
                 let eased = 1.0 - (1.0 - t).powi(3);
-                let ix = (start + (end - start) * eased).round().max(0.) as usize;
+                let y = current + (target_px - current) * eased;
                 if this
                     .update(cx, |reader, cx| {
                         reader
                             .list_state
-                            .scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+                            .set_offset_from_scrollbar(gpui::point(px(0.), -y));
                         cx.notify();
                     })
                     .is_err()
                 {
-                    break;
+                    return;
                 }
             }
+            this.update(cx, |reader, cx| {
+                reader
+                    .list_state
+                    .scroll_to(ListOffset { item_ix: block_ix, offset_in_item: px(0.) });
+                cx.notify();
+            })
+            .ok();
         }));
     }
 }
