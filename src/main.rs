@@ -81,6 +81,9 @@ fn main() {
             KeyBinding::new("cmd-shift-f", ToggleFocusMode, None),
             KeyBinding::new("cmd-1", workspace::FocusSidebar, None),
             KeyBinding::new("cmd-/", workspace::ToggleShortcuts, None),
+            KeyBinding::new("cmd-=", workspace::ZoomIn, None),
+            KeyBinding::new("cmd--", workspace::ZoomOut, None),
+            KeyBinding::new("cmd-0", workspace::ZoomReset, None),
             KeyBinding::new("escape", workspace::ToggleShortcuts, Some("Shortcuts")),
             // Sidebar navigation (while the sidebar is focused)
             KeyBinding::new("up", workspace::SidebarUp, Some("Sidebar")),

@@ -37,6 +37,9 @@ actions!(
         SidebarCollapse,
         SidebarOpen,
         ToggleShortcuts,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
     ]
 );
 
@@ -59,6 +62,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌃ Tab / ⌘ ⇧ ]", "Next tab"),
             ("⌘ ⇧ [", "Previous tab"),
             ("⌘ S", "Save now"),
+            ("⌘ + / − / 0", "Zoom image tab"),
             ("⌘ /", "This dialog"),
         ],
     ),
@@ -94,8 +98,8 @@ pub enum Tab {
         editor: Entity<Editor>,
         preview: Option<Entity<Reader>>,
     },
-    /// Read-only image viewer.
-    Image { path: PathBuf, title: SharedString },
+    /// Read-only image viewer. `zoom` is relative to fit (1.0 = fit).
+    Image { path: PathBuf, title: SharedString, zoom: f32 },
 }
 
 impl Tab {
@@ -375,7 +379,7 @@ impl Workspace {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string())
                 .into();
-            self.tabs.push(Tab::Image { path: path.to_path_buf(), title });
+            self.tabs.push(Tab::Image { path: path.to_path_buf(), title, zoom: 1.0 });
             self.active = self.tabs.len() - 1;
             self.focus_active(window, cx);
             cx.notify();
@@ -619,6 +623,28 @@ impl Workspace {
         } else {
             self.open_path(&entry.path, window, cx);
         }
+    }
+
+    fn adjust_zoom(&mut self, factor: Option<f32>, cx: &mut Context<Self>) {
+        if let Some(Tab::Image { zoom, .. }) = self.tabs.get_mut(self.active) {
+            *zoom = match factor {
+                Some(f) => (*zoom * f).clamp(0.25, 8.0),
+                None => 1.0,
+            };
+            cx.notify();
+        }
+    }
+
+    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.adjust_zoom(Some(1.25), cx);
+    }
+
+    fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.adjust_zoom(Some(0.8), cx);
+    }
+
+    fn zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
+        self.adjust_zoom(None, cx);
     }
 
     fn toggle_shortcuts(
@@ -1112,20 +1138,29 @@ impl Render for Workspace {
                 preview.clone().into_any_element()
             }
             Some(Tab::Editor { editor, preview: None }) => editor.clone().into_any_element(),
-            Some(Tab::Image { path, .. }) => div()
-                .size_full()
-                .bg(t.bg)
-                .flex()
-                .items_center()
-                .justify_center()
-                .p(px(32.))
-                .child(
-                    gpui::img(path.clone())
-                        .max_w_full()
-                        .max_h_full()
-                        .rounded_md(),
-                )
-                .into_any_element(),
+            Some(Tab::Image { path, zoom, .. }) => {
+                let zoom = *zoom;
+                if zoom <= 1.0 + f32::EPSILON && zoom >= 1.0 - f32::EPSILON {
+                    div()
+                        .size_full()
+                        .bg(t.bg)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(px(32.))
+                        .child(gpui::img(path.clone()).max_w_full().max_h_full().rounded_md())
+                        .into_any_element()
+                } else {
+                    div()
+                        .id("image-zoom-scroll")
+                        .size_full()
+                        .bg(t.bg)
+                        .overflow_scroll()
+                        .p(px(32.))
+                        .child(gpui::img(path.clone()).w(gpui::relative(zoom)))
+                        .into_any_element()
+                }
+            }
             None => self.render_empty(cx),
         };
 
@@ -1148,6 +1183,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::focus_sidebar))
             .on_action(cx.listener(Self::toggle_shortcuts))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::zoom_reset))
             .flex()
             .flex_row()
             .children(sidebar)
