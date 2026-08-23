@@ -37,9 +37,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature: required for arm64 binaries to run at all. This is
-# NOT notarization — first launch needs right-click → Open.
-codesign --force --deep --sign - "$APP"
+# Sign with a Developer ID identity when provided (hardened runtime,
+# notarization-ready); otherwise ad-hoc (right-click → Open on first
+# launch).
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+    codesign --force --deep --options runtime --timestamp \
+        --sign "$SIGN_IDENTITY" "$APP"
+else
+    codesign --force --deep --sign - "$APP"
+fi
 
 echo "creating dmg…"
 hdiutil create -volname supermd -srcfolder "$APP" -ov -format UDZO \

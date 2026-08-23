@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    name: Build macOS app + DMG
+    name: Build, sign, notarize macOS app
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,10 +17,54 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test
+
+      - name: Import signing certificate
+        if: ${{ secrets.MACOS_CERT_P12 != '' }}
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN=build.keychain
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "$CERT_P12" | base64 -d > cert.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import cert.p12 -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain
+          rm cert.p12
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep "Developer ID Application" | head -1 \
+            | sed 's/.*"\(.*\)"/\1/')
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Signing as: $IDENTITY"
+
       - name: Bundle
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           bash scripts/bundle_macos.sh "$VERSION"
+
+      - name: Notarize and staple
+        if: ${{ env.SIGN_IDENTITY != '' }}
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          echo "$NOTARY_KEY_P8" | base64 -d > notary.p8
+          DMG=$(ls dist/supermd-*.dmg)
+          xcrun notarytool submit "$DMG" \
+            --key notary.p8 \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait
+          rm notary.p8
+          xcrun stapler staple "$DMG"
+          spctl --assess --type open --context context:primary-signature -v "$DMG"
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
