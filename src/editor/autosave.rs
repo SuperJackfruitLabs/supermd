@@ -18,8 +18,6 @@ impl SavePolicy {
         self.last_edit = Some(now);
     }
 
-    // Used by tests today; the workspace UI will surface dirty state later.
-    #[allow(dead_code)]
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
@@ -110,6 +108,12 @@ pub fn disk_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// Reload-from-disk policy: only clean buffers whose file actually
+/// changed reload; dirty buffers always keep the user's edits.
+pub fn should_reload(dirty: bool, mtime_changed: bool) -> bool {
+    !dirty && mtime_changed
+}
+
 pub fn has_conflict(expected: Option<SystemTime>, path: &Path) -> bool {
     match (expected, disk_mtime(path)) {
         (Some(expected), Some(actual)) => actual != expected,
@@ -173,6 +177,14 @@ mod tests {
 
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn reload_only_when_clean_and_changed() {
+        assert!(should_reload(false, true));
+        assert!(!should_reload(true, true)); // dirty buffers keep user edits
+        assert!(!should_reload(false, false));
+        assert!(!should_reload(true, false));
+    }
 
     #[test]
     fn backup_copies_original_once_per_session() {

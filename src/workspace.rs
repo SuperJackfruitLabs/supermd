@@ -71,6 +71,7 @@ pub struct Workspace {
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
     focus_handle: FocusHandle,
     last_title: String,
+    _watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl Workspace {
@@ -108,7 +109,95 @@ impl Workspace {
             finder: None,
             focus_handle: cx.focus_handle(),
             last_title: String::new(),
+            _watcher: None,
         }
+    }
+
+    /// (Re)start the fs watcher on the current workspace root and spawn
+    /// the event drain loop (200 ms coalescing).
+    pub fn setup_watcher(&mut self, cx: &mut Context<Self>) {
+        use notify::Watcher as _;
+        self._watcher = None;
+        let Some(tree) = &self.tree else {
+            return;
+        };
+        let root = tree.root.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+        let mut watcher = match notify::recommended_watcher(move |res| {
+            tx.send(res).ok();
+        }) {
+            Ok(watcher) => watcher,
+            Err(err) => {
+                eprintln!("supermd: file watcher unavailable: {err}");
+                return;
+            }
+        };
+        if let Err(err) = watcher.watch(&root, notify::RecursiveMode::Recursive) {
+            eprintln!("supermd: cannot watch {}: {err}", root.display());
+            return;
+        }
+        self._watcher = Some(watcher);
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                let mut paths: Vec<PathBuf> = Vec::new();
+                let mut disconnected = false;
+                loop {
+                    match rx.try_recv() {
+                        Ok(Ok(event)) => paths.extend(event.paths),
+                        Ok(Err(_)) => {}
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
+                    }
+                }
+                if disconnected {
+                    break;
+                }
+                if !paths.is_empty()
+                    && this
+                        .update(cx, |workspace, cx| workspace.on_fs_events(&paths, cx))
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn on_fs_events(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if let Some(tree) = &mut self.tree {
+            tree.refresh();
+        }
+        for tab in &self.tabs {
+            if let Tab::Editor { editor, .. } = tab {
+                let editor_path = editor.read(cx).path().to_path_buf();
+                if paths.iter().any(|p| *p == editor_path) {
+                    editor.update(cx, |editor, cx| {
+                        let changed =
+                            crate::editor::autosave::disk_mtime(&editor_path) != editor.disk_mtime;
+                        if crate::editor::autosave::should_reload(
+                            editor.save.is_dirty(),
+                            changed,
+                        ) {
+                            editor.reload_from_disk(cx);
+                        } else if changed && editor.save.is_dirty() {
+                            eprintln!(
+                                "supermd: {} changed on disk; keeping unsaved edits",
+                                editor_path.display()
+                            );
+                        }
+                    });
+                }
+            }
+        }
+        cx.notify();
     }
 
     fn sync_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -174,6 +263,7 @@ impl Workspace {
         if path.is_dir() {
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
+            self.setup_watcher(cx);
             cx.notify();
             return;
         }

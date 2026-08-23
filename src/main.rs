@@ -167,7 +167,13 @@ fn main() {
                 },
                 {
                     let arg = arg.clone();
-                    move |_window, cx| cx.new(|cx| Workspace::new(arg, cx))
+                    move |_window, cx| {
+                        cx.new(|cx| {
+                            let mut workspace = Workspace::new(arg, cx);
+                            workspace.setup_watcher(cx);
+                            workspace
+                        })
+                    }
                 },
             )
             .unwrap();

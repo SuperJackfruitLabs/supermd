@@ -259,6 +259,34 @@ impl Editor {
         cx.notify();
     }
 
+    /// Replace the buffer with the on-disk content (clean buffers only —
+    /// callers gate on `autosave::should_reload`). History resets.
+    pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
+        let mut head = self.core.selection.head.min(text.len());
+        while head > 0 && !text.is_char_boundary(head) {
+            head -= 1;
+        }
+        self.core = EditorCore::new(&text);
+        self.core.set_cursor(head);
+        self.save = SavePolicy::default();
+        self.disk_mtime = autosave::disk_mtime(&self.path);
+        self.marked_range = None;
+        let langs = crate::highlight::languages(cx);
+        self.restyle(&langs);
+        if self.find.is_some() {
+            let query = self
+                .find
+                .as_ref()
+                .map(|s| s.input.read(cx).content.to_string())
+                .unwrap_or_default();
+            self.recompute_matches(&query);
+        }
+        cx.notify();
+    }
+
     /// The one save path: conflict check → backup → atomic write.
     pub fn flush(&mut self, cx: &mut Context<Self>) {
         if !self.save.take_flush_now() {
