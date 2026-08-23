@@ -33,6 +33,11 @@ fn main() {
         cx.set_global(highlight::SyntaxLanguages(Arc::new(
             highlight::Languages::new(),
         )));
+        cx.set_global(editor::SessionBackups(Arc::new(std::sync::Mutex::new(
+            editor::autosave::BackupRegistry::new(
+                editor::autosave::BackupRegistry::default_dir(),
+            ),
+        ))));
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([

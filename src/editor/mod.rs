@@ -72,7 +72,13 @@ pub struct Editor {
     marked_range: Option<Range<usize>>,
     dragging: bool,
     preferred_x: Option<Pixels>,
+    save_task: Option<gpui::Task<()>>,
 }
+
+/// One backup registry per app session, shared by all editors.
+pub struct SessionBackups(pub std::sync::Arc<std::sync::Mutex<autosave::BackupRegistry>>);
+
+impl gpui::Global for SessionBackups {}
 
 fn is_markdown(path: &Path) -> bool {
     matches!(
@@ -112,6 +118,7 @@ impl Editor {
             marked_range: None,
             dragging: false,
             preferred_x: None,
+            save_task: None,
         };
         editor.restyle(langs);
         editor
@@ -176,9 +183,57 @@ impl Editor {
         let langs = crate::highlight::languages(cx);
         self.restyle(&langs);
         self.save.record_edit(Instant::now());
+        // Debounced autosave: replacing save_task drops (cancels) the
+        // previous timer; should_flush re-checks in case of races.
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(autosave::DEBOUNCE).await;
+            this.update(cx, |editor, cx| {
+                if editor.save.should_flush(Instant::now()) {
+                    editor.flush(cx);
+                }
+            })
+            .ok();
+        }));
         self.preferred_x = None;
         self.reveal_cursor();
         cx.notify();
+    }
+
+    /// The one save path: conflict check → backup → atomic write.
+    pub fn flush(&mut self, cx: &mut Context<Self>) {
+        if !self.save.take_flush_now() {
+            return;
+        }
+        let text = self.core.buffer.text();
+        let backups = cx.global::<SessionBackups>().0.clone();
+        {
+            let mut backups = backups.lock().unwrap();
+            if autosave::has_conflict(self.disk_mtime, &self.path) {
+                // Never silently clobber external edits: keep the disk copy.
+                match backups.force_backup(&self.path) {
+                    Ok(_) => eprintln!(
+                        "supermd: {} changed on disk; disk version backed up before overwrite",
+                        self.path.display()
+                    ),
+                    Err(err) => eprintln!(
+                        "supermd: conflict backup failed for {}: {err}",
+                        self.path.display()
+                    ),
+                }
+            } else if let Err(err) = backups.backup_if_needed(&self.path) {
+                eprintln!("supermd: backup failed for {}: {err}", self.path.display());
+            }
+        }
+        match autosave::atomic_write(&self.path, &text) {
+            Ok(()) => {
+                self.disk_mtime = autosave::disk_mtime(&self.path);
+                self.save.mark_saved();
+            }
+            Err(err) => {
+                // Stay dirty; the next edit or flush point retries.
+                eprintln!("supermd: save failed for {}: {err}", self.path.display());
+            }
+        }
     }
 
     fn reveal_cursor(&mut self) {
@@ -381,9 +436,7 @@ impl Editor {
     }
 
     fn save_now(&mut self, _: &SaveNow, _: &mut Window, cx: &mut Context<Self>) {
-        // Wired to the real flush path in Task 11.
-        let _ = cx;
-        eprintln!("supermd: save requested for {}", self.path.display());
+        self.flush(cx);
     }
 
     // ── geometry: vertical movement + mouse ────────────────────────────
