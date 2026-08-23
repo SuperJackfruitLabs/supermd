@@ -48,8 +48,15 @@ else
 fi
 
 echo "creating dmg…"
-hdiutil create -volname supermd -srcfolder "$APP" -ov -format UDZO \
-    "$DIST/supermd-${VERSION}.dmg" > /dev/null
+DMG="$DIST/supermd-${VERSION}.dmg"
+hdiutil create -volname SuperMD -srcfolder "$APP" -ov -format UDZO \
+    "$DMG" > /dev/null
+
+# The DMG needs its own signature too — spctl assesses the image's
+# primary signature, not just the app inside it.
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+    codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
+fi
 
 echo "done:"
 ls -lh "$DIST"
