@@ -35,6 +35,7 @@ fn main() {
 | 3 | Hybrid WYSIWYG (markers hide) | Done |
 | 4 | Tables, images, doc projection | Done |
 | 5 | Polish: ✓ checkboxes, ⌘F, watching, chrome | Done |
+| 6 | Seti icons, 36 languages, image tabs | Done |
 
 This very table is a live widget now — click a row to edit its raw pipes.
 

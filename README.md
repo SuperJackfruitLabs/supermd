@@ -17,9 +17,12 @@ Built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   render inline while you edit; touch them and they dissolve back into
   raw source. Code fences read as clean panels with tree-sitter
   highlighting.
-- **A real workspace** — folder sidebar, tabs, outline panel, fuzzy
-  file finder (⌘P), find in file (⌘F), pretty preview toggle (⌘E),
-  light/dark following the system.
+- **A real workspace** — folder sidebar with Seti UI file icons, tabs,
+  outline panel, fuzzy file finder (⌘P), find in file (⌘F), pretty
+  preview toggle (⌘E), image viewer tabs, light/dark following the
+  system.
+- **36 languages highlighted** via tree-sitter, in fenced blocks and
+  standalone files alike.
 - **Safe by default** — autosave with atomic writes, per-session
   backups in `~/.supermd/backups`, external-change detection that never
   silently clobbers anything, and live reload of clean buffers when
