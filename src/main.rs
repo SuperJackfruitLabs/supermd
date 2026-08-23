@@ -6,6 +6,7 @@ mod input;
 mod markdown;
 mod reader;
 mod seti;
+mod settings;
 #[cfg(test)]
 mod seti_tests;
 mod theme;

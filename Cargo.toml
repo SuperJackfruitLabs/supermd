@@ -15,6 +15,8 @@ anyhow = "1.0.104"
 inkjet = { version = "0.11.1", features = ["all_languages"] }
 tree-sitter-xml = "0.7"
 tree-sitter = "0.23"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
 
 [dev-dependencies]
 tempfile = "3"
