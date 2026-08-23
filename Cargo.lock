@@ -5094,6 +5094,7 @@ dependencies = [
  "nucleo-matcher",
  "pulldown-cmark",
  "ropey",
+ "tempfile",
  "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-css",
