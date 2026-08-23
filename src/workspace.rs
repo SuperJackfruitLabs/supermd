@@ -30,6 +30,12 @@ actions!(
         ToggleFinder,
         TogglePreview,
         ToggleFocusMode,
+        FocusSidebar,
+        SidebarUp,
+        SidebarDown,
+        SidebarExpand,
+        SidebarCollapse,
+        SidebarOpen,
     ]
 );
 
@@ -97,6 +103,8 @@ pub struct Workspace {
     pre_focus_panels: (bool, bool),
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
     focus_handle: FocusHandle,
+    sidebar_focus: FocusHandle,
+    sidebar_selected: usize,
     last_title: String,
     _watcher: Option<notify::RecommendedWatcher>,
 }
@@ -137,6 +145,8 @@ impl Workspace {
             pre_focus_panels: (true, true),
             finder: None,
             focus_handle: cx.focus_handle(),
+            sidebar_focus: cx.focus_handle(),
+            sidebar_selected: 0,
             last_title: String::new(),
             _watcher: None,
         }
@@ -470,6 +480,96 @@ impl Workspace {
         cx.notify();
     }
 
+    // ── sidebar keyboard navigation ────────────────────────────────────
+
+    fn sidebar_rows(&mut self) -> Vec<(usize, crate::files::FsEntry)> {
+        self.tree.as_mut().map(|t| t.visible()).unwrap_or_default()
+    }
+
+    fn focus_sidebar(&mut self, _: &FocusSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tree.is_none() {
+            return;
+        }
+        self.show_sidebar = true;
+        window.focus(&self.sidebar_focus);
+        cx.notify();
+    }
+
+    fn sidebar_move(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.sidebar_rows().len();
+        if count == 0 {
+            return;
+        }
+        let target = (self.sidebar_selected as isize + delta).clamp(0, count as isize - 1);
+        self.sidebar_selected = target as usize;
+        cx.notify();
+    }
+
+    fn sidebar_up(&mut self, _: &SidebarUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_move(-1, cx);
+    }
+
+    fn sidebar_down(&mut self, _: &SidebarDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_move(1, cx);
+    }
+
+    fn sidebar_expand(&mut self, _: &SidebarExpand, _: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.sidebar_rows();
+        let Some((_, entry)) = rows.get(self.sidebar_selected) else {
+            return;
+        };
+        if !entry.is_dir {
+            return;
+        }
+        let path = entry.path.clone();
+        let Some(tree) = self.tree.as_mut() else {
+            return;
+        };
+        if tree.is_expanded(&path) {
+            self.sidebar_move(1, cx); // step into
+        } else {
+            tree.toggle(&path);
+            cx.notify();
+        }
+    }
+
+    fn sidebar_collapse(&mut self, _: &SidebarCollapse, _: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.sidebar_rows();
+        let Some((depth, entry)) = rows.get(self.sidebar_selected).cloned() else {
+            return;
+        };
+        if entry.is_dir && self.tree.as_ref().is_some_and(|t| t.is_expanded(&entry.path)) {
+            if let Some(tree) = self.tree.as_mut() {
+                tree.toggle(&entry.path);
+            }
+            cx.notify();
+            return;
+        }
+        // Jump to the parent row (nearest earlier row with smaller depth).
+        if let Some(parent) = rows[..self.sidebar_selected]
+            .iter()
+            .rposition(|(d, _)| *d < depth)
+        {
+            self.sidebar_selected = parent;
+            cx.notify();
+        }
+    }
+
+    fn sidebar_open(&mut self, _: &SidebarOpen, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.sidebar_rows();
+        let Some((_, entry)) = rows.get(self.sidebar_selected).cloned() else {
+            return;
+        };
+        if entry.is_dir {
+            if let Some(tree) = self.tree.as_mut() {
+                tree.toggle(&entry.path);
+            }
+            cx.notify();
+        } else {
+            self.open_path(&entry.path, window, cx);
+        }
+    }
+
     fn toggle_focus_mode(
         &mut self,
         _: &ToggleFocusMode,
@@ -511,8 +611,10 @@ impl Workspace {
         let root_name = tree.root_name();
         let rows = tree.visible();
 
-        let items = rows.into_iter().map(|(depth, entry)| {
+        let kb_selected = self.sidebar_selected;
+        let items = rows.into_iter().enumerate().map(|(row_ix, (depth, entry))| {
             let is_active = active_path.as_deref() == Some(entry.path.as_path());
+            let is_kb_selected = row_ix == kb_selected;
             let id = SharedString::from(format!("file-{}", entry.path.display()));
             let path = entry.path.clone();
             let is_dir = entry.is_dir;
@@ -530,6 +632,7 @@ impl Workspace {
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(t.hover_bg))
+                .when(is_kb_selected, |d| d.bg(t.hover_bg))
                 .when(is_active, |d| d.bg(t.selected_bg))
                 .child(
                     // Fixed chevron slot on every row so icons align in a
@@ -564,10 +667,12 @@ impl Workspace {
                         .child(SharedString::from(entry.name.clone())),
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.sidebar_selected = row_ix;
                     if is_dir {
                         if let Some(tree) = this.tree.as_mut() {
                             tree.toggle(&path);
                         }
+                        window.focus(&this.sidebar_focus);
                         cx.notify();
                     } else {
                         this.open_path(&path, window, cx);
@@ -583,6 +688,13 @@ impl Workspace {
                 .bg(t.panel_bg)
                 .border_r_1()
                 .border_color(t.border)
+                .key_context("Sidebar")
+                .track_focus(&self.sidebar_focus)
+                .on_action(cx.listener(Self::sidebar_up))
+                .on_action(cx.listener(Self::sidebar_down))
+                .on_action(cx.listener(Self::sidebar_expand))
+                .on_action(cx.listener(Self::sidebar_collapse))
+                .on_action(cx.listener(Self::sidebar_open))
                 .flex()
                 .flex_col()
                 .child(
@@ -877,6 +989,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_finder))
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::toggle_focus_mode))
+            .on_action(cx.listener(Self::focus_sidebar))
             .flex()
             .flex_row()
             .children(sidebar)

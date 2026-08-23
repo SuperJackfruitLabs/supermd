@@ -79,6 +79,13 @@ fn main() {
             KeyBinding::new("cmd-p", ToggleFinder, None),
             KeyBinding::new("cmd-e", TogglePreview, None),
             KeyBinding::new("cmd-shift-f", ToggleFocusMode, None),
+            KeyBinding::new("cmd-1", workspace::FocusSidebar, None),
+            // Sidebar navigation (while the sidebar is focused)
+            KeyBinding::new("up", workspace::SidebarUp, Some("Sidebar")),
+            KeyBinding::new("down", workspace::SidebarDown, Some("Sidebar")),
+            KeyBinding::new("right", workspace::SidebarExpand, Some("Sidebar")),
+            KeyBinding::new("left", workspace::SidebarCollapse, Some("Sidebar")),
+            KeyBinding::new("enter", workspace::SidebarOpen, Some("Sidebar")),
             // Text input (any focused TextInput)
             KeyBinding::new("backspace", input::Backspace, Some("TextInput")),
             KeyBinding::new("delete", input::Delete, Some("TextInput")),
