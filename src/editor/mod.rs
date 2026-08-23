@@ -541,7 +541,12 @@ impl Editor {
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
-        self.insert_str("\n", cx);
+        if self.is_code_mode() {
+            self.core.insert_newline_auto_indent(Instant::now());
+            self.after_edit(cx);
+        } else {
+            self.insert_str("\n", cx);
+        }
     }
 
     fn insert_tab(&mut self, _: &InsertTab, _: &mut Window, cx: &mut Context<Self>) {

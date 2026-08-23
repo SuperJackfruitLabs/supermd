@@ -154,6 +154,25 @@ impl EditorCore {
         self.apply(range, text, now);
     }
 
+    /// Newline that copies the current line's leading whitespace (only
+    /// the part left of the cursor). Used by the editor in code mode.
+    pub fn insert_newline_auto_indent(&mut self, now: Instant) {
+        let head = self.selection.range().start;
+        let line_ix = self.buffer.line_of_byte(head);
+        let line_start = self.buffer.line_range(line_ix).start;
+        let line = self.buffer.line_text(line_ix);
+        let upto = head.saturating_sub(line_start).min(line.len());
+        let ws_len = line
+            .bytes()
+            .take_while(|b| *b == b' ' || *b == b'\t')
+            .count()
+            .min(upto);
+        let mut text = String::with_capacity(1 + ws_len);
+        text.push('\n');
+        text.push_str(&line[..ws_len]);
+        self.insert(&text, now);
+    }
+
     pub fn backspace(&mut self, now: Instant) {
         let range = if self.selection.is_cursor() {
             movement::prev_grapheme(&self.buffer, self.selection.head)..self.selection.head
@@ -325,6 +344,41 @@ mod tests {
         assert_eq!(ed.selection, Selection::cursor(5));
         assert!(ed.undo());
         assert_eq!(ed.buffer.text(), "- [x] done");
+    }
+
+    #[test]
+    fn newline_copies_leading_whitespace() {
+        let mut ed = EditorCore::new("    let x = 1;");
+        ed.set_cursor(14);
+        ed.insert_newline_auto_indent(t0());
+        assert_eq!(ed.buffer.text(), "    let x = 1;\n    ");
+        assert_eq!(ed.selection, Selection::cursor(19));
+    }
+
+    #[test]
+    fn newline_mid_line_indents_and_carries_tail() {
+        let mut ed = EditorCore::new("\tfoo(bar)");
+        ed.set_cursor(5);
+        ed.insert_newline_auto_indent(t0());
+        assert_eq!(ed.buffer.text(), "\tfoo(\n\tbar)");
+    }
+
+    #[test]
+    fn newline_without_indent_is_plain() {
+        let mut ed = EditorCore::new("plain");
+        ed.set_cursor(5);
+        ed.insert_newline_auto_indent(t0());
+        assert_eq!(ed.buffer.text(), "plain\n");
+    }
+
+    #[test]
+    fn newline_indent_stops_at_cursor_column() {
+        // Cursor inside the indentation: only the part left of the
+        // cursor carries over.
+        let mut ed = EditorCore::new("        x");
+        ed.set_cursor(4);
+        ed.insert_newline_auto_indent(t0());
+        assert_eq!(ed.buffer.text(), "    \n        x");
     }
 
     #[test]
