@@ -115,6 +115,124 @@ impl Languages {
     }
 }
 
+/// Language token (inkjet vocabulary) for a file, by exact filename
+/// first, then extension. Covers every language inkjet bundles plus the
+/// extras registry.
+pub fn language_for_file(path: &std::path::Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    match name {
+        "Dockerfile" | "dockerfile" | "Containerfile" => return Some("dockerfile"),
+        "Makefile" | "makefile" | "GNUmakefile" => return Some("make"),
+        "meson.build" => return Some("meson"),
+        _ => {}
+    }
+    let ext = path.extension()?.to_str()?;
+    Some(match ext {
+        "rs" => "rust",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "jsx",
+        "ts" => "typescript",
+        "tsx" => "tsx",
+        "py" => "python",
+        "json" | "jsonc" | "json5" => "json",
+        "sh" | "bash" | "zsh" => "bash",
+        "toml" => "toml",
+        "css" => "css",
+        "scss" => "scss",
+        "html" | "htm" => "html",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "hpp" | "cxx" => "cpp",
+        "go" => "go",
+        "rb" => "ruby",
+        "java" => "java",
+        "swift" => "swift",
+        "yml" | "yaml" => "yaml",
+        "php" => "php",
+        "cs" => "csharp",
+        "lua" => "lua",
+        "ex" | "exs" => "elixir",
+        "hs" => "haskell",
+        "ml" | "mli" => "ocaml",
+        "scala" | "sc" => "scala",
+        "zig" => "zig",
+        "elm" => "elm",
+        "erl" | "hrl" => "erlang",
+        "sql" => "sql",
+        "nix" => "nix",
+        "r" | "R" => "r",
+        "gleam" => "gleam",
+        "svelte" => "svelte",
+        "dart" => "dart",
+        "d" => "d",
+        "kt" | "kts" => "kotlin",
+        "jl" => "julia",
+        "clj" | "cljs" | "cljc" | "edn" => "clojure",
+        "fish" => "fish",
+        "vim" | "vimrc" => "vim",
+        "tex" => "latex",
+        "bib" => "bibtex",
+        "ini" | "env" | "cfg" | "conf" => "ini",
+        "rkt" => "racket",
+        "scm" | "ss" => "scheme",
+        "proto" => "protobuf",
+        "gd" => "gdscript",
+        "hcl" | "tf" | "tfvars" => "hcl",
+        "cue" => "cue",
+        "awk" => "awk",
+        "f" | "f90" | "f95" | "f03" => "fortran",
+        "pas" | "pp" => "pascal",
+        "el" => "elisp",
+        "diff" | "patch" => "diff",
+        "wgsl" => "wgsl",
+        "glsl" | "vert" | "frag" | "comp" => "glsl",
+        "ll" => "llvm",
+        "asm" | "s" => "asm",
+        "m" | "mm" => "objc",
+        "scad" => "openscad",
+        "bicep" => "bicep",
+        "ada" | "adb" | "ads" => "ada",
+        "wat" => "wat",
+        "wast" => "wast",
+        "mk" => "make",
+        "xml" => "xml",
+        "graphql" | "gql" => "graphql",
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use std::path::Path;
+
+    fn f(p: &str) -> Option<&'static str> {
+        super::language_for_file(Path::new(p))
+    }
+
+    #[test]
+    fn maps_filenames_and_new_extensions() {
+        assert_eq!(f("Dockerfile"), Some("dockerfile"));
+        assert_eq!(f("Makefile"), Some("make"));
+        assert_eq!(f("meson.build"), Some("meson"));
+        assert_eq!(f("App.kt"), Some("kotlin"));
+        assert_eq!(f("sim.jl"), Some("julia"));
+        assert_eq!(f("core.clj"), Some("clojure"));
+        assert_eq!(f("theme.scss"), Some("scss"));
+        assert_eq!(f("main.tf"), Some("hcl"));
+        assert_eq!(f("shader.wgsl"), Some("wgsl"));
+        assert_eq!(f("view.m"), Some("objc"));
+        assert_eq!(f("x.fs"), None); // F# vs Forth ambiguity
+        assert_eq!(f("noext"), None);
+    }
+
+    #[test]
+    fn legacy_extensions_still_map() {
+        assert_eq!(f("main.rs"), Some("rust"));
+        assert_eq!(f("app.tsx"), Some("tsx"));
+        assert_eq!(f("q.sql"), Some("sql"));
+        assert_eq!(f("conf.yaml"), Some("yaml"));
+    }
+}
+
 pub struct SyntaxLanguages(pub Arc<Languages>);
 
 impl Global for SyntaxLanguages {}

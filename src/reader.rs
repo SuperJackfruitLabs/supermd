@@ -28,46 +28,9 @@ pub struct Reader {
     scroll_anim: Option<gpui::Task<()>>,
 }
 
-/// Map a file extension to the language name used for fenced code blocks.
+/// Language token for a file. Delegates to the central mapping.
 pub fn language_for_path(path: &Path) -> Option<&'static str> {
-    let ext = path.extension()?.to_str()?;
-    Some(match ext {
-        "rs" => "rust",
-        "js" | "mjs" | "cjs" | "jsx" => "javascript",
-        "ts" | "tsx" => "typescript",
-        "py" => "python",
-        "json" => "json",
-        "sh" | "bash" | "zsh" => "bash",
-        "toml" => "toml",
-        "css" => "css",
-        "html" | "htm" => "html",
-        "c" | "h" => "c",
-        "cpp" | "cc" | "hpp" | "cxx" => "cpp",
-        "go" => "go",
-        "rb" => "ruby",
-        "java" => "java",
-        "swift" => "swift",
-        "yml" | "yaml" => "yaml",
-        "php" => "php",
-        "cs" => "csharp",
-        "lua" => "lua",
-        "ex" | "exs" => "elixir",
-        "hs" => "haskell",
-        "ml" | "mli" => "ocaml",
-        "scala" | "sc" => "scala",
-        "zig" => "zig",
-        "elm" => "elm",
-        "erl" | "hrl" => "erlang",
-        "sql" => "sql",
-        "xml" => "xml",
-        "nix" => "nix",
-        "r" => "r",
-        "gleam" => "gleam",
-        "svelte" => "svelte",
-        "dart" => "dart",
-        "d" => "d",
-        _ => return None,
-    })
+    crate::highlight::language_for_file(path)
 }
 
 impl Reader {
