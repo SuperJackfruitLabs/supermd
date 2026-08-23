@@ -105,8 +105,16 @@ is the normalized selection (cursor = empty range). Consequences:
   replacement's start maps to the source start, anywhere else in the
   replacement maps to the source end (clicking the bullet puts the
   cursor at content start).
+- Hidden segments carry a **bias** discovered during implementation:
+  opening markers bias Right (a click on the shared display boundary
+  lands after the marker, at content start), closing markers bias Left
+  (before the marker, at content end). Either resolution touches the
+  span, so it reveals.
 - Round trip: `disp_to_src(src_to_disp(x)) == x` for every source byte
-  in a verbatim segment.
+  in a verbatim segment, EXCEPT the single byte immediately following a
+  hidden/replaced segment — that display boundary is shared with the
+  marker and resolves to the marker's content side by bias (one display
+  offset cannot invert to multiple source offsets).
 
 ## spans.rs — FenceDelimiter
 

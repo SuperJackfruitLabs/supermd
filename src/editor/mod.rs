@@ -5,6 +5,7 @@
 pub mod autosave;
 pub mod buffer;
 pub mod core;
+pub mod display;
 pub mod movement;
 pub mod spans;
 
