@@ -59,12 +59,24 @@ jobs:
         run: |
           echo "$NOTARY_KEY_P8" | base64 -d > notary.p8
           DMG=$(ls dist/supermd-*.dmg)
-          xcrun notarytool submit "$DMG" \
-            --key notary.p8 \
-            --key-id "$NOTARY_KEY_ID" \
-            --issuer "$NOTARY_ISSUER_ID" \
-            --wait
+          # Retry: --wait can die on transient runner network blips, and
+          # resubmitting the same file is deduped by hash on Apple's side,
+          # so a retry just resumes waiting on the same submission.
+          OK=false
+          for attempt in 1 2 3; do
+            if xcrun notarytool submit "$DMG" \
+              --key notary.p8 \
+              --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER_ID" \
+              --wait --timeout 2h; then
+              OK=true
+              break
+            fi
+            echo "notarytool attempt $attempt failed; retrying in 30s…"
+            sleep 30
+          done
           rm notary.p8
+          [ "$OK" = true ] || { echo "notarization did not complete"; exit 1; }
           xcrun stapler staple "$DMG"
           spctl --assess --type open --context context:primary-signature -v "$DMG"
 
@@ -74,5 +86,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             dist/supermd-*.dmg \
-            --title "supermd $GITHUB_REF_NAME" \
+            --title "SuperMD $GITHUB_REF_NAME" \
             --generate-notes
