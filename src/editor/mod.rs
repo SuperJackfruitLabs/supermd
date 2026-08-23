@@ -168,11 +168,17 @@ impl Editor {
         let line_ranges: Vec<Range<usize>> = (0..self.core.buffer.line_count())
             .map(|ix| self.core.buffer.line_range(ix))
             .collect();
-        // Widgets are enabled kind-by-kind through Phase 4; currently: fences.
+        // Widgets are enabled kind-by-kind through Phase 4; currently:
+        // fences and tables (images land in the next task).
         let enabled: Vec<blocks::BlockInfo> = self
             .blocks
             .iter()
-            .filter(|b| matches!(b.kind, blocks::BlockKind::Fence { .. }))
+            .filter(|b| {
+                matches!(
+                    b.kind,
+                    blocks::BlockKind::Fence { .. } | blocks::BlockKind::Table
+                )
+            })
             .cloned()
             .collect();
         projection::project(&line_ranges, &enabled, self.core.selection.range())
@@ -1201,23 +1207,83 @@ impl gpui::Element for LineElement {
     }
 }
 
-// Placeholder widgets — replaced by real table/image rendering in the
-// following tasks (unreachable while their block kinds are filtered out
-// of the projection).
+/// A real table for an untouched table block. Clicking a row drops the
+/// cursor onto that row's source line, dissolving the widget.
 fn render_table(
     editor: &Entity<Editor>,
     item_ix: usize,
     lines: Range<usize>,
     t: &Theme,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> gpui::AnyElement {
-    let _ = (editor, item_ix, lines);
-    div()
-        .px_3()
-        .py_2()
-        .text_color(t.fg_muted)
-        .child("[table]")
-        .into_any_element()
+    let mut rows: Vec<(usize, Vec<String>)> = Vec::new();
+    {
+        let ed = editor.read(cx);
+        for line in lines {
+            let text = ed.core.buffer.line_text(line);
+            if blocks::is_separator_row(&text) {
+                continue;
+            }
+            rows.push((line, blocks::parse_row(&text)));
+        }
+    }
+    let ncols = rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(1);
+
+    let mut container = div()
+        .my_1()
+        .rounded_lg()
+        .border_1()
+        .border_color(t.border)
+        .font_family(t.body_family.clone())
+        .flex()
+        .flex_col()
+        .overflow_hidden();
+
+    for (row_ix, (line, cells)) in rows.into_iter().enumerate() {
+        let is_header = row_ix == 0;
+        let handle = editor.clone();
+        let mut row = div()
+            .id(("trow", item_ix * 1024 + row_ix))
+            .flex()
+            .flex_row()
+            .w_full()
+            .cursor_pointer()
+            .when(is_header, |d| {
+                d.bg(t.panel_bg)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t.fg_strong)
+            })
+            .when(!is_header, |d| {
+                d.border_t_1()
+                    .border_color(t.border)
+                    .text_color(t.fg)
+                    .hover(|s| s.bg(t.hover_bg))
+            })
+            .on_click(move |_, window, cx| {
+                handle.update(cx, |editor, cx| {
+                    let start = editor.core.buffer.line_range(line).start;
+                    editor.core.set_cursor(start);
+                    editor.core.break_undo_group();
+                    window.focus(&editor.focus_handle);
+                    cx.notify();
+                });
+            });
+        for c in 0..ncols {
+            let cell = cells.get(c).cloned().unwrap_or_default();
+            row = row.child(
+                div()
+                    .flex_1()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(t.body_size - 1.))
+                    .line_height(relative(1.45))
+                    .overflow_hidden()
+                    .child(SharedString::from(cell)),
+            );
+        }
+        container = container.child(row);
+    }
+    container.into_any_element()
 }
 
 fn render_image(
