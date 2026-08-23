@@ -144,7 +144,7 @@ fn capture_color(capture: u8, t: &Theme) -> Option<Hsla> {
 /// Build text runs for highlighted code. Spans may nest; later spans that
 /// overlap already-covered bytes are skipped.
 fn code_runs(code: &str, spans: &[(std::ops::Range<usize>, u8)], t: &Theme) -> Vec<TextRun> {
-    let mono = |color: Hsla, italic: bool| Font {
+    let mono = |italic: bool| Font {
         family: t.mono_family.clone(),
         features: FontFeatures::default(),
         fallbacks: None,
@@ -153,7 +153,7 @@ fn code_runs(code: &str, spans: &[(std::ops::Range<usize>, u8)], t: &Theme) -> V
     };
     let run = |len: usize, color: Hsla, italic: bool| TextRun {
         len,
-        font: mono(color, italic),
+        font: mono(italic),
         color,
         background_color: None,
         underline: None,

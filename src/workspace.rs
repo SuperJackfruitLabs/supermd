@@ -34,6 +34,8 @@ pub struct Workspace {
     show_sidebar: bool,
     show_outline: bool,
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
+    // TEMP: Task 9 verification, replaced in Task 12
+    debug_editor: Option<Entity<crate::editor::Editor>>,
     focus_handle: FocusHandle,
 }
 
@@ -66,6 +68,7 @@ impl Workspace {
             show_sidebar: true,
             show_outline: true,
             finder: None,
+            debug_editor: None,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -78,6 +81,16 @@ impl Workspace {
         if path.is_dir() {
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
+            cx.notify();
+            return;
+        }
+        // TEMP: Task 9 verification, replaced in Task 12
+        if let Ok(text) = crate::editor::Editor::read_file(path) {
+            let langs = languages(cx);
+            let path_buf = path.to_path_buf();
+            let editor =
+                cx.new(|cx| crate::editor::Editor::from_text(&path_buf, text, &langs, cx));
+            self.debug_editor = Some(editor);
             cx.notify();
             return;
         }
@@ -474,9 +487,14 @@ impl Render for Workspace {
         let sidebar = self.render_sidebar(cx);
         let tab_bar = self.render_tab_bar(cx);
         let outline = self.render_outline(cx);
-        let content: AnyElement = match self.active_reader() {
-            Some(reader) => reader.clone().into_any_element(),
-            None => self.render_empty(cx),
+        // TEMP: Task 9 verification, replaced in Task 12
+        let content: AnyElement = if let Some(editor) = &self.debug_editor {
+            editor.clone().into_any_element()
+        } else {
+            match self.active_reader() {
+                Some(reader) => reader.clone().into_any_element(),
+                None => self.render_empty(cx),
+            }
         };
 
         div()
