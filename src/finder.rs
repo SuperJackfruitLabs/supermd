@@ -28,7 +28,36 @@ pub struct Finder {
     matches: Vec<usize>,
     selected: usize,
     last_query: String,
+    preview: Option<(usize, PreviewContent)>,
     _watch_input: Subscription,
+}
+
+enum PreviewContent {
+    Text(SharedString),
+    Image(PathBuf),
+    Unreadable,
+}
+
+fn load_preview(path: &std::path::Path) -> PreviewContent {
+    if crate::files::is_image_path(path) {
+        return PreviewContent::Image(path.to_path_buf());
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let slice = &bytes[..bytes.len().min(16 * 1024)];
+            let text = String::from_utf8_lossy(slice);
+            let mut out = String::new();
+            for (i, line) in text.lines().enumerate() {
+                if i >= 120 {
+                    break;
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            PreviewContent::Text(out.into())
+        }
+        Err(_) => PreviewContent::Unreadable,
+    }
 }
 
 impl EventEmitter<FinderEvent> for Finder {}
@@ -47,6 +76,7 @@ impl Finder {
             matches: Vec::new(),
             selected: 0,
             last_query: String::new(),
+            preview: None,
             _watch_input: watch,
         };
         finder.rescore("");
@@ -125,9 +155,74 @@ impl Focusable for Finder {
 impl Render for Finder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let row_height = 30.0_f32;
-        let list_height = (self.matches.len().min(10) as f32) * row_height;
         let selected = self.selected;
+
+        // Preview of the currently selected match (cached per file index).
+        let preview_pane: gpui::AnyElement = {
+            let selected_file = self.matches.get(self.selected).copied();
+            if let Some(file_ix) = selected_file {
+                if self.preview.as_ref().map(|(ix, _)| *ix) != Some(file_ix) {
+                    let path = &self.files[file_ix].1;
+                    self.preview = Some((file_ix, load_preview(path)));
+                }
+            } else {
+                self.preview = None;
+            }
+            match (&self.preview, selected_file) {
+                (Some((_, content)), Some(file_ix)) => {
+                    let (rel, _) = &self.files[file_ix];
+                    let body: gpui::AnyElement = match content {
+                        PreviewContent::Text(text) => div()
+                            .size_full()
+                            .overflow_hidden()
+                            .font_family(t.mono_family.clone())
+                            .text_size(px(11.))
+                            .line_height(gpui::relative(1.45))
+                            .text_color(t.fg_muted)
+                            .child(text.clone())
+                            .into_any_element(),
+                        PreviewContent::Image(path) => div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(gpui::img(path.clone()).max_w_full().max_h_full().rounded_md())
+                            .into_any_element(),
+                        PreviewContent::Unreadable => div()
+                            .text_size(px(12.))
+                            .text_color(t.fg_muted)
+                            .child("binary or unreadable file")
+                            .into_any_element(),
+                    };
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(t.border)
+                                .text_size(px(11.))
+                                .text_color(t.fg_muted)
+                                .overflow_hidden()
+                                .child(SharedString::from(rel.clone())),
+                        )
+                        .child(div().flex_1().min_h_0().p_3().child(body))
+                        .into_any_element()
+                }
+                _ => div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.))
+                    .text_color(t.fg_muted)
+                    .child("No matches")
+                    .into_any_element(),
+            }
+        };
 
         let results = uniform_list(
             "finder-results",
@@ -178,7 +273,7 @@ impl Render for Finder {
                     .collect::<Vec<_>>()
             }),
         )
-        .h(px(list_height));
+        .h_full();
 
         div()
             .key_context("Finder")
@@ -186,7 +281,8 @@ impl Render for Finder {
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::dismiss))
-            .w(px(560.))
+            .w(px(860.))
+            .h(px(460.))
             .bg(t.panel_bg)
             .border_1()
             .border_color(t.border)
@@ -194,15 +290,26 @@ impl Render for Finder {
             .shadow_lg()
             .overflow_hidden()
             .flex()
-            .flex_col()
+            .flex_row()
             .child(
                 div()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
+                    .w(px(340.))
+                    .flex_none()
+                    .h_full()
+                    .border_r_1()
                     .border_color(t.border)
-                    .child(self.input.clone()),
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(t.border)
+                            .child(self.input.clone()),
+                    )
+                    .child(div().flex_1().min_h_0().child(results)),
             )
-            .child(results)
+            .child(div().flex_1().min_w_0().h_full().child(preview_pane))
     }
 }
