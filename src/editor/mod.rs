@@ -88,6 +88,7 @@ pub struct Editor {
     preferred_x: Option<Pixels>,
     save_task: Option<gpui::Task<()>>,
     find: Option<FindState>,
+    scrollbar_dragging: bool,
 }
 
 /// One backup registry per app session, shared by all editors.
@@ -119,6 +120,14 @@ impl Editor {
         };
         let core = EditorCore::new(&text);
         let line_count = core.buffer.line_count();
+        let list_state = ListState::new(line_count, ListAlignment::Top, px(512.));
+        {
+            // Keep the scrollbar thumb in sync with wheel scrolling.
+            let entity = cx.weak_entity();
+            list_state.set_scroll_handler(move |_, _, cx| {
+                entity.update(cx, |_, cx| cx.notify()).ok();
+            });
+        }
         let mut editor = Self {
             core,
             provider,
@@ -129,7 +138,7 @@ impl Editor {
             path: path.to_path_buf(),
             save: SavePolicy::default(),
             disk_mtime: autosave::disk_mtime(path),
-            list_state: ListState::new(line_count, ListAlignment::Top, px(512.)),
+            list_state,
             focus_handle: cx.focus_handle(),
             layout_cache: HashMap::new(),
             marked_range: None,
@@ -137,6 +146,7 @@ impl Editor {
             preferred_x: None,
             save_task: None,
             find: None,
+            scrollbar_dragging: false,
         };
         editor.restyle(langs);
         editor
@@ -723,6 +733,10 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.scrollbar_dragging {
+            self.scrollbar_scrub(event.position, cx);
+            return;
+        }
         if self.dragging {
             if let Some(offset) = self.offset_at_point(event.position) {
                 self.core.select_to(offset);
@@ -731,8 +745,32 @@ impl Editor {
         }
     }
 
-    fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.dragging = false;
+        if self.scrollbar_dragging {
+            self.scrollbar_dragging = false;
+            self.list_state.scrollbar_drag_ended();
+            cx.notify();
+        }
+    }
+
+    /// Map a window-space y position on the scrollbar track to a scroll
+    /// offset and apply it.
+    fn scrollbar_scrub(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let viewport = self.list_state.viewport_bounds();
+        let max = self.list_state.max_offset_for_scrollbar().height;
+        if max <= px(0.) {
+            return;
+        }
+        let vh = viewport.size.height;
+        let total = vh + max;
+        let thumb_h = (vh * (vh / total)).max(px(30.)).min(vh);
+        let denom = vh - thumb_h;
+        let y_rel = position.y - viewport.origin.y - thumb_h * 0.5;
+        let frac = if denom > px(0.) { (y_rel / denom).clamp(0., 1.) } else { 0. };
+        self.list_state
+            .set_offset_from_scrollbar(point(px(0.), -(max * frac)));
+        cx.notify();
     }
 
     // ── UTF-16 helpers (IME protocol speaks UTF-16 offsets) ────────────
@@ -1493,6 +1531,52 @@ impl Render for Editor {
         let entity = cx.weak_entity();
         let t = theme(cx);
 
+        let scrollbar = {
+            let max = self.list_state.max_offset_for_scrollbar().height;
+            let vh = self.list_state.viewport_bounds().size.height;
+            if max > px(0.) && vh > px(0.) {
+                let offset = -self.list_state.scroll_px_offset_for_scrollbar().y;
+                let total = vh + max;
+                let thumb_h = (vh * (vh / total)).max(px(30.)).min(vh);
+                let frac = (offset / max).clamp(0., 1.);
+                let top = (vh - thumb_h) * frac;
+                let dragging = self.scrollbar_dragging;
+                let handle = cx.entity();
+                Some(
+                    div()
+                        .id("scrollbar-track")
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .w(px(12.))
+                        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                            cx.stop_propagation();
+                            handle.update(cx, |editor, cx| {
+                                editor.scrollbar_dragging = true;
+                                editor.list_state.scrollbar_drag_started();
+                                editor.scrollbar_scrub(event.position, cx);
+                            });
+                        })
+                        .child(
+                            div()
+                                .absolute()
+                                .right(px(3.))
+                                .w(px(6.))
+                                .top(top)
+                                .h(thumb_h)
+                                .rounded_full()
+                                .bg(Hsla {
+                                    a: if dragging { 0.55 } else { 0.28 },
+                                    ..t.fg_muted
+                                }),
+                        ),
+                )
+            } else {
+                None
+            }
+        };
+
         let find_bar = self.find.as_ref().map(|state| {
             let total = state.matches.len();
             let current = if total == 0 { 0 } else { state.active + 1 };
@@ -1565,7 +1649,7 @@ impl Render for Editor {
             .flex()
             .flex_col()
             .children(find_bar)
-            .child(div().flex_1().min_h_0().child(
+            .child(div().flex_1().min_h_0().relative().child(
                 list(self.list_state.clone(), move |ix, _window, cx| {
                     let Some(editor_entity) = entity.upgrade() else {
                         return div().into_any_element();
@@ -1655,6 +1739,6 @@ impl Render for Editor {
                     }
                 })
                 .size_full(),
-            ))
+            ).children(scrollbar))
     }
 }
