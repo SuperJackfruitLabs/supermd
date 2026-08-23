@@ -41,9 +41,11 @@
 - [ ] Sidebar rows: tinted `svg()` 14px, folder/open-folder for dirs; Seti color → theme tint tables (light/dark).
 - [ ] Manual verify both themes; commit.
 
-### Task 3: New grammars (TDD smoke tests)
+### Task 3: New grammars — ALL viable crates (TDD smoke tests)
 
-- [ ] Check latest crate versions on the index; add compatible ones (yaml, toml-ng, ruby, java, php, cpp, swift, kotlin candidates); RED: one `code_spans_highlight_<lang>` smoke test per added grammar; GREEN: register in `Languages::new`, extend `language_for_path` + aliases. Drop incompatible crates, note in commit.
+- [ ] Enumerate tree-sitter grammar crates on the index (tree-sitter-grammars org + well-known maintainers); candidate list at minimum: yaml, toml-ng, ruby, java, php, cpp, c-sharp, lua, elixir, haskell, ocaml, scala, julia, zig, kotlin, swift, elm, erlang, dockerfile, sql/sequel, xml, regex, dart, nim, vue, svelte, gleam, nix, r. Add every crate that (a) has the LanguageFn API, (b) bundles a highlights query, (c) compiles cleanly.
+- [ ] RED: one `code_spans_highlight_<lang>` smoke test per added grammar (keyword/known-capture present); GREEN: register in `Languages::new`, extend `language_for_path` + aliases.
+- [ ] Measure and record in the commit message: added language count, drop-list with reasons, binary size delta (`ls -l target/debug/supermd` before/after), clean-build time delta if practical.
 - [ ] Full suite; commit.
 
 ### Task 4: Image viewer tab
