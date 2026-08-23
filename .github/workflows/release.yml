@@ -11,6 +11,9 @@ jobs:
   release:
     name: Build, sign, notarize macOS app
     runs-on: macos-latest
+    env:
+      # `secrets` is not a valid context in step-level `if`; bridge it.
+      HAVE_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,7 +22,7 @@ jobs:
         run: cargo test
 
       - name: Import signing certificate
-        if: ${{ secrets.MACOS_CERT_P12 != '' }}
+        if: ${{ env.HAVE_CERT == 'true' }}
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
