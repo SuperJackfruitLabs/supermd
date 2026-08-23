@@ -392,6 +392,7 @@ mod tests {
             ("sql", "SELECT * FROM t;\n"),
             ("regex", "[a-z]+|foo\n"),
             ("kotlin", "fun main() { val x = 1 }\n"),
+            ("xml", "<a b=\"c\">x</a>\n"),
             ("julia", "function f()\n    1\nend\n"),
             ("dockerfile", "FROM alpine\nRUN echo hi\n"),
             ("nix", "{ x = 1; }\n"),
