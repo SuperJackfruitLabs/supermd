@@ -30,7 +30,7 @@ pub struct StyleSpan {
     pub kind: StyleKind,
 }
 
-fn markdown_options() -> Options {
+pub(crate) fn markdown_options() -> Options {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -103,7 +103,7 @@ pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
     spans
 }
 
-fn trim_trailing_newline(source: &str, range: &mut Range<usize>) {
+pub(crate) fn trim_trailing_newline(source: &str, range: &mut Range<usize>) {
     while range.end > range.start && source.as_bytes()[range.end - 1] == b'\n' {
         range.end -= 1;
     }
@@ -168,14 +168,14 @@ pub fn markdown_spans_highlighted(source: &str, langs: &Languages) -> Vec<StyleS
 
 /// One code block: whole-block range, body range, info-string language,
 /// and whether it is fenced (indented blocks have no delimiters).
-struct FenceInfo {
-    block: Range<usize>,
-    body: Range<usize>,
-    lang: Option<String>,
-    fenced: bool,
+pub(crate) struct FenceInfo {
+    pub(crate) block: Range<usize>,
+    pub(crate) body: Range<usize>,
+    pub(crate) lang: Option<String>,
+    pub(crate) fenced: bool,
 }
 
-fn fence_infos(source: &str) -> Vec<FenceInfo> {
+pub(crate) fn fence_infos(source: &str) -> Vec<FenceInfo> {
     use pulldown_cmark::{CodeBlockKind, TagEnd};
     let mut out = Vec::new();
     let mut current: Option<FenceInfo> = None;

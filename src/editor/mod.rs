@@ -3,6 +3,7 @@
 //! flows through EntityInputHandler (IME-correct) and editor actions.
 
 pub mod autosave;
+pub mod blocks;
 pub mod buffer;
 pub mod core;
 pub mod display;
