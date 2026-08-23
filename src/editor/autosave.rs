@@ -18,6 +18,8 @@ impl SavePolicy {
         self.last_edit = Some(now);
     }
 
+    // Used by tests today; the workspace UI will surface dirty state later.
+    #[allow(dead_code)]
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }

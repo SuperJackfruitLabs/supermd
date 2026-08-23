@@ -29,17 +29,19 @@ fn main() {
 
 | Phase | Deliverable | Status |
 | ----- | ----------- | ------ |
-| 0 | Read-only renderer (this window) | In progress |
-| 1 | Workspace: sidebar, tabs, TOC | Next |
-| 2 | Raw Markdown editing | Planned |
-| 3 | Hybrid WYSIWYG | The product |
+| 0 | Read-only renderer | Done |
+| 1 | Workspace: sidebar, tabs, TOC | Done |
+| 2 | Styled-source editing + autosave | Done |
+| 3 | Hybrid WYSIWYG | Next |
 
 ### Near-term tasks
 
 - [x] GPUI window with themed rendering
 - [x] CommonMark block model
-- [ ] Tree-sitter syntax highlighting in code blocks
-- [ ] Folder-as-workspace sidebar
+- [x] Tree-sitter syntax highlighting in code blocks
+- [x] Folder-as-workspace sidebar
+- [x] In-place styled editing with autosave (⌘E toggles preview)
+- [ ] Hide syntax markers away from the cursor (Phase 3)
 
 ---
 

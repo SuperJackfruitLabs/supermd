@@ -55,11 +55,6 @@ impl FileTree {
         self.expanded.contains(dir)
     }
 
-    /// Drop cached listings so the next render re-reads the disk.
-    pub fn refresh(&mut self) {
-        self.children.clear();
-    }
-
     fn load(&mut self, dir: &Path) {
         if self.children.contains_key(dir) {
             return;

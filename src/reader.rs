@@ -51,37 +51,13 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
     })
 }
 
-fn is_markdown(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("md" | "markdown" | "mdown" | "mdx")
-    )
-}
-
 impl Reader {
-    pub fn open(path: &Path, langs: &Languages) -> std::io::Result<Self> {
-        let source = std::fs::read_to_string(path)?;
-        let title: SharedString = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string())
-            .into();
-
-        let mut document = if is_markdown(path) {
-            markdown::parse(&source)
-        } else {
-            // Non-Markdown files render as one big highlighted code block.
-            Document {
-                blocks: vec![Block::Code {
-                    lang: language_for_path(path).map(str::to_string),
-                    code: source,
-                    spans: Vec::new(),
-                }],
-            }
-        };
+    /// Build a pretty-rendered document from Markdown source (used for
+    /// the ⌘E preview of an editor buffer).
+    pub fn from_source(title: SharedString, source: &str, langs: &Languages) -> Self {
+        let mut document = markdown::parse(source);
         langs.highlight_document(&mut document);
-
-        Ok(Self::from_document(Some(path.to_path_buf()), title, document))
+        Self::from_document(None, title, document)
     }
 
     pub fn welcome(langs: &Languages) -> Self {

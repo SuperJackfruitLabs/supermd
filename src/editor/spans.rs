@@ -170,7 +170,7 @@ fn fence_infos(source: &str) -> Vec<(Range<usize>, Option<String>)> {
             }
             Event::Text(_) => {
                 if let Some((body, _)) = current.as_mut() {
-                    if body.is_empty() {
+                    if body.start == body.end {
                         *body = range;
                     } else {
                         body.end = range.end;
@@ -179,7 +179,7 @@ fn fence_infos(source: &str) -> Vec<(Range<usize>, Option<String>)> {
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some(entry) = current.take() {
-                    if !entry.0.is_empty() {
+                    if entry.0.start != entry.0.end {
                         out.push(entry);
                     }
                 }

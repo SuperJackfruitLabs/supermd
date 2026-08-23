@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, uniform_list, AnyElement, ClickEvent, Entity, FocusHandle, Focusable,
+    actions, div, px, uniform_list, AnyElement, App, ClickEvent, Entity, FocusHandle, Focusable,
     IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Window,
 };
 
+use crate::editor::Editor;
 use crate::files::FileTree;
 use crate::finder::{Finder, FinderEvent};
 use crate::highlight::languages;
@@ -24,32 +25,67 @@ actions!(
         ToggleSidebar,
         ToggleOutline,
         ToggleFinder,
+        TogglePreview,
     ]
 );
 
+pub enum Tab {
+    /// Read-only document (Welcome, and anything not editable).
+    Reader(Entity<Reader>),
+    /// Editable file; `preview` present while ⌘E preview mode is on.
+    Editor {
+        editor: Entity<Editor>,
+        preview: Option<Entity<Reader>>,
+    },
+}
+
+impl Tab {
+    fn title(&self, cx: &App) -> SharedString {
+        match self {
+            Tab::Reader(reader) => reader.read(cx).title.clone(),
+            Tab::Editor { editor, .. } => editor.read(cx).title(),
+        }
+    }
+
+    fn path(&self, cx: &App) -> Option<PathBuf> {
+        match self {
+            Tab::Reader(reader) => reader.read(cx).path.clone(),
+            Tab::Editor { editor, .. } => Some(editor.read(cx).path().to_path_buf()),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum OutlineTarget {
+    Reader(Entity<Reader>),
+    Editor(Entity<Editor>),
+}
+
 pub struct Workspace {
     pub tree: Option<FileTree>,
-    readers: Vec<Entity<Reader>>,
+    tabs: Vec<Tab>,
     active: usize,
     show_sidebar: bool,
     show_outline: bool,
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
-    // TEMP: Task 9 verification, replaced in Task 12
-    debug_editor: Option<Entity<crate::editor::Editor>>,
     focus_handle: FocusHandle,
 }
 
 impl Workspace {
     pub fn new(arg: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut tree = None;
-        let mut readers = Vec::new();
+        let mut tabs = Vec::new();
 
         match arg {
             Some(path) if path.is_dir() => {
                 tree = Some(FileTree::new(path));
             }
-            Some(path) => match Reader::open(&path, &languages(cx)) {
-                Ok(reader) => readers.push(cx.new(|_| reader)),
+            Some(path) => match Editor::read_file(&path) {
+                Ok(text) => {
+                    let langs = languages(cx);
+                    let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
+                    tabs.push(Tab::Editor { editor, preview: None });
+                }
                 Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
             },
             None => {
@@ -57,74 +93,113 @@ impl Workspace {
                     tree = Some(FileTree::new(cwd));
                 }
                 let welcome = Reader::welcome(&languages(cx));
-                readers.push(cx.new(|_| welcome));
+                tabs.push(Tab::Reader(cx.new(|_| welcome)));
             }
         }
 
         Self {
             tree,
-            readers,
+            tabs,
             active: 0,
             show_sidebar: true,
             show_outline: true,
             finder: None,
-            debug_editor: None,
             focus_handle: cx.focus_handle(),
         }
     }
 
-    pub fn active_reader(&self) -> Option<&Entity<Reader>> {
-        self.readers.get(self.active)
+    // ── tab management ─────────────────────────────────────────────────
+
+    fn flush_tab(&self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(Tab::Editor { editor, .. }) = self.tabs.get(ix) {
+            editor.update(cx, |editor, cx| editor.flush(cx));
+        }
     }
 
-    pub fn open_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+    pub fn flush_all(&mut self, cx: &mut Context<Self>) {
+        for ix in 0..self.tabs.len() {
+            self.flush_tab(ix, cx);
+        }
+    }
+
+    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.tabs.get(self.active) {
+            Some(Tab::Editor { editor, preview: None }) => {
+                window.focus(&editor.focus_handle(cx))
+            }
+            _ => window.focus(&self.focus_handle),
+        }
+    }
+
+    fn set_active(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        if ix != self.active {
+            self.flush_tab(self.active, cx);
+        }
+        self.active = ix;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn close_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        self.flush_tab(ix, cx);
+        self.tabs.remove(ix);
+        if self.active >= ix && self.active > 0 {
+            self.active -= 1;
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             cx.notify();
             return;
         }
-        // TEMP: Task 9 verification, replaced in Task 12
-        if let Ok(text) = crate::editor::Editor::read_file(path) {
-            let langs = languages(cx);
-            let path_buf = path.to_path_buf();
-            let editor =
-                cx.new(|cx| crate::editor::Editor::from_text(&path_buf, text, &langs, cx));
-            self.debug_editor = Some(editor);
-            cx.notify();
-            return;
-        }
         if let Some(ix) = self
-            .readers
+            .tabs
             .iter()
-            .position(|r| r.read(cx).path.as_deref() == Some(path))
+            .position(|tab| tab.path(cx).as_deref() == Some(path))
         {
-            self.active = ix;
-            cx.notify();
+            self.set_active(ix, window, cx);
             return;
         }
-        match Reader::open(path, &languages(cx)) {
-            Ok(reader) => {
-                self.readers.push(cx.new(|_| reader));
-                self.active = self.readers.len() - 1;
+        match Editor::read_file(path) {
+            Ok(text) => {
+                self.flush_tab(self.active, cx);
+                let langs = languages(cx);
+                let path = path.to_path_buf();
+                let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
+                self.tabs.push(Tab::Editor { editor, preview: None });
+                self.active = self.tabs.len() - 1;
+                self.focus_active(window, cx);
                 cx.notify();
             }
             Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
         }
     }
 
-    fn open_dialog(&mut self, _: &OpenDialog, _window: &mut Window, cx: &mut Context<Self>) {
+    // ── actions ────────────────────────────────────────────────────────
+
+    fn open_dialog(&mut self, _: &OpenDialog, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: true,
             multiple: false,
             prompt: None,
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
-                this.update(cx, |workspace, cx| {
+                this.update_in(cx, |workspace, window, cx| {
                     for path in paths {
-                        workspace.open_path(&path, cx);
+                        workspace.open_path(&path, window, cx);
                     }
                 })
                 .ok();
@@ -133,32 +208,45 @@ impl Workspace {
         .detach();
     }
 
-    fn close_tab(&mut self, _: &CloseTab, _window: &mut Window, cx: &mut Context<Self>) {
-        self.close_tab_at(self.active, cx);
+    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab_at(self.active, window, cx);
     }
 
-    fn close_tab_at(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix < self.readers.len() {
-            self.readers.remove(ix);
-            if self.active >= ix && self.active > 0 {
-                self.active -= 1;
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tabs.is_empty() {
+            self.set_active((self.active + 1) % self.tabs.len(), window, cx);
+        }
+    }
+
+    fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tabs.is_empty() {
+            let ix = (self.active + self.tabs.len() - 1) % self.tabs.len();
+            self.set_active(ix, window, cx);
+        }
+    }
+
+    fn toggle_preview(&mut self, _: &TogglePreview, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Tab::Editor { editor, preview }) = self.tabs.get(self.active) else {
+            return;
+        };
+        let editor = editor.clone();
+        let showing = preview.is_some();
+        if showing {
+            if let Some(Tab::Editor { preview, .. }) = self.tabs.get_mut(self.active) {
+                *preview = None;
             }
-            cx.notify();
+        } else {
+            editor.update(cx, |editor, cx| editor.flush(cx));
+            let title = editor.read(cx).title();
+            let text = editor.read(cx).text();
+            let langs = languages(cx);
+            let reader = cx.new(|_| Reader::from_source(title, &text, &langs));
+            if let Some(Tab::Editor { preview, .. }) = self.tabs.get_mut(self.active) {
+                *preview = Some(reader);
+            }
         }
-    }
-
-    fn next_tab(&mut self, _: &NextTab, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.readers.is_empty() {
-            self.active = (self.active + 1) % self.readers.len();
-            cx.notify();
-        }
-    }
-
-    fn prev_tab(&mut self, _: &PrevTab, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.readers.is_empty() {
-            self.active = (self.active + self.readers.len() - 1) % self.readers.len();
-            cx.notify();
-        }
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     fn toggle_finder(&mut self, _: &ToggleFinder, window: &mut Window, cx: &mut Context<Self>) {
@@ -191,7 +279,7 @@ impl Workspace {
                 FinderEvent::OpenPath(path) => {
                     let path = path.clone();
                     this.dismiss_finder(window, cx);
-                    this.open_path(&path, cx);
+                    this.open_path(&path, window, cx);
                 }
                 FinderEvent::Dismissed => this.dismiss_finder(window, cx),
             },
@@ -203,7 +291,7 @@ impl Workspace {
 
     fn dismiss_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finder = None;
-        window.focus(&self.focus_handle);
+        self.focus_active(window, cx);
         cx.notify();
     }
 
@@ -223,13 +311,11 @@ impl Workspace {
         if !self.show_sidebar {
             return None;
         }
+        let active_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
         let tree = self.tree.as_mut()?;
         let t = theme(cx);
         let root_name = tree.root_name();
         let rows = tree.visible();
-        let active_path = self
-            .active_reader()
-            .and_then(|r| r.read(cx).path.clone());
 
         let items = rows.into_iter().map(|(depth, entry)| {
             let is_active = active_path.as_deref() == Some(entry.path.as_path());
@@ -266,14 +352,14 @@ impl Workspace {
                         .overflow_hidden()
                         .child(SharedString::from(entry.name.clone())),
                 )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     if is_dir {
                         if let Some(tree) = this.tree.as_mut() {
                             tree.toggle(&path);
                         }
                         cx.notify();
                     } else {
-                        this.open_path(&path, cx);
+                        this.open_path(&path, window, cx);
                     }
                 }))
         });
@@ -313,14 +399,15 @@ impl Workspace {
     }
 
     fn render_tab_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.readers.is_empty() {
+        if self.tabs.is_empty() {
             return None;
         }
         let t = theme(cx);
         let active = self.active;
 
-        let tabs = self.readers.iter().enumerate().map(|(ix, reader)| {
-            let title = reader.read(cx).title.clone();
+        let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
+            let title = tab.title(cx);
+            let is_preview = matches!(tab, Tab::Editor { preview: Some(_), .. });
             let is_active = ix == active;
             div()
                 .id(SharedString::from(format!("tab-{ix}")))
@@ -341,6 +428,14 @@ impl Workspace {
                         .text_color(if is_active { t.fg_strong } else { t.fg_muted })
                         .child(title),
                 )
+                .when(is_preview, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(t.fg_muted)
+                            .child("PREVIEW"),
+                    )
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!("tab-close-{ix}")))
@@ -350,14 +445,13 @@ impl Workspace {
                         .rounded_sm()
                         .hover(|s| s.bg(t.selected_bg))
                         .child("×")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
-                            this.close_tab_at(ix, cx);
+                            this.close_tab_at(ix, window, cx);
                         })),
                 )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    this.active = ix;
-                    cx.notify();
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.set_active(ix, window, cx);
                 }))
         });
 
@@ -381,49 +475,83 @@ impl Workspace {
         if !self.show_outline {
             return None;
         }
-        let reader = self.active_reader()?.clone();
         let t = theme(cx);
-        let toc_len = reader.read(cx).toc.len();
-        if toc_len < 2 {
+
+        let (entries, target): (Vec<(u8, SharedString, usize)>, OutlineTarget) =
+            match self.tabs.get(self.active)? {
+                Tab::Reader(reader) => (
+                    reader
+                        .read(cx)
+                        .toc
+                        .iter()
+                        .map(|e| (e.level, e.text.clone(), e.block_ix))
+                        .collect(),
+                    OutlineTarget::Reader(reader.clone()),
+                ),
+                Tab::Editor { preview: Some(preview), .. } => (
+                    preview
+                        .read(cx)
+                        .toc
+                        .iter()
+                        .map(|e| (e.level, e.text.clone(), e.block_ix))
+                        .collect(),
+                    OutlineTarget::Reader(preview.clone()),
+                ),
+                Tab::Editor { editor, preview: None } => (
+                    editor
+                        .read(cx)
+                        .heading_lines()
+                        .into_iter()
+                        .map(|(level, text, line)| (level, SharedString::from(text), line))
+                        .collect(),
+                    OutlineTarget::Editor(editor.clone()),
+                ),
+            };
+
+        if entries.len() < 2 {
             return None;
         }
+        let count = entries.len();
 
-        let entries = uniform_list(
+        let list = uniform_list(
             "outline",
-            toc_len,
-            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+            count,
+            cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
                 let t = theme(cx);
-                let Some(reader) = this.active_reader().cloned() else {
-                    return Vec::new();
-                };
                 range
-                    .map(|ix| {
-                        let (level, text, block_ix) = {
-                            let r = reader.read(cx);
-                            let e = &r.toc[ix];
-                            (e.level, e.text.clone(), e.block_ix)
-                        };
-                        let reader = reader.clone();
-                        div()
-                            .id(ix)
-                            .px_2()
-                            .py(px(3.))
-                            .ml(px((level.saturating_sub(1)) as f32 * 10.))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.hover_bg))
-                            .text_size(px(t.ui_size - 1.))
-                            .text_color(if level <= 2 { t.fg } else { t.fg_muted })
-                            .overflow_hidden()
-                            .child(text)
-                            .on_click(move |_: &ClickEvent, _window, cx| {
-                                reader.update(cx, |reader, cx| {
-                                    reader.scroll_to_block(block_ix);
-                                    cx.notify();
-                                });
-                            })
+                    .filter_map(|ix| {
+                        let (level, text, target_ix) = entries.get(ix)?.clone();
+                        let target = target.clone();
+                        Some(
+                            div()
+                                .id(ix)
+                                .px_2()
+                                .py(px(3.))
+                                .ml(px((level.saturating_sub(1)) as f32 * 10.))
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(t.hover_bg))
+                                .text_size(px(t.ui_size - 1.))
+                                .text_color(if level <= 2 { t.fg } else { t.fg_muted })
+                                .overflow_hidden()
+                                .child(text)
+                                .on_click(move |_: &ClickEvent, _window, cx| match &target {
+                                    OutlineTarget::Reader(reader) => {
+                                        reader.update(cx, |reader, cx| {
+                                            reader.scroll_to_block(target_ix);
+                                            cx.notify();
+                                        });
+                                    }
+                                    OutlineTarget::Editor(editor) => {
+                                        editor.update(cx, |editor, cx| {
+                                            editor.scroll_to_line(target_ix);
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             }),
         )
         .h_full();
@@ -447,7 +575,7 @@ impl Workspace {
                         .text_color(t.fg_muted)
                         .child("OUTLINE"),
                 )
-                .child(div().flex_1().px_2().pb_4().child(entries))
+                .child(div().flex_1().px_2().pb_4().child(list))
                 .into_any_element(),
         )
     }
@@ -487,14 +615,13 @@ impl Render for Workspace {
         let sidebar = self.render_sidebar(cx);
         let tab_bar = self.render_tab_bar(cx);
         let outline = self.render_outline(cx);
-        // TEMP: Task 9 verification, replaced in Task 12
-        let content: AnyElement = if let Some(editor) = &self.debug_editor {
-            editor.clone().into_any_element()
-        } else {
-            match self.active_reader() {
-                Some(reader) => reader.clone().into_any_element(),
-                None => self.render_empty(cx),
+        let content: AnyElement = match self.tabs.get(self.active) {
+            Some(Tab::Reader(reader)) => reader.clone().into_any_element(),
+            Some(Tab::Editor { preview: Some(preview), .. }) => {
+                preview.clone().into_any_element()
             }
+            Some(Tab::Editor { editor, preview: None }) => editor.clone().into_any_element(),
+            None => self.render_empty(cx),
         };
 
         div()
@@ -511,6 +638,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::toggle_finder))
+            .on_action(cx.listener(Self::toggle_preview))
             .flex()
             .flex_row()
             .children(sidebar)
@@ -540,9 +668,13 @@ impl Render for Workspace {
                                 this.dismiss_finder(window, cx);
                             }),
                         )
-                        .child(div().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        }).child(finder)),
+                        .child(
+                            div()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(finder),
+                        ),
                 )
             })
     }

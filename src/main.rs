@@ -20,7 +20,8 @@ use gpui::{
 
 use theme::{apply_system_appearance, ActiveTheme, Theme};
 use workspace::{
-    CloseTab, NextTab, OpenDialog, PrevTab, ToggleFinder, ToggleOutline, ToggleSidebar, Workspace,
+    CloseTab, NextTab, OpenDialog, PrevTab, ToggleFinder, ToggleOutline, TogglePreview,
+    ToggleSidebar, Workspace,
 };
 
 actions!(app, [Quit]);
@@ -51,6 +52,7 @@ fn main() {
             KeyBinding::new("cmd-b", ToggleSidebar, None),
             KeyBinding::new("cmd-shift-o", ToggleOutline, None),
             KeyBinding::new("cmd-p", ToggleFinder, None),
+            KeyBinding::new("cmd-e", TogglePreview, None),
             // Text input (any focused TextInput)
             KeyBinding::new("backspace", input::Backspace, Some("TextInput")),
             KeyBinding::new("delete", input::Delete, Some("TextInput")),
@@ -131,6 +133,8 @@ fn main() {
             Menu {
                 name: "View".into(),
                 items: vec![
+                    MenuItem::action("Toggle Edit/Preview", TogglePreview),
+                    MenuItem::separator(),
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),
                     MenuItem::action("Toggle Outline", ToggleOutline),
                     MenuItem::separator(),
@@ -159,6 +163,15 @@ fn main() {
                 },
             )
             .unwrap();
+
+        // Flush every dirty editor before the app exits.
+        cx.on_app_quit(move |cx| {
+            window
+                .update(cx, |workspace, _window, cx| workspace.flush_all(cx))
+                .ok();
+            async {}
+        })
+        .detach();
 
         window
             .update(cx, |workspace, window, cx| {
