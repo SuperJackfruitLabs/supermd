@@ -36,6 +36,9 @@ pub struct Seg {
     /// Byte range within `DisplayLine::text`.
     pub disp: Range<usize>,
     pub kind: SegKind,
+    /// Set on checkbox replacements: the current checked state, so a
+    /// click on the glyph can toggle the source.
+    pub toggle: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +50,7 @@ pub struct DisplayLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
     Hide(Bias),
-    Replace(&'static str),
+    Replace { text: &'static str, toggle: Option<bool> },
 }
 
 fn revealed(span: &Range<usize>, sel: &Range<usize>) -> bool {
@@ -197,14 +200,31 @@ fn collect_directives(
                 if start_on_line && end_on_line {
                     let l = span.range.start - line_start;
                     if matches!(line.as_bytes().get(l), Some(b'-' | b'*' | b'+')) {
-                        out.push((span.range.clone(), Action::Replace("• ")));
+                        out.push((
+                            span.range.clone(),
+                            Action::Replace { text: "• ", toggle: None },
+                        ));
                     }
                     // Ordered markers (digits) are never transformed.
                 }
             }
+            StyleKind::TaskMarker(checked) => {
+                if start_on_line && end_on_line {
+                    out.push((
+                        span.range.clone(),
+                        Action::Replace {
+                            text: if *checked { "✓" } else { "○" },
+                            toggle: Some(*checked),
+                        },
+                    ));
+                }
+            }
             StyleKind::QuoteMarker => {
                 if start_on_line && end_on_line {
-                    out.push((span.range.clone(), Action::Replace("▍")));
+                    out.push((
+                        span.range.clone(),
+                        Action::Replace { text: "▍", toggle: None },
+                    ));
                 }
             }
             _ => {}
@@ -297,6 +317,7 @@ pub fn display_line(
                 src: from..to,
                 disp: disp_start..text.len(),
                 kind: SegKind::Verbatim,
+                toggle: None,
             });
         }
     };
@@ -309,13 +330,15 @@ pub fn display_line(
                 src: range.clone(),
                 disp: disp_start..disp_start,
                 kind: SegKind::Hidden(bias),
+                toggle: None,
             }),
-            Action::Replace(replacement) => {
+            Action::Replace { text: replacement, toggle } => {
                 text.push_str(replacement);
                 segs.push(Seg {
                     src: range.clone(),
                     disp: disp_start..text.len(),
                     kind: SegKind::Replacement,
+                    toggle,
                 });
             }
         }
@@ -329,6 +352,7 @@ pub fn display_line(
             src: line_start..line_start,
             disp: 0..0,
             kind: SegKind::Verbatim,
+            toggle: None,
         });
     }
 
@@ -595,6 +619,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn checkbox_replacement_and_toggle_payload() {
+        let src = "- [x] done";
+        let spans = [
+            span(0..2, StyleKind::ListMarker),
+            span(2..5, StyleKind::TaskMarker(true)),
+        ];
+        let dl = display_line(src, 0, &spans, 100..100);
+        assert_eq!(dl.text, "• ✓ done");
+        let seg = dl.segs.iter().find(|s| s.toggle.is_some()).unwrap();
+        assert_eq!(seg.toggle, Some(true));
+        assert_eq!(seg.src, 2..5);
+        // Cursor inside the checkbox reveals the TaskMarker span only;
+        // the untouched ListMarker span keeps its bullet (span-level
+        // reveal, per the Phase 3 rule).
+        let dl = display_line(src, 0, &spans, 3..3);
+        assert_eq!(dl.text, "• [x] done");
+        // Touching the list marker as well reveals everything.
+        let dl = display_line(src, 0, &spans, 1..3);
+        assert_eq!(dl.text, "- [x] done");
+    }
+
+    #[test]
+    fn unchecked_checkbox_glyph() {
+        let src = "- [ ] todo";
+        let spans = [
+            span(0..2, StyleKind::ListMarker),
+            span(2..5, StyleKind::TaskMarker(false)),
+        ];
+        let dl = display_line(src, 0, &spans, 100..100);
+        assert_eq!(dl.text, "• ○ todo");
+        assert_eq!(dl.segs.iter().find_map(|s| s.toggle), Some(false));
     }
 
     #[test]
