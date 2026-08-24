@@ -118,71 +118,33 @@ fn recent_menu_items(recents: &[String]) -> Vec<(String, usize)> {
         .collect()
 }
 
-fn main() {
-    let mut arg = std::env::args().nth(1).map(PathBuf::from);
-    let startup_settings = settings::load(&settings::config_dir());
-    // Launched bare (Dock/Finder): return to the last workspace.
-    if arg.is_none() && startup_settings.reopen_last {
-        arg = startup_settings
-            .recent_workspaces
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.is_dir());
+/// Launched bare (Dock/Finder) with reopen enabled: return to the most
+/// recent workspace that still exists.
+fn resolve_startup_arg(arg: Option<PathBuf>, settings: &settings::Settings) -> Option<PathBuf> {
+    if arg.is_some() || !settings.reopen_last {
+        return arg;
     }
+    settings
+        .recent_workspaces
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_dir())
+}
 
-    // Files/folders arriving via macOS open events (double-click, Dock
-    // drop, `open -a`). Drained by the workspace's poll loop.
-    let pending_opens: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
-
-    let app = Application::new().with_assets(Assets);
-    app.on_open_urls({
-        let pending = pending_opens.clone();
-        move |urls| {
-            let mut lock = pending.lock().unwrap();
-            for url in urls {
-                if let Some(path) = file_url_to_path(&url) {
-                    lock.push(path);
-                }
-            }
+/// Queue paths from `file://` open-event URLs for the workspace poll loop.
+fn queue_open_urls(pending: &std::sync::Mutex<Vec<PathBuf>>, urls: Vec<String>) {
+    let mut lock = pending.lock().unwrap();
+    for url in urls {
+        if let Some(path) = file_url_to_path(&url) {
+            lock.push(path);
         }
-    });
-    app.run(move |cx: &mut App| {
-        let mut themes = theme::builtin_themes();
-        themes.extend(theme::load_custom_themes(&settings::themes_dir()));
-        let theme_state = theme::ThemeState {
-            themes,
-            settings: settings::load(&settings::config_dir()),
-            system_dark: false,
-        };
-        cx.set_global(ActiveTheme(theme_state.resolve()));
-        cx.set_global(theme_state);
-        cx.set_global(highlight::SyntaxLanguages(Arc::new(
-            highlight::Languages::new(),
-        )));
-        // Extension host: discover + compile plugins, snapshot the
-        // fence-claim table for pure discovery contexts.
-        {
-            let mut host = extensions::ExtensionHost::load(&settings::config_dir().join("plugins"));
-            extensions::refresh_tables(&mut host);
-            for (dir, err) in host.failures() {
-                eprintln!("supermd: plugin failed: {}: {err}", dir.display());
-            }
-            host.set_grants(startup_settings.plugin_grants.clone());
-            if let Some(dir) = arg.as_ref().filter(|p| p.is_dir()) {
-                host.set_workspace_root(Some(dir.clone()));
-            }
-            cx.set_global(extensions::ExtensionState(Arc::new(std::sync::Mutex::new(host))));
-        }
-        cx.set_global(editor::SessionBackups(Arc::new(std::sync::Mutex::new(
-            editor::autosave::BackupRegistry::new(
-                editor::autosave::BackupRegistry::default_dir(),
-            ),
-        ))));
+    }
+}
 
-        extensions::start_inline_drainer(cx);
-
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([
+/// Every application key binding. Separated from `run` so tests can
+/// prove each keystroke string parses on all platforms.
+fn app_keybindings() -> Vec<KeyBinding> {
+    vec![
             KeyBinding::new(&platform::keybinding("cmd-q"), Quit, None),
             KeyBinding::new(&platform::keybinding("cmd-o"), OpenDialog, None),
             KeyBinding::new(&platform::keybinding("cmd-n"), NewFile, None),
@@ -289,9 +251,13 @@ fn main() {
             KeyBinding::new(&platform::keybinding("ctrl-n"), finder::FinderDown, Some("Finder")),
             KeyBinding::new(&platform::keybinding("enter"), finder::FinderConfirm, Some("Finder")),
             KeyBinding::new(&platform::keybinding("escape"), finder::FinderDismiss, Some("Finder")),
-        ]);
+    ]
+}
 
-        cx.set_menus(vec![
+/// The application menu bar; `recents` fills the Open Recent submenu.
+fn app_menus(recents: &[String]) -> Vec<Menu> {
+    vec![
+
             Menu {
                 name: "SuperMD".into(),
                 items: vec![
@@ -307,7 +273,7 @@ fn main() {
                     MenuItem::action("Open…", OpenDialog),
                     MenuItem::submenu(Menu {
                         name: "Open Recent".into(),
-                        items: recent_menu_items(&startup_settings.recent_workspaces)
+                        items: recent_menu_items(recents)
                             .into_iter()
                             .map(|(name, ix)| match ix {
                                 0 => MenuItem::action(name, workspace::OpenRecent0),
@@ -350,7 +316,65 @@ fn main() {
                     workspace::ToggleShortcuts,
                 )],
             },
-        ]);
+    ]
+}
+
+fn main() {
+    let startup_settings = settings::load(&settings::config_dir());
+    let arg = resolve_startup_arg(
+        std::env::args().nth(1).map(PathBuf::from),
+        &startup_settings,
+    );
+
+    // Files/folders arriving via macOS open events (double-click, Dock
+    // drop, `open -a`). Drained by the workspace's poll loop.
+    let pending_opens: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+
+    let app = Application::new().with_assets(Assets);
+    app.on_open_urls({
+        let pending = pending_opens.clone();
+        move |urls| queue_open_urls(&pending, urls)
+    });
+    app.run(move |cx: &mut App| {
+        let mut themes = theme::builtin_themes();
+        themes.extend(theme::load_custom_themes(&settings::themes_dir()));
+        let theme_state = theme::ThemeState {
+            themes,
+            settings: settings::load(&settings::config_dir()),
+            system_dark: false,
+        };
+        cx.set_global(ActiveTheme(theme_state.resolve()));
+        cx.set_global(theme_state);
+        cx.set_global(highlight::SyntaxLanguages(Arc::new(
+            highlight::Languages::new(),
+        )));
+        // Extension host: discover + compile plugins, snapshot the
+        // contribution tables for pure discovery contexts.
+        {
+            let mut host =
+                extensions::ExtensionHost::load(&settings::config_dir().join("plugins"));
+            extensions::refresh_tables(&mut host);
+            for (dir, err) in host.failures() {
+                eprintln!("supermd: plugin failed: {}: {err}", dir.display());
+            }
+            host.set_grants(startup_settings.plugin_grants.clone());
+            if let Some(dir) = arg.as_ref().filter(|p| p.is_dir()) {
+                host.set_workspace_root(Some(dir.clone()));
+            }
+            cx.set_global(extensions::ExtensionState(Arc::new(std::sync::Mutex::new(host))));
+        }
+        cx.set_global(editor::SessionBackups(Arc::new(std::sync::Mutex::new(
+            editor::autosave::BackupRegistry::new(
+                editor::autosave::BackupRegistry::default_dir(),
+            ),
+        ))));
+
+        extensions::start_inline_drainer(cx);
+
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys(app_keybindings());
+
+        cx.set_menus(app_menus(&startup_settings.recent_workspaces));
 
         let bounds = Bounds {
             origin: point(px(100.), px(60.)),
@@ -414,4 +438,119 @@ fn main() {
             })
             .unwrap();
     });
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use gpui::AssetSource;
+
+    #[test]
+    fn assets_serve_embedded_seti_icons_only() {
+        let (known, bytes) = seti::ICONS[0];
+        let served = Assets.load(&format!("icons/seti/{known}.svg")).unwrap();
+        assert_eq!(served.as_deref(), Some(bytes));
+        assert_eq!(Assets.load("icons/seti/definitely-missing.svg").unwrap(), None);
+        assert_eq!(Assets.load("other/path.svg").unwrap(), None);
+        assert!(Assets.list("anything").unwrap().is_empty());
+    }
+
+    #[test]
+    fn recent_menu_items_filter_label_and_cap() {
+        let dirs: Vec<tempfile::TempDir> =
+            (0..10).map(|_| tempfile::tempdir().unwrap()).collect();
+        let mut recents: Vec<String> = dirs
+            .iter()
+            .map(|d| d.path().to_string_lossy().into_owned())
+            .collect();
+        recents.insert(2, "/nonexistent/gone".to_string());
+        let items = recent_menu_items(&recents);
+        // take(8) runs before the existence filter: 8 slots, one dead entry.
+        assert_eq!(items.len(), 7);
+        assert!(items.iter().all(|(_, ix)| *ix != 2));
+        let expected = dirs[0].path().file_name().unwrap().to_string_lossy();
+        assert_eq!(items[0].0, expected);
+        assert_eq!(items[0].1, 0);
+    }
+
+    #[test]
+    fn startup_arg_prefers_explicit_then_recent_when_reopen_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let recents = vec![
+            "/nonexistent/x".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        ];
+        let on = settings::Settings {
+            reopen_last: true,
+            recent_workspaces: recents.clone(),
+            ..Default::default()
+        };
+        let off = settings::Settings {
+            reopen_last: false,
+            recent_workspaces: recents,
+            ..Default::default()
+        };
+        let explicit = PathBuf::from("/explicit/arg");
+        assert_eq!(
+            resolve_startup_arg(Some(explicit.clone()), &on),
+            Some(explicit)
+        );
+        assert_eq!(
+            resolve_startup_arg(None, &on).as_deref(),
+            Some(dir.path()),
+            "first existing recent wins"
+        );
+        assert_eq!(resolve_startup_arg(None, &off), None);
+    }
+
+    #[test]
+    fn open_urls_queue_only_decodable_file_urls() {
+        let pending = std::sync::Mutex::new(Vec::new());
+        queue_open_urls(
+            &pending,
+            vec![
+                "file:///tmp/a%20b.md".to_string(),
+                "https://example.com/nope".to_string(),
+                "file:///tmp/c.md".to_string(),
+            ],
+        );
+        assert_eq!(
+            *pending.lock().unwrap(),
+            vec![PathBuf::from("/tmp/a b.md"), PathBuf::from("/tmp/c.md")]
+        );
+    }
+
+    #[test]
+    fn menu_bar_structure_and_recent_submenu_mapping() {
+        let dirs: Vec<tempfile::TempDir> =
+            (0..8).map(|_| tempfile::tempdir().unwrap()).collect();
+        let recents: Vec<String> = dirs
+            .iter()
+            .map(|d| d.path().to_string_lossy().into_owned())
+            .collect();
+        let menus = app_menus(&recents);
+        let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
+        assert_eq!(names, ["SuperMD", "File", "View", "Help"]);
+        // Every recent slot (0..8) maps through its OpenRecentN arm.
+        let file_menu = &menus[1];
+        let recent = file_menu
+            .items
+            .iter()
+            .find_map(|item| {
+                let MenuItem::Submenu(menu) = item else { return None };
+                Some(menu)
+            })
+            .expect("Open Recent submenu");
+        assert_eq!(recent.items.len(), 8);
+        assert!(menus[2].items.len() >= 8, "View menu holds the toggles");
+    }
+
+    #[gpui::test]
+    fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
+        let bindings = app_keybindings();
+        assert_eq!(bindings.len(), 102);
+        // KeyBinding::new panics on malformed keystrokes at construction;
+        // binding proves the whole table is accepted by the dispatcher.
+        cx.update(|cx| cx.bind_keys(app_keybindings()));
+    }
 }

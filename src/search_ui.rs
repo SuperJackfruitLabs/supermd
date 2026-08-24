@@ -470,3 +470,282 @@ impl Render for SearchOverlay {
             .child(div().flex_1().min_w_0().h_full().child(preview_pane))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    fn open_overlay(
+        cx: &mut TestAppContext,
+        root: PathBuf,
+    ) -> (gpui::Entity<SearchOverlay>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(
+                crate::theme::Theme::dark(),
+            )))
+        });
+        let (overlay, cx) = cx.add_window_view(|_, cx| SearchOverlay::new(root, cx));
+        cx.update(|window, app| {
+            let handle = overlay.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+        (overlay, cx)
+    }
+
+    fn set_query(overlay: &gpui::Entity<SearchOverlay>, cx: &mut VisualTestContext, q: &str) {
+        overlay.update_in(cx, |o, _, cx| {
+            o.input.update(cx, |input, cx| {
+                input.content = q.to_string().into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    /// Drive the debounce (120 ms) and the 50 ms channel-poll loop until
+    /// the overlay reports the stream finished.
+    fn settle(overlay: &gpui::Entity<SearchOverlay>, cx: &mut VisualTestContext) {
+        for _ in 0..100 {
+            cx.executor().advance_clock(Duration::from_millis(60));
+            cx.run_until_parked();
+            if !cx.update(|_, app| overlay.read(app).searching) {
+                return;
+            }
+        }
+        panic!("search never settled");
+    }
+
+    /// alpha.md (2 hits for "alpha"), sub/beta.md (1 hit), wrap.md
+    /// (3 hits for "wrapme"), solo.txt (1 hit for "unique-needle").
+    fn fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.md"), "one alpha\ntwo\nthree alpha\n").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/beta.md"), "beta alpha here\n").unwrap();
+        std::fs::write(dir.path().join("wrap.md"), "wrapme\nx wrapme\nwrapme y\n").unwrap();
+        std::fs::write(dir.path().join("solo.txt"), "intro\nunique-needle here\n").unwrap();
+        dir
+    }
+
+    #[gpui::test]
+    fn empty_query_is_idle_and_confirm_emits_nothing(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (overlay, cx) = open_overlay(cx, dir.path().to_path_buf());
+        cx.update(|_, app| {
+            let o = overlay.read(app);
+            assert!(!o.searching);
+            assert!(o.matches.is_empty());
+            assert!(o.rows().is_empty());
+        });
+        let opened = Rc::new(RefCell::new(false));
+        cx.update(|_, app| {
+            let flag = opened.clone();
+            app.subscribe(&overlay, move |_, event: &SearchEvent, _| {
+                if matches!(event, SearchEvent::Open { .. }) {
+                    *flag.borrow_mut() = true;
+                }
+            })
+            .detach();
+        });
+        cx.dispatch_action(SearchConfirm);
+        cx.run_until_parked();
+        assert!(!*opened.borrow());
+    }
+
+    #[gpui::test]
+    fn query_streams_results_grouped_by_file(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (overlay, cx) = open_overlay(cx, dir.path().to_path_buf());
+        set_query(&overlay, cx, "alpha");
+        cx.update(|_, app| assert!(overlay.read(app).searching, "streaming in flight"));
+        settle(&overlay, cx);
+        cx.update(|_, app| {
+            let o = overlay.read(app);
+            assert_eq!(o.matches.len(), 3, "{:?}", o.matches);
+            assert!(!o.capped);
+            assert_eq!(o.selected, 0);
+            // Per-file batches keep each file's hits contiguous and in
+            // line order; file order itself follows the walk.
+            let alpha: Vec<u64> = o
+                .matches
+                .iter()
+                .filter(|m| m.path == PathBuf::from("alpha.md"))
+                .map(|m| m.line_number)
+                .collect();
+            assert_eq!(alpha, vec![1, 3]);
+            let beta: Vec<u64> = o
+                .matches
+                .iter()
+                .filter(|m| m.path == PathBuf::from("sub/beta.md"))
+                .map(|m| m.line_number)
+                .collect();
+            assert_eq!(beta, vec![1]);
+            assert!(o.matches.iter().all(|m| !m.ranges.is_empty()));
+            // rows(): one File header per contiguous file group, headers
+            // pointing at the group's first hit, hits in match order.
+            let rows = o.rows();
+            assert_eq!(rows.len(), o.matches.len() + 2);
+            let Row::File(0) = rows[0] else { panic!("first row must be a file header") };
+            let mut seen_hits = Vec::new();
+            for (i, row) in rows.iter().enumerate() {
+                match row {
+                    Row::File(ix) => {
+                        assert!(
+                            *ix == 0 || o.matches[*ix].path != o.matches[ix - 1].path,
+                            "header only where the file changes"
+                        );
+                        let Some(Row::Hit(h)) = rows.get(i + 1) else { panic!("header not followed by hit") };
+                        assert_eq!(h, ix, "header points at its first hit");
+                    }
+                    Row::Hit(ix) => seen_hits.push(*ix),
+                }
+            }
+            assert_eq!(seen_hits, (0..o.matches.len()).collect::<Vec<_>>());
+        });
+    }
+
+    #[gpui::test]
+    fn up_and_down_wrap_selection_across_hits(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (overlay, cx) = open_overlay(cx, dir.path().to_path_buf());
+        set_query(&overlay, cx, "wrapme");
+        settle(&overlay, cx);
+        cx.update(|_, app| assert_eq!(overlay.read(app).matches.len(), 3));
+        cx.dispatch_action(SearchDown);
+        cx.dispatch_action(SearchDown);
+        cx.update(|_, app| assert_eq!(overlay.read(app).selected, 2));
+        cx.dispatch_action(SearchDown);
+        cx.update(|_, app| assert_eq!(overlay.read(app).selected, 0, "down wraps to first"));
+        cx.dispatch_action(SearchUp);
+        cx.update(|_, app| assert_eq!(overlay.read(app).selected, 2, "up wraps to last"));
+    }
+
+    #[gpui::test]
+    fn confirm_opens_selected_hit_and_dismiss_cancels(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (overlay, cx) = open_overlay(cx, dir.path().to_path_buf());
+        set_query(&overlay, cx, "unique-needle");
+        settle(&overlay, cx);
+        let events: Rc<RefCell<Vec<String>>> = Rc::default();
+        cx.update(|_, app| {
+            let sink = events.clone();
+            app.subscribe(&overlay, move |_, event: &SearchEvent, _| {
+                sink.borrow_mut().push(match event {
+                    SearchEvent::Open { path, line } => format!("open:{}:{line}", path.display()),
+                    SearchEvent::Dismissed => "dismissed".to_string(),
+                });
+            })
+            .detach();
+        });
+        // Preview window is anchored on the selected hit's line.
+        overlay.update(cx, |o, _| {
+            let Some((text, start, line)) = o.preview_for_selected() else { panic!("preview") };
+            assert!(text.contains("unique-needle here"));
+            assert_eq!(start, 0, "window starts at file top for early lines");
+            assert_eq!(line, 2);
+        });
+        cx.dispatch_action(SearchConfirm);
+        cx.dispatch_action(SearchDismiss);
+        cx.run_until_parked();
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                format!("open:{}:2", dir.path().join("solo.txt").display()),
+                "dismissed".to_string()
+            ]
+        );
+        cx.update(|_, app| {
+            assert!(
+                overlay.read(app).cancelled.load(Ordering::Relaxed),
+                "dismiss cancels any running stream"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn no_match_query_settles_empty(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (overlay, cx) = open_overlay(cx, dir.path().to_path_buf());
+        set_query(&overlay, cx, "zzz-not-here");
+        settle(&overlay, cx);
+        cx.update(|_, app| {
+            let o = overlay.read(app);
+            assert!(o.matches.is_empty());
+            assert!(!o.searching);
+        });
+        let opened = Rc::new(RefCell::new(false));
+        cx.update(|_, app| {
+            let flag = opened.clone();
+            app.subscribe(&overlay, move |_, event: &SearchEvent, _| {
+                if matches!(event, SearchEvent::Open { .. }) {
+                    *flag.borrow_mut() = true;
+                }
+            })
+            .detach();
+        });
+        cx.dispatch_action(SearchConfirm);
+        cx.run_until_parked();
+        assert!(!*opened.borrow());
+    }
+
+    #[gpui::test]
+    fn editing_query_restarts_and_resets_selection(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (overlay, cx) = open_overlay(cx, dir.path().to_path_buf());
+        set_query(&overlay, cx, "alpha");
+        settle(&overlay, cx);
+        cx.dispatch_action(SearchDown);
+        cx.update(|_, app| assert_eq!(overlay.read(app).selected, 1));
+        set_query(&overlay, cx, "wrapme");
+        cx.update(|_, app| {
+            let o = overlay.read(app);
+            assert!(o.matches.is_empty(), "restart clears stale results");
+            assert_eq!(o.selected, 0, "selection resets");
+            assert!(o.searching);
+        });
+        settle(&overlay, cx);
+        cx.update(|_, app| {
+            let o = overlay.read(app);
+            assert_eq!(o.matches.len(), 3);
+            assert!(o.matches.iter().all(|m| m.path == PathBuf::from("wrap.md")));
+        });
+    }
+
+    #[gpui::test]
+    fn retype_within_debounce_drops_the_stale_search(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (overlay, cx) = open_overlay(cx, dir.path().to_path_buf());
+        set_query(&overlay, cx, "alpha");
+        // Only 60 ms: still inside the 120 ms debounce of the first search.
+        cx.executor().advance_clock(Duration::from_millis(60));
+        cx.run_until_parked();
+        set_query(&overlay, cx, "unique-needle");
+        settle(&overlay, cx);
+        cx.update(|_, app| {
+            let o = overlay.read(app);
+            assert_eq!(o.matches.len(), 1, "{:?}", o.matches);
+            assert_eq!(o.matches[0].path, PathBuf::from("solo.txt"));
+            assert_eq!(o.matches[0].line_number, 2);
+        });
+    }
+
+    #[gpui::test]
+    fn results_cap_is_reported(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "hit\n".repeat(SEARCH_CAP + 50);
+        std::fs::write(dir.path().join("big.txt"), body).unwrap();
+        let (overlay, cx) = open_overlay(cx, dir.path().to_path_buf());
+        set_query(&overlay, cx, "hit");
+        settle(&overlay, cx);
+        cx.update(|_, app| {
+            let o = overlay.read(app);
+            assert!(o.capped);
+            assert_eq!(o.matches.len(), SEARCH_CAP);
+        });
+    }
+}

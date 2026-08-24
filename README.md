@@ -129,6 +129,15 @@ cargo run -- <path>  # open a file or folder
 cargo test
 ```
 
+Test coverage (CI enforces a 90% line-coverage floor) via
+[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov):
+
+```sh
+cargo install cargo-llvm-cov   # once; needs `rustup component add llvm-tools-preview`
+cargo llvm-cov                 # summary table
+cargo llvm-cov --html --open   # browsable line-by-line report
+```
+
 ## Status
 
 Early and moving fast — built as a working editor first, a product

@@ -493,4 +493,129 @@ mod tests {
             PreviewContent::Unreadable
         ));
     }
+
+    // ── entity/interaction tests (headless gpui test platform) ─────────
+
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    fn test_files() -> Vec<(String, PathBuf)> {
+        [
+            "notes/readme.md",
+            "notes/deep/nested/readme.md",
+            "todo.md",
+        ]
+        .iter()
+        .map(|rel| (rel.to_string(), PathBuf::from("/nonexistent").join(rel)))
+        .collect()
+    }
+
+    fn open_finder(cx: &mut TestAppContext) -> (gpui::Entity<Finder>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(
+                crate::theme::Theme::dark(),
+            )))
+        });
+        let (finder, cx) = cx.add_window_view(|_, cx| Finder::new(test_files(), cx));
+        cx.update(|window, app| {
+            let handle = finder.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+        (finder, cx)
+    }
+
+    #[gpui::test]
+    fn empty_query_lists_all_files_unhighlighted(cx: &mut TestAppContext) {
+        let (finder, cx) = open_finder(cx);
+        cx.update(|_, app| {
+            let f = finder.read(app);
+            assert_eq!(f.matches, vec![0, 1, 2]);
+            assert!(f.match_indices.iter().all(|v| v.is_empty()));
+            assert_eq!(f.selected, 0);
+        });
+    }
+
+    #[gpui::test]
+    fn editing_the_query_refilters_and_resets_selection(cx: &mut TestAppContext) {
+        let (finder, cx) = open_finder(cx);
+        // Move selection off 0 first so we can observe the reset.
+        cx.dispatch_action(FinderDown);
+        cx.update(|_, app| assert_eq!(finder.read(app).selected, 1));
+        finder.update_in(cx, |f, _, cx| {
+            f.input.update(cx, |input, cx| {
+                input.content = "todo".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let f = finder.read(app);
+            assert_eq!(f.last_query, "todo");
+            assert_eq!(f.matches, vec![2], "only todo.md matches");
+            assert!(!f.match_indices[0].is_empty(), "match chars recorded");
+            assert_eq!(f.selected, 0, "selection resets on refilter");
+        });
+    }
+
+    #[gpui::test]
+    fn arrow_actions_wrap_around(cx: &mut TestAppContext) {
+        let (finder, cx) = open_finder(cx);
+        cx.dispatch_action(FinderUp);
+        cx.update(|_, app| assert_eq!(finder.read(app).selected, 2, "up from 0 wraps to last"));
+        cx.dispatch_action(FinderDown);
+        cx.update(|_, app| assert_eq!(finder.read(app).selected, 0, "down from last wraps to 0"));
+    }
+
+    #[gpui::test]
+    fn confirm_emits_selected_path_and_dismiss_emits_dismissed(cx: &mut TestAppContext) {
+        let (finder, cx) = open_finder(cx);
+        let events: Rc<RefCell<Vec<String>>> = Rc::default();
+        cx.update(|_, app| {
+            let sink = events.clone();
+            app.subscribe(&finder, move |_, event: &FinderEvent, _| {
+                sink.borrow_mut().push(match event {
+                    FinderEvent::OpenPath(p) => format!("open:{}", p.display()),
+                    FinderEvent::Dismissed => "dismissed".to_string(),
+                });
+            })
+            .detach();
+        });
+        cx.dispatch_action(FinderDown);
+        cx.dispatch_action(FinderConfirm);
+        cx.dispatch_action(FinderDismiss);
+        cx.run_until_parked();
+        // Build the expectation via PathBuf so the separator matches the
+        // platform (join yields backslashes on Windows).
+        let expected = format!("open:{}", test_files()[1].1.display());
+        assert_eq!(*events.borrow(), vec![expected, "dismissed".to_string()]);
+    }
+
+    #[gpui::test]
+    fn confirm_on_no_matches_emits_nothing(cx: &mut TestAppContext) {
+        let (finder, cx) = open_finder(cx);
+        let confirmed = Rc::new(RefCell::new(false));
+        cx.update(|_, app| {
+            let flag = confirmed.clone();
+            app.subscribe(&finder, move |_, event: &FinderEvent, _| {
+                if matches!(event, FinderEvent::OpenPath(_)) {
+                    *flag.borrow_mut() = true;
+                }
+            })
+            .detach();
+        });
+        finder.update_in(cx, |f, _, cx| {
+            f.input.update(cx, |input, cx| {
+                input.content = "zzzzqqq".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(finder.read(app).matches.is_empty()));
+        cx.dispatch_action(FinderConfirm);
+        cx.run_until_parked();
+        assert!(!*confirmed.borrow());
+    }
 }
