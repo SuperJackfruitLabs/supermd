@@ -30,9 +30,24 @@ pub struct DiffDoc {
 }
 
 pub fn diff_doc(old: &str, new: &str) -> DiffDoc {
+    let refine = old.len() + new.len() <= MAX_DIFF_BYTES;
     let mut doc = DiffDoc::default();
     let diff = similar::TextDiff::from_lines(old, new);
     for op in diff.ops() {
+        if refine && op.tag() == similar::DiffTag::Replace {
+            let del: String = diff
+                .iter_changes(op)
+                .filter(|c| c.tag() == similar::ChangeTag::Delete)
+                .map(|c| c.value())
+                .collect();
+            let ins: String = diff
+                .iter_changes(op)
+                .filter(|c| c.tag() == similar::ChangeTag::Insert)
+                .map(|c| c.value())
+                .collect();
+            emit_word_diff(&mut doc, &del, &ins);
+            continue;
+        }
         for change in diff.iter_changes(op) {
             let start = doc.text.len();
             doc.text.push_str(change.value());
@@ -46,6 +61,24 @@ pub fn diff_doc(old: &str, new: &str) -> DiffDoc {
     }
     coalesce(&mut doc.changes);
     doc
+}
+
+/// Word-granular diff of a replaced run: unchanged words appear once,
+/// changed words as deleted-then-added pairs.
+fn emit_word_diff(doc: &mut DiffDoc, del: &str, ins: &str) {
+    let wd = similar::TextDiff::from_unicode_words(del, ins);
+    for op in wd.ops() {
+        for change in wd.iter_changes(op) {
+            let start = doc.text.len();
+            doc.text.push_str(change.value());
+            let kind = match change.tag() {
+                similar::ChangeTag::Equal => continue,
+                similar::ChangeTag::Insert => ChangeKind::Added,
+                similar::ChangeTag::Delete => ChangeKind::Deleted,
+            };
+            doc.changes.push(Change { range: start..doc.text.len(), kind });
+        }
+    }
 }
 
 /// Merge adjacent same-kind changes so the map stays minimal.
@@ -120,6 +153,40 @@ mod tests {
         };
         assert_eq!(strip(ChangeKind::Deleted), new, "strip deleted == new for {old:?} -> {new:?}");
         assert_eq!(strip(ChangeKind::Added), old, "strip added == old for {old:?} -> {new:?}");
+    }
+
+    #[test]
+    fn one_word_edit_marks_one_word() {
+        let d = diff_doc("the quick brown fox\n", "the swift brown fox\n");
+        let deleted: Vec<&str> = d
+            .changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::Deleted)
+            .map(|c| &d.text[c.range.clone()])
+            .collect();
+        let added: Vec<&str> = d
+            .changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::Added)
+            .map(|c| &d.text[c.range.clone()])
+            .collect();
+        assert_eq!(deleted, vec!["quick"]);
+        assert_eq!(added, vec!["swift"]);
+    }
+
+    #[test]
+    fn word_refined_doc_keeps_invariants() {
+        assert_reconstruction("the quick brown fox\n", "the swift brown fox\n");
+        assert_reconstruction("alpha beta\ngamma delta\n", "alpha b\ngamma delta epsilon\n");
+        assert_reconstruction("héllo wörld\n", "héllo mönde\n");
+    }
+
+    #[test]
+    fn oversized_input_skips_word_refinement() {
+        let old = "a ".repeat(600_000);
+        let new = old.replacen("a ", "b ", 1);
+        let d = diff_doc(&old, &new);
+        assert!(!d.changes.is_empty());
     }
 
     #[test]
