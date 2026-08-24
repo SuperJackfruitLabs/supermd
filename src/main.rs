@@ -7,6 +7,7 @@ mod highlight;
 mod input;
 mod markdown;
 mod reader;
+mod search;
 mod seti;
 mod settings;
 #[cfg(test)]
