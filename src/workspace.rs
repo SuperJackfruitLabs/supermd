@@ -31,6 +31,7 @@ actions!(
         ToggleSearch,
         TogglePalette,
         OpenPluginsFolder,
+        ReloadPlugins,
         TogglePreview,
         ShowChanges,
         ToggleFocusMode,
@@ -941,7 +942,7 @@ impl Workspace {
                         }).collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
-                for name in crate::extensions::format_plugins() {
+                for name in &crate::extensions::format_plugins() {
                     entries.push(crate::palette::PaletteEntry {
                         plugin: name.clone(),
                         id: "__format".into(),
@@ -1099,6 +1100,29 @@ impl Workspace {
             },
             cx,
         );
+    }
+
+    fn reload_plugins(&mut self, _: &ReloadPlugins, _window: &mut Window, cx: &mut Context<Self>) {
+        let plugins_dir = crate::settings::config_dir().join("plugins");
+        let mut host = crate::extensions::ExtensionHost::load(&plugins_dir);
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        host.set_grants(settings.plugin_grants.clone());
+        if let Some(tree) = &self.tree {
+            host.set_workspace_root(Some(tree.root.clone()));
+        }
+        for (dir, err) in host.failures() {
+            eprintln!("supermd: plugin failed: {}: {err}", dir.display());
+        }
+        crate::extensions::refresh_tables(&host);
+        let count = host.plugins().len();
+        if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
+            *state.0.lock().unwrap() = host;
+        }
+        if cx.try_global::<crate::diagram::DiagramCache>().is_some() {
+            cx.global_mut::<crate::diagram::DiagramCache>().clear();
+        }
+        self.show_command_error(format!("Plugins reloaded: {count}"), cx);
+        cx.refresh_windows();
     }
 
     fn open_plugins_folder(
@@ -2272,6 +2296,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_plugins_folder))
+            .on_action(cx.listener(Self::reload_plugins))
             .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent_ix(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent_ix(1, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent2, w, cx| this.open_recent_ix(2, w, cx)))

@@ -220,10 +220,11 @@ impl Editor {
         // Plugin inline pass: cache hits become replacement spans;
         // misses go to the background drainer (never wasm here).
         if matches!(self.provider, Provider::Markdown) {
-            let table = crate::extensions::inline_table();
-            if !table.is_empty() {
+            let (extra, misses) = crate::extensions::with_inline_table(|table| {
                 let lookup = |p: &str, i: &str, m: &str| crate::extensions::inline_lookup(p, i, m);
-                let (extra, misses) = spans::inline_pass(&text, &self.spans, table, &lookup);
+                spans::inline_pass(&text, &self.spans, table, &lookup)
+            });
+            {
                 if !extra.is_empty() {
                     self.spans.extend(extra);
                     self.spans.sort_by_key(|s| (s.range.start, s.range.end));
@@ -498,7 +499,8 @@ impl Editor {
         if !crate::settings::load(&crate::settings::config_dir()).format_on_save {
             return;
         }
-        let Some(plugin) = crate::extensions::format_plugins().first() else {
+        let plugins = crate::extensions::format_plugins();
+        let Some(plugin) = plugins.first() else {
             return;
         };
         let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
@@ -788,10 +790,11 @@ impl Editor {
             // original through. Synchronous under the epoch deadline —
             // paste is an explicit action.
             let mut out = text.clone();
-            if !crate::extensions::paste_plugins().is_empty() {
+            let paste_plugins = crate::extensions::paste_plugins();
+            if !paste_plugins.is_empty() {
                 if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
                     let mut host = state.0.lock().unwrap();
-                    for plugin in crate::extensions::paste_plugins() {
+                    for plugin in &paste_plugins {
                         if let Ok(Some(replaced)) = host.process_paste(plugin, &text) {
                             out = replaced;
                             break;
@@ -1235,12 +1238,9 @@ impl Editor {
         if !self.is_code_mode()
             && !matches!(self.view_line_kinds().get(ix), Some(LineKind::Code))
         {
-            for (deco, color, is_bg) in decoration_overlay(
-                &text,
-                &range,
-                crate::extensions::decoration_table(),
-                t,
-            ) {
+            for (deco, color, is_bg) in crate::extensions::with_decoration_table(|table| {
+                decoration_overlay(&text, &range, table, t)
+            }) {
                 let start = deco.start.max(range.start) - range.start;
                 let end = deco.end.min(range.end) - range.start;
                 for a in &mut attrs[start..end] {

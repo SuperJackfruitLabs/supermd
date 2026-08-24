@@ -166,15 +166,7 @@ fn main() {
             for (dir, err) in host.failures() {
                 eprintln!("supermd: plugin failed: {}: {err}", dir.display());
             }
-            extensions::set_decoration_table(extensions::compile_decorations(&host.plugins()));
-            extensions::set_inline_table(extensions::compile_inline(&host.plugins()));
-            extensions::set_surface_tables(&host.plugins());
-            extensions::set_fence_table(
-                host.plugins()
-                    .iter()
-                    .map(|p| (p.name.clone(), p.version.clone(), p.fences.clone()))
-                    .collect(),
-            );
+            extensions::refresh_tables(&host);
             let mut host = host;
             host.set_grants(startup_settings.plugin_grants.clone());
             if let Some(dir) = arg.as_ref().filter(|p| p.is_dir()) {
@@ -348,6 +340,7 @@ fn main() {
                     MenuItem::action("Go to File…", ToggleFinder),
                     MenuItem::action("Command Palette…", workspace::TogglePalette),
                     MenuItem::action("Open Plugins Folder", workspace::OpenPluginsFolder),
+                    MenuItem::action("Reload Plugins", workspace::ReloadPlugins),
                     MenuItem::action("Search in Workspace…", workspace::ToggleSearch),
                 ],
             },

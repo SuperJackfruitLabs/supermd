@@ -484,31 +484,33 @@ impl gpui::Global for ExtensionState {}
 
 /// Snapshot of (plugin, version, claimed fences) for pure discovery
 /// contexts (projection runs without cx access).
-static FENCE_TABLE: std::sync::OnceLock<Vec<(String, String, Vec<String>)>> =
-    std::sync::OnceLock::new();
+static FENCE_TABLE: std::sync::RwLock<Vec<(String, String, Vec<String>)>> =
+    std::sync::RwLock::new(Vec::new());
 
 pub fn set_fence_table(table: Vec<(String, String, Vec<String>)>) {
-    let _ = FENCE_TABLE.set(table);
+    *FENCE_TABLE.write().unwrap() = table;
 }
 
-pub fn fence_table() -> &'static [(String, String, Vec<String>)] {
-    FENCE_TABLE.get().map(|v| v.as_slice()).unwrap_or(&[])
+pub fn fence_table() -> Vec<(String, String, Vec<String>)> {
+    FENCE_TABLE.read().unwrap().clone()
 }
 
-static FORMAT_PLUGINS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-static PASTE_PLUGINS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+static FORMAT_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+static PASTE_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 
 pub fn set_surface_tables(metas: &[PluginMeta]) {
-    let _ = FORMAT_PLUGINS.set(metas.iter().filter(|m| m.formats).map(|m| m.name.clone()).collect());
-    let _ = PASTE_PLUGINS.set(metas.iter().filter(|m| m.paste).map(|m| m.name.clone()).collect());
+    *FORMAT_PLUGINS.write().unwrap() =
+        metas.iter().filter(|m| m.formats).map(|m| m.name.clone()).collect();
+    *PASTE_PLUGINS.write().unwrap() =
+        metas.iter().filter(|m| m.paste).map(|m| m.name.clone()).collect();
 }
 
-pub fn format_plugins() -> &'static [String] {
-    FORMAT_PLUGINS.get().map(|v| v.as_slice()).unwrap_or(&[])
+pub fn format_plugins() -> Vec<String> {
+    FORMAT_PLUGINS.read().unwrap().clone()
 }
 
-pub fn paste_plugins() -> &'static [String] {
-    PASTE_PLUGINS.get().map(|v| v.as_slice()).unwrap_or(&[])
+pub fn paste_plugins() -> Vec<String> {
+    PASTE_PLUGINS.read().unwrap().clone()
 }
 
 /// Apply a formatted result only if the document did not change while
@@ -523,14 +525,15 @@ pub struct CompiledDecoration {
     pub style: String,
 }
 
-static DECORATION_TABLE: std::sync::OnceLock<Vec<CompiledDecoration>> = std::sync::OnceLock::new();
+static DECORATION_TABLE: std::sync::RwLock<Vec<CompiledDecoration>> =
+    std::sync::RwLock::new(Vec::new());
 
 pub fn set_decoration_table(rules: Vec<CompiledDecoration>) {
-    let _ = DECORATION_TABLE.set(rules);
+    *DECORATION_TABLE.write().unwrap() = rules;
 }
 
-pub fn decoration_table() -> &'static [CompiledDecoration] {
-    DECORATION_TABLE.get().map(|v| v.as_slice()).unwrap_or(&[])
+pub fn with_decoration_table<R>(f: impl FnOnce(&[CompiledDecoration]) -> R) -> R {
+    f(&DECORATION_TABLE.read().unwrap())
 }
 
 /// Host-compiled inline rules.
@@ -540,14 +543,14 @@ pub struct CompiledInline {
     pub regex: regex::Regex,
 }
 
-static INLINE_TABLE: std::sync::OnceLock<Vec<CompiledInline>> = std::sync::OnceLock::new();
+static INLINE_TABLE: std::sync::RwLock<Vec<CompiledInline>> = std::sync::RwLock::new(Vec::new());
 
 pub fn set_inline_table(rules: Vec<CompiledInline>) {
-    let _ = INLINE_TABLE.set(rules);
+    *INLINE_TABLE.write().unwrap() = rules;
 }
 
-pub fn inline_table() -> &'static [CompiledInline] {
-    INLINE_TABLE.get().map(|v| v.as_slice()).unwrap_or(&[])
+pub fn with_inline_table<R>(f: impl FnOnce(&[CompiledInline]) -> R) -> R {
+    f(&INLINE_TABLE.read().unwrap())
 }
 
 pub fn compile_inline(metas: &[PluginMeta]) -> Vec<CompiledInline> {
@@ -622,6 +625,21 @@ fn inline_insert(key: InlineKey, value: Option<String>) {
     }
     map.insert(key, value);
     INLINE_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Rebuild all contribution tables from a loaded host.
+pub fn refresh_tables(host: &ExtensionHost) {
+    let metas = host.plugins();
+    set_fence_table(
+        metas
+            .iter()
+            .map(|p| (p.name.clone(), p.version.clone(), p.fences.clone()))
+            .collect(),
+    );
+    set_decoration_table(compile_decorations(&metas));
+    set_inline_table(compile_inline(&metas));
+    set_surface_tables(&metas);
+    clear_inline_cache();
 }
 
 /// Startup task: resolve queued inline misses through the host on the

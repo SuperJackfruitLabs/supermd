@@ -361,7 +361,7 @@ impl Projector for PluginBlockProjector {
         blocks: &[BlockInfo],
         lines: &[Range<usize>],
     ) -> Vec<Claim> {
-        plugin_claims(text, blocks, lines, crate::extensions::fence_table())
+        plugin_claims(text, blocks, lines, &crate::extensions::fence_table())
     }
 
     fn render(&self, ctx: &mut WidgetCtx<'_>) -> AnyElement {

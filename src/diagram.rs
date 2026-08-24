@@ -223,6 +223,11 @@ impl DiagramCache {
     pub fn len(&self) -> usize {
         self.map.len()
     }
+
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
 }
 
 fn hash_str(s: &str) -> u64 {
