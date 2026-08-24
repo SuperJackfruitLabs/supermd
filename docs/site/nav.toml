@@ -1,0 +1,6 @@
+# Order defines the sidebar and prev/next links.
+
+[[pages]]
+file = "index.md"
+title = "Getting Started"
+group = "Using SuperMD"
