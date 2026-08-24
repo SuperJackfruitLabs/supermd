@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diagrams — SuperMD Docs</title>
+<meta name="description" content="Fenced code blocks in two languages render as live diagrams, right in the document.">
+<link rel="canonical" href="https://supermd.app/docs/diagrams/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
+    --accent: #c9821c; --panel: #f8f5ec; --border: #eae5d8; --code: #f6f2e9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #211f1a; --fg: #d9d4c8; --strong: #f2ede2; --muted: #8f897a;
+      --accent: #e5a63b; --panel: #262420; --border: #383428; --code: #2b2822;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header.top {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 28px; border-bottom: 1px solid var(--border);
+  }
+  .wordmark {
+    display: inline-flex; align-items: center; gap: 9px;
+    font-weight: 800; font-size: 19px; color: var(--strong); letter-spacing: -0.015em;
+    font-family: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wordmark:hover { text-decoration: none; }
+  .wordmark .badge {
+    width: 26px; height: 26px; border-radius: 6px; flex: none;
+    background: linear-gradient(180deg, #e5a63b, #c9821c);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .wordmark .badge svg { width: 17px; height: 17px; display: block; }
+  .wordmark .mark { color: var(--accent); }
+  header.top nav a { margin-left: 20px; color: var(--fg); font-size: 15px; }
+  .layout { display: flex; max-width: 1080px; margin: 0 auto; }
+  .sidebar {
+    width: 220px; flex: none; padding: 32px 20px; font-size: 14px;
+    border-right: 1px solid var(--border); min-height: calc(100vh - 61px);
+  }
+  .sidebar h4 {
+    color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+    font-size: 11px; margin: 18px 0 8px;
+  }
+  .sidebar h4:first-child { margin-top: 0; }
+  .sidebar ul { list-style: none; }
+  .sidebar li { margin: 2px 0; }
+  .sidebar li a { display: block; color: var(--fg); padding: 4px 8px; border-radius: 6px; }
+  .sidebar li a:hover { background: var(--panel); text-decoration: none; }
+  .sidebar li.current a { background: var(--panel); color: var(--strong); font-weight: 600; }
+  main.doc { flex: 1; min-width: 0; max-width: 44rem; padding: 36px 32px 64px; }
+  .doc h1 { color: var(--strong); font-size: 32px; line-height: 1.2; margin-bottom: 18px; }
+  .doc h2 { color: var(--strong); font-size: 22px; margin: 34px 0 10px; }
+  .doc h3 { color: var(--strong); font-size: 17px; margin: 26px 0 8px; }
+  .doc p, .doc ul, .doc ol { margin-bottom: 14px; }
+  .doc ul, .doc ol { padding-left: 24px; }
+  .doc li { margin: 4px 0; }
+  .doc code {
+    background: var(--code); border-radius: 4px; padding: 1px 5px; font-size: 13.5px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .doc pre {
+    background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; font-size: 13px; overflow-x: auto; margin-bottom: 14px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .doc pre code { background: none; padding: 0; font-size: 13px; }
+  .doc table { border-collapse: collapse; margin-bottom: 14px; width: 100%; font-size: 14.5px; }
+  .doc th, .doc td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .doc th { background: var(--panel); color: var(--strong); }
+  .doc blockquote {
+    border-left: 3px solid var(--accent); padding-left: 14px; color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .pager {
+    display: flex; justify-content: space-between; margin-top: 48px;
+    padding-top: 18px; border-top: 1px solid var(--border); font-size: 15px;
+  }
+  footer {
+    text-align: center; color: var(--muted); font-size: 13px;
+    padding: 28px 0 40px; border-top: 1px solid var(--border);
+  }
+  .diagram-preview {
+    background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px; margin-bottom: 14px; text-align: center;
+  }
+  .diagram-preview svg { max-width: 100%; height: auto; }
+  .diagram-preview .dark { display: none; }
+  @media (prefers-color-scheme: dark) {
+    .diagram-preview .light { display: none; }
+    .diagram-preview .dark { display: block; }
+  }
+  .diagram-preview figcaption { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  @media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); min-height: 0; }
+    main.doc { padding: 24px 20px 48px; }
+  }
+
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="wordmark" href="/"><span class="badge"><svg viewBox="0 0 100 100"><path d="M25 72V32l14 22 11-17 11 17 14-22v40" stroke="white" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="name">Super<span class="mark">MD</span></span></a>
+  <nav>
+    <a href="/docs/">Docs</a>
+    <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download</a>
+    <a href="https://github.com/SuperJackfruitLabs/supermd">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+<aside class="sidebar">
+<h4>Using SuperMD</h4>
+<ul>
+<li><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/editing/">Editing</a></li>
+<li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
+<li class="current"><a href="/docs/diagrams/">Diagrams</a></li>
+<li><a href="/docs/workspace/">Working with a Folder</a></li>
+<li><a href="/docs/themes/">Themes</a></li>
+</ul>
+<h4>Extending SuperMD</h4>
+<ul>
+<li><a href="/docs/plugins/">Plugins</a></li>
+<li><a href="/docs/writing-plugins/">Writing a Plugin</a></li>
+<li><a href="/docs/capabilities/">Capabilities</a></li>
+<li><a href="/docs/grammars/">Grammar Plugins</a></li>
+</ul>
+
+</aside>
+<main class="doc">
+<h1>Diagrams</h1>
+<p>Fenced code blocks in two languages render as live diagrams, right in the document.</p>
+<h2>Mermaid</h2>
+<pre><code class="language-markdown">```mermaid
+flowchart TD
+  Draft --&gt; Review
+  Review --&gt; Published
+  Review --&gt; Draft
+```
+</code></pre>
+<figure class="diagram-preview"><div class="light"><svg id="merman" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width:146.25px;background-color:#f6f2e9" viewBox="0 0 146.25 263" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#merman{font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:16px;fill:#33302a;}#merman .edge-animation-slow{stroke-dasharray:9,5;stroke-dashoffset:900;stroke-linecap:round;}#merman .edge-animation-fast{stroke-dasharray:9,5;stroke-dashoffset:900;stroke-linecap:round;}#merman .error-icon{fill:#f6f2e9;}#merman .error-text{fill:#33302a;stroke:#33302a;}#merman .edge-thickness-normal{stroke-width:1px;}#merman .edge-thickness-thick{stroke-width:3.5px;}#merman .edge-pattern-solid{stroke-dasharray:0;}#merman .edge-thickness-invisible{stroke-width:0;fill:none;}#merman .edge-pattern-dashed{stroke-dasharray:3;}#merman .edge-pattern-dotted{stroke-dasharray:2;}#merman .marker{fill:#918b7d;stroke:#918b7d;}#merman .marker.cross{stroke:#918b7d;}#merman svg{font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:16px;}#merman p{margin:0;}#merman .label{font-family:Helvetica Neue,Helvetica,Arial,sans-serif;color:#33302a;}#merman .cluster-label text{fill:#33302a;}#merman .cluster-label span{color:#33302a;}#merman .cluster-label span p{background-color:transparent;}#merman .label text,#merman span{fill:#33302a;color:#33302a;}#merman .node rect,#merman .node circle,#merman .node ellipse,#merman .node polygon,#merman .node path{fill:#f8f5ec;stroke:#c9821c;stroke-width:1px;}#merman .rough-node .label text,#merman .node .label text,#merman .image-shape .label,#merman .icon-shape .label{text-anchor:middle;}#merman .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#merman .rough-node .label,#merman .node .label,#merman .image-shape .label,#merman .icon-shape .label{text-align:center;}#merman .node.clickable{cursor:pointer;}#merman .root .anchor path{fill:#918b7d;stroke-width:0;stroke:#918b7d;}#merman .arrowheadPath{fill:#918b7d;}#merman .edgePath .path{stroke:#918b7d;stroke-width:1px;}#merman .flowchart-link{stroke:#918b7d;fill:none;}#merman .edgeLabel{background-color:#f8f5ec;text-align:center;}#merman .edgeLabel p{background-color:#f8f5ec;}#merman .edgeLabel rect{opacity:0.5;background-color:#f8f5ec;fill:#f8f5ec;}#merman .labelBkg{background-color:rgba(248, 245, 236, 0.5);}#merman .cluster rect{fill:#f6f2e9;stroke:#eae5d8;stroke-width:1px;}#merman .cluster text{fill:#33302a;}#merman .cluster span{color:#33302a;}#merman div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;background:#f6f2e9;border:1px solid #eae5d8;border-radius:2px;pointer-events:none;z-index:100;}#merman .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#33302a;}#merman rect.text{fill:none;stroke-width:0;}#merman .icon-shape,#merman .image-shape{background-color:#f8f5ec;text-align:center;}#merman .icon-shape p,#merman .image-shape p{background-color:#f8f5ec;padding:2px;}#merman .icon-shape .label rect,#merman .image-shape .label rect{opacity:0.5;background-color:#f8f5ec;fill:#f8f5ec;}#merman .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#merman .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}</style><defs><filter id="merman-drop-shadow" height="130%" width="130%"><feDropShadow dx="4" dy="4" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><defs><filter id="merman-drop-shadow-small" height="150%" width="150%"><feDropShadow dx="2" dy="2" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><g><marker id="merman_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width:1;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width:1;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width:0;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width:0;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width:1;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width:1;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width:0;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width:0;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width:2;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width:2;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width:2.5"/></marker><marker id="merman_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width:2.5;stroke-dasharray:1, 0"/></marker><g class="root"><g class="clusters"/><g class="edgePaths"><path d="M68.176,57L67.334,61.167C66.492,65.333,64.809,73.667,64.676,81.347C64.544,89.026,65.964,96.053,66.674,99.566L67.383,103.079" id="merman-L_Draft_Review_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" data-edge="true" data-et="edge" data-id="L_Draft_Review_0" data-points="W3sieCI6NjguMTc1NTA1MDUwNTA1MDUsInkiOjU3fSx7IngiOjYzLjEyNSwieSI6ODJ9LHsieCI6NjguMTc1NTA1MDUwNTA1MDUsInkiOjEwN31d" data-look="classic" marker-end="url(#merman_flowchart-v2-pointEnd)" /><path d="M73.125,156L73.125,160.167C73.125,164.333,73.125,172.667,73.125,180.333C73.125,188,73.125,195,73.125,198.5L73.125,202" id="merman-L_Review_Published_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" data-edge="true" data-et="edge" data-id="L_Review_Published_0" data-points="W3sieCI6NzMuMTI1LCJ5IjoxNTZ9LHsieCI6NzMuMTI1LCJ5IjoxODF9LHsieCI6NzMuMTI1LCJ5IjoyMDZ9XQ==" data-look="classic" marker-end="url(#merman_flowchart-v2-pointEnd)" /><path d="M78.074,107L78.916,102.833C79.758,98.667,81.441,90.333,81.574,82.653C81.706,74.974,80.286,67.947,79.576,64.434L78.867,60.921" id="merman-L_Review_Draft_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" data-edge="true" data-et="edge" data-id="L_Review_Draft_0" data-points="W3sieCI6NzguMDc0NDk0OTQ5NDk0OTUsInkiOjEwN30seyJ4Ijo4My4xMjUsInkiOjgyfSx7IngiOjc4LjA3NDQ5NDk0OTQ5NDk1LCJ5Ijo1N31d" data-look="classic" marker-end="url(#merman_flowchart-v2-pointEnd)" /></g><g class="edgeLabels"><g></g><g></g><g></g><g class="edgeLabel"><g class="label" data-id="L_Draft_Review_0" transform="translate(0,0)"><text y="-10.1" text-anchor="middle"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"/></text></g></g><g class="edgeLabel"><g class="label" data-id="L_Review_Published_0" transform="translate(0,0)"><text y="-10.1" text-anchor="middle"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"/></text></g></g><g class="edgeLabel"><g class="label" data-id="L_Review_Draft_0" transform="translate(0,0)"><text y="-10.1" text-anchor="middle"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"/></text></g></g></g><g class="nodes"><g class="node default" id="merman-flowchart-Draft-0" transform="translate(73.125,32.5)" data-look="classic"><rect class="basic label-container" x="-47.3359375" y="-24.5" width="94.671875" height="49" /><g class="label" transform="translate(0,-9.5)"><g><text y="-10.1"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Draft</tspan></tspan></text></g></g></g><g class="node default" id="merman-flowchart-Review-1" transform="translate(73.125,131.5)" data-look="classic"><rect class="basic label-container" x="-56.2265625" y="-24.5" width="112.453125" height="49" /><g class="label" transform="translate(0,-9.5)"><g><text y="-10.1"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Review</tspan></tspan></text></g></g></g><g class="node default" id="merman-flowchart-Published-3" transform="translate(73.125,230.5)" data-look="classic"><rect class="basic label-container" x="-65.125" y="-24.5" width="130.25" height="49" /><g class="label" transform="translate(0,-9.5)"><g><text y="-10.1"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Published</tspan></tspan></text></g></g></g></g></g></g><linearGradient id="merman-gradient" gradientUnits="objectBoundingBox" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#c9821c" stop-opacity="1"/><stop offset="100%" stop-color="hsl(45, 6.1538461538%, 84.9019607843%)" stop-opacity="1"/></linearGradient></svg>
+</div><div class="dark"><svg id="merman" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width:146.25px;background-color:#2b2822" viewBox="0 0 146.25 263" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#merman{font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:16px;fill:#d9d4c8;}#merman .edge-animation-slow{stroke-dasharray:9,5;stroke-dashoffset:900;stroke-linecap:round;}#merman .edge-animation-fast{stroke-dasharray:9,5;stroke-dashoffset:900;stroke-linecap:round;}#merman .error-icon{fill:#2b2822;}#merman .error-text{fill:#d9d4c8;stroke:#d9d4c8;}#merman .edge-thickness-normal{stroke-width:1px;}#merman .edge-thickness-thick{stroke-width:3.5px;}#merman .edge-pattern-solid{stroke-dasharray:0;}#merman .edge-thickness-invisible{stroke-width:0;fill:none;}#merman .edge-pattern-dashed{stroke-dasharray:3;}#merman .edge-pattern-dotted{stroke-dasharray:2;}#merman .marker{fill:#8f897a;stroke:#8f897a;}#merman .marker.cross{stroke:#8f897a;}#merman svg{font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:16px;}#merman p{margin:0;}#merman .label{font-family:Helvetica Neue,Helvetica,Arial,sans-serif;color:#d9d4c8;}#merman .cluster-label text{fill:#d9d4c8;}#merman .cluster-label span{color:#d9d4c8;}#merman .cluster-label span p{background-color:transparent;}#merman .label text,#merman span{fill:#d9d4c8;color:#d9d4c8;}#merman .node rect,#merman .node circle,#merman .node ellipse,#merman .node polygon,#merman .node path{fill:#262420;stroke:#e5a63b;stroke-width:1px;}#merman .rough-node .label text,#merman .node .label text,#merman .image-shape .label,#merman .icon-shape .label{text-anchor:middle;}#merman .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#merman .rough-node .label,#merman .node .label,#merman .image-shape .label,#merman .icon-shape .label{text-align:center;}#merman .node.clickable{cursor:pointer;}#merman .root .anchor path{fill:#8f897a;stroke-width:0;stroke:#8f897a;}#merman .arrowheadPath{fill:#8f897a;}#merman .edgePath .path{stroke:#8f897a;stroke-width:1px;}#merman .flowchart-link{stroke:#8f897a;fill:none;}#merman .edgeLabel{background-color:#262420;text-align:center;}#merman .edgeLabel p{background-color:#262420;}#merman .edgeLabel rect{opacity:0.5;background-color:#262420;fill:#262420;}#merman .labelBkg{background-color:rgba(38, 36, 32, 0.5);}#merman .cluster rect{fill:#2b2822;stroke:#383428;stroke-width:1px;}#merman .cluster text{fill:#d9d4c8;}#merman .cluster span{color:#d9d4c8;}#merman div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;background:#2b2822;border:1px solid #383428;border-radius:2px;pointer-events:none;z-index:100;}#merman .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#d9d4c8;}#merman rect.text{fill:none;stroke-width:0;}#merman .icon-shape,#merman .image-shape{background-color:#262420;text-align:center;}#merman .icon-shape p,#merman .image-shape p{background-color:#262420;padding:2px;}#merman .icon-shape .label rect,#merman .image-shape .label rect{opacity:0.5;background-color:#262420;fill:#262420;}#merman .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#merman .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}</style><defs><filter id="merman-drop-shadow" height="130%" width="130%"><feDropShadow dx="4" dy="4" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><defs><filter id="merman-drop-shadow-small" height="150%" width="150%"><feDropShadow dx="2" dy="2" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><g><marker id="merman_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width:1;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width:1;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width:0;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width:0;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width:1;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width:1;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width:0;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width:0;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width:2;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width:2;stroke-dasharray:1, 0"/></marker><marker id="merman_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width:2.5"/></marker><marker id="merman_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width:2.5;stroke-dasharray:1, 0"/></marker><g class="root"><g class="clusters"/><g class="edgePaths"><path d="M68.176,57L67.334,61.167C66.492,65.333,64.809,73.667,64.676,81.347C64.544,89.026,65.964,96.053,66.674,99.566L67.383,103.079" id="merman-L_Draft_Review_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" data-edge="true" data-et="edge" data-id="L_Draft_Review_0" data-points="W3sieCI6NjguMTc1NTA1MDUwNTA1MDUsInkiOjU3fSx7IngiOjYzLjEyNSwieSI6ODJ9LHsieCI6NjguMTc1NTA1MDUwNTA1MDUsInkiOjEwN31d" data-look="classic" marker-end="url(#merman_flowchart-v2-pointEnd)" /><path d="M73.125,156L73.125,160.167C73.125,164.333,73.125,172.667,73.125,180.333C73.125,188,73.125,195,73.125,198.5L73.125,202" id="merman-L_Review_Published_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" data-edge="true" data-et="edge" data-id="L_Review_Published_0" data-points="W3sieCI6NzMuMTI1LCJ5IjoxNTZ9LHsieCI6NzMuMTI1LCJ5IjoxODF9LHsieCI6NzMuMTI1LCJ5IjoyMDZ9XQ==" data-look="classic" marker-end="url(#merman_flowchart-v2-pointEnd)" /><path d="M78.074,107L78.916,102.833C79.758,98.667,81.441,90.333,81.574,82.653C81.706,74.974,80.286,67.947,79.576,64.434L78.867,60.921" id="merman-L_Review_Draft_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" data-edge="true" data-et="edge" data-id="L_Review_Draft_0" data-points="W3sieCI6NzguMDc0NDk0OTQ5NDk0OTUsInkiOjEwN30seyJ4Ijo4My4xMjUsInkiOjgyfSx7IngiOjc4LjA3NDQ5NDk0OTQ5NDk1LCJ5Ijo1N31d" data-look="classic" marker-end="url(#merman_flowchart-v2-pointEnd)" /></g><g class="edgeLabels"><g></g><g></g><g></g><g class="edgeLabel"><g class="label" data-id="L_Draft_Review_0" transform="translate(0,0)"><text y="-10.1" text-anchor="middle"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"/></text></g></g><g class="edgeLabel"><g class="label" data-id="L_Review_Published_0" transform="translate(0,0)"><text y="-10.1" text-anchor="middle"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"/></text></g></g><g class="edgeLabel"><g class="label" data-id="L_Review_Draft_0" transform="translate(0,0)"><text y="-10.1" text-anchor="middle"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em" text-anchor="middle"/></text></g></g></g><g class="nodes"><g class="node default" id="merman-flowchart-Draft-0" transform="translate(73.125,32.5)" data-look="classic"><rect class="basic label-container" x="-47.3359375" y="-24.5" width="94.671875" height="49" /><g class="label" transform="translate(0,-9.5)"><g><text y="-10.1"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Draft</tspan></tspan></text></g></g></g><g class="node default" id="merman-flowchart-Review-1" transform="translate(73.125,131.5)" data-look="classic"><rect class="basic label-container" x="-56.2265625" y="-24.5" width="112.453125" height="49" /><g class="label" transform="translate(0,-9.5)"><g><text y="-10.1"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Review</tspan></tspan></text></g></g></g><g class="node default" id="merman-flowchart-Published-3" transform="translate(73.125,230.5)" data-look="classic"><rect class="basic label-container" x="-65.125" y="-24.5" width="130.25" height="49" /><g class="label" transform="translate(0,-9.5)"><g><text y="-10.1"><tspan class="row text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Published</tspan></tspan></text></g></g></g></g></g></g><linearGradient id="merman-gradient" gradientUnits="objectBoundingBox" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#e5a63b" stop-opacity="1"/><stop offset="100%" stop-color="hsl(40, 0%, 3.7254901961%)" stop-opacity="1"/></linearGradient></svg>
+</div><figcaption>…renders as</figcaption></figure>
+
+<p>Flowcharts, sequence diagrams, state machines — the common Mermaid diagram types render inline, using your current theme's colors and fonts. No web view, no external service: rendering happens locally.</p>
+<h2>Graphviz</h2>
+<pre><code class="language-markdown">```dot
+digraph {
+  a -&gt; b
+  b -&gt; c
+}
+```
+</code></pre>
+<figure class="diagram-preview"><div class="light"><?xml version="1.0" encoding="UTF-8" standalone="no"?><svg style="background-color:#f6f2e9" width="86" height="274" viewBox="0 0 86 274" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="startarrow" markerWidth="10" markerHeight="7"
+refX="0" refY="3.5" orient="auto">
+<polygon points="10 0, 10 7, 0 3.5" fill="context-stroke" />
+</marker>
+<marker id="endarrow" markerWidth="10" markerHeight="7"
+refX="10" refY="3.5" orient="auto">
+<polygon points="0 0, 10 3.5, 0 7" fill="context-stroke" />
+</marker>
+
+</defs><style>
+.a14 { font-size: 14px; font-family: Times, serif; }
+</style>
+<g >
+
+            <ellipse cx="47" cy="47" rx="17" ry="17" fill="#f8f5ec" 
+            stroke-width="1" stroke="#918b7d"/>
+
+            </g>
+<text fill="#33302a" dominant-baseline="middle" text-anchor="middle" 
+            x="47" y="33" class="a14"><tspan x = "47" dy="1.0em">a</tspan></text><g >
+
+            <ellipse cx="47" cy="141" rx="17" ry="17" fill="#f8f5ec" 
+            stroke-width="1" stroke="#918b7d"/>
+
+            </g>
+<text fill="#33302a" dominant-baseline="middle" text-anchor="middle" 
+            x="47" y="127" class="a14"><tspan x = "47" dy="1.0em">b</tspan></text><g >
+
+            <ellipse cx="47" cy="235" rx="17" ry="17" fill="#f8f5ec" 
+            stroke-width="1" stroke="#918b7d"/>
+
+            </g>
+<text fill="#33302a" dominant-baseline="middle" text-anchor="middle" 
+            x="47" y="221" class="a14"><tspan x = "47" dy="1.0em">c</tspan></text><g >
+
+            <path id="arrow0" d="M 47 64 C 47 94, 47 94, 47 124 " stroke="#918b7d" stroke-width="1"   marker-end="url(#endarrow)" 
+            fill="transparent" />
+
+            </g>
+<text fill="#33302a"><textPath href="#arrow0" startOffset="50%" text-anchor="middle" class="a14"></textPath></text><g >
+
+            <path id="arrow1" d="M 47 158 C 47 188, 47 188, 47 218 " stroke="#918b7d" stroke-width="1"   marker-end="url(#endarrow)" 
+            fill="transparent" />
+
+            </g>
+<text fill="#33302a"><textPath href="#arrow1" startOffset="50%" text-anchor="middle" class="a14"></textPath></text></svg></div><div class="dark"><?xml version="1.0" encoding="UTF-8" standalone="no"?><svg style="background-color:#2b2822" width="86" height="274" viewBox="0 0 86 274" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="startarrow" markerWidth="10" markerHeight="7"
+refX="0" refY="3.5" orient="auto">
+<polygon points="10 0, 10 7, 0 3.5" fill="context-stroke" />
+</marker>
+<marker id="endarrow" markerWidth="10" markerHeight="7"
+refX="10" refY="3.5" orient="auto">
+<polygon points="0 0, 10 3.5, 0 7" fill="context-stroke" />
+</marker>
+
+</defs><style>
+.a14 { font-size: 14px; font-family: Times, serif; }
+</style>
+<g >
+
+            <ellipse cx="47" cy="47" rx="17" ry="17" fill="#262420" 
+            stroke-width="1" stroke="#8f897a"/>
+
+            </g>
+<text fill="#d9d4c8" dominant-baseline="middle" text-anchor="middle" 
+            x="47" y="33" class="a14"><tspan x = "47" dy="1.0em">a</tspan></text><g >
+
+            <ellipse cx="47" cy="141" rx="17" ry="17" fill="#262420" 
+            stroke-width="1" stroke="#8f897a"/>
+
+            </g>
+<text fill="#d9d4c8" dominant-baseline="middle" text-anchor="middle" 
+            x="47" y="127" class="a14"><tspan x = "47" dy="1.0em">b</tspan></text><g >
+
+            <ellipse cx="47" cy="235" rx="17" ry="17" fill="#262420" 
+            stroke-width="1" stroke="#8f897a"/>
+
+            </g>
+<text fill="#d9d4c8" dominant-baseline="middle" text-anchor="middle" 
+            x="47" y="221" class="a14"><tspan x = "47" dy="1.0em">c</tspan></text><g >
+
+            <path id="arrow0" d="M 47 64 C 47 94, 47 94, 47 124 " stroke="#8f897a" stroke-width="1"   marker-end="url(#endarrow)" 
+            fill="transparent" />
+
+            </g>
+<text fill="#d9d4c8"><textPath href="#arrow0" startOffset="50%" text-anchor="middle" class="a14"></textPath></text><g >
+
+            <path id="arrow1" d="M 47 158 C 47 188, 47 188, 47 218 " stroke="#8f897a" stroke-width="1"   marker-end="url(#endarrow)" 
+            fill="transparent" />
+
+            </g>
+<text fill="#d9d4c8"><textPath href="#arrow1" startOffset="50%" text-anchor="middle" class="a14"></textPath></text></svg></div><figcaption>…renders as</figcaption></figure>
+
+<p><code>dot</code> and <code>graphviz</code> fences render through the bundled Graphviz plugin, themed to match.</p>
+<h2>Editing a diagram</h2>
+<p>Click a diagram and it dissolves into its editable source, like every other block in SuperMD. Click away and it re-renders. If the source has a syntax error, the error message appears in the diagram's place — your document keeps working, and the raw text is one click away.</p>
+<p>Diagrams re-render when you switch themes, so they never look pasted-in.</p>
+
+<div class="pager"><a class="prev-link" href="/docs/shortcuts/">&larr; Keyboard Shortcuts</a><span class="pager-gap"></span><a class="next-link" href="/docs/workspace/">Working with a Folder &rarr;</a></div>
+</main>
+</div>
+<footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>
+</body>
+</html>

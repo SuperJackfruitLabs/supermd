@@ -1,0 +1,51 @@
+# Order defines the sidebar and prev/next links.
+
+[[pages]]
+file = "index.md"
+title = "Getting Started"
+group = "Using SuperMD"
+
+[[pages]]
+file = "editing.md"
+title = "Editing"
+group = "Using SuperMD"
+
+[[pages]]
+file = "shortcuts.md"
+title = "Keyboard Shortcuts"
+group = "Using SuperMD"
+
+[[pages]]
+file = "diagrams.md"
+title = "Diagrams"
+group = "Using SuperMD"
+
+[[pages]]
+file = "workspace.md"
+title = "Working with a Folder"
+group = "Using SuperMD"
+
+[[pages]]
+file = "themes.md"
+title = "Themes"
+group = "Using SuperMD"
+
+[[pages]]
+file = "plugins.md"
+title = "Plugins"
+group = "Extending SuperMD"
+
+[[pages]]
+file = "writing-plugins.md"
+title = "Writing a Plugin"
+group = "Extending SuperMD"
+
+[[pages]]
+file = "capabilities.md"
+title = "Capabilities"
+group = "Extending SuperMD"
+
+[[pages]]
+file = "grammars.md"
+title = "Grammar Plugins"
+group = "Extending SuperMD"

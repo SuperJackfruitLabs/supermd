@@ -52,4 +52,7 @@ Open a folder (**⌘O**) — or just drop one onto this window. Your
 notes stay plain Markdown files on your disk: no database, no lock-in,
 autosaved with backups in `~/.supermd/backups`.
 
+The full guide — shortcuts, themes, plugins, and how to write your
+own — lives at [supermd.app/docs](https://supermd.app/docs/).
+
 *Happy writing.*

@@ -1,5 +1,7 @@
 name = "graphql"
 version = "0.1.0"
+description = "GraphQL syntax highlighting for fences and files"
+authors = ["SuperJackfruitLabs"]
 
 [[grammars]]
 name = "graphql"

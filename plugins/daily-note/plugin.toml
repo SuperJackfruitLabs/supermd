@@ -1,5 +1,7 @@
 name = "daily-note"
 version = "0.1.0"
+description = "Create today's journal note from the palette"
+authors = ["SuperJackfruitLabs"]
 
 [[templates]]
 id = "daily"

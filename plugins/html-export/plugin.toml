@@ -1,5 +1,7 @@
 name = "html-export"
 version = "0.1.0"
+description = "Export the document as a self-contained themed HTML file"
+authors = ["SuperJackfruitLabs"]
 
 [[exports]]
 id = "html"

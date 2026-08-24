@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capabilities — SuperMD Docs</title>
+<meta name="description" content="Plugins are pure by default: no filesystem, no network, no environment, no clock. Capabilities widen that — always host-mediated, always with user consent. This page is the author-facing contract.">
+<link rel="canonical" href="https://supermd.app/docs/capabilities/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
+    --accent: #c9821c; --panel: #f8f5ec; --border: #eae5d8; --code: #f6f2e9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #211f1a; --fg: #d9d4c8; --strong: #f2ede2; --muted: #8f897a;
+      --accent: #e5a63b; --panel: #262420; --border: #383428; --code: #2b2822;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header.top {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 28px; border-bottom: 1px solid var(--border);
+  }
+  .wordmark {
+    display: inline-flex; align-items: center; gap: 9px;
+    font-weight: 800; font-size: 19px; color: var(--strong); letter-spacing: -0.015em;
+    font-family: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wordmark:hover { text-decoration: none; }
+  .wordmark .badge {
+    width: 26px; height: 26px; border-radius: 6px; flex: none;
+    background: linear-gradient(180deg, #e5a63b, #c9821c);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .wordmark .badge svg { width: 17px; height: 17px; display: block; }
+  .wordmark .mark { color: var(--accent); }
+  header.top nav a { margin-left: 20px; color: var(--fg); font-size: 15px; }
+  .layout { display: flex; max-width: 1080px; margin: 0 auto; }
+  .sidebar {
+    width: 220px; flex: none; padding: 32px 20px; font-size: 14px;
+    border-right: 1px solid var(--border); min-height: calc(100vh - 61px);
+  }
+  .sidebar h4 {
+    color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+    font-size: 11px; margin: 18px 0 8px;
+  }
+  .sidebar h4:first-child { margin-top: 0; }
+  .sidebar ul { list-style: none; }
+  .sidebar li { margin: 2px 0; }
+  .sidebar li a { display: block; color: var(--fg); padding: 4px 8px; border-radius: 6px; }
+  .sidebar li a:hover { background: var(--panel); text-decoration: none; }
+  .sidebar li.current a { background: var(--panel); color: var(--strong); font-weight: 600; }
+  main.doc { flex: 1; min-width: 0; max-width: 44rem; padding: 36px 32px 64px; }
+  .doc h1 { color: var(--strong); font-size: 32px; line-height: 1.2; margin-bottom: 18px; }
+  .doc h2 { color: var(--strong); font-size: 22px; margin: 34px 0 10px; }
+  .doc h3 { color: var(--strong); font-size: 17px; margin: 26px 0 8px; }
+  .doc p, .doc ul, .doc ol { margin-bottom: 14px; }
+  .doc ul, .doc ol { padding-left: 24px; }
+  .doc li { margin: 4px 0; }
+  .doc code {
+    background: var(--code); border-radius: 4px; padding: 1px 5px; font-size: 13.5px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .doc pre {
+    background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; font-size: 13px; overflow-x: auto; margin-bottom: 14px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .doc pre code { background: none; padding: 0; font-size: 13px; }
+  .doc table { border-collapse: collapse; margin-bottom: 14px; width: 100%; font-size: 14.5px; }
+  .doc th, .doc td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .doc th { background: var(--panel); color: var(--strong); }
+  .doc blockquote {
+    border-left: 3px solid var(--accent); padding-left: 14px; color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .pager {
+    display: flex; justify-content: space-between; margin-top: 48px;
+    padding-top: 18px; border-top: 1px solid var(--border); font-size: 15px;
+  }
+  footer {
+    text-align: center; color: var(--muted); font-size: 13px;
+    padding: 28px 0 40px; border-top: 1px solid var(--border);
+  }
+  .diagram-preview {
+    background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px; margin-bottom: 14px; text-align: center;
+  }
+  .diagram-preview svg { max-width: 100%; height: auto; }
+  .diagram-preview .dark { display: none; }
+  @media (prefers-color-scheme: dark) {
+    .diagram-preview .light { display: none; }
+    .diagram-preview .dark { display: block; }
+  }
+  .diagram-preview figcaption { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  @media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); min-height: 0; }
+    main.doc { padding: 24px 20px 48px; }
+  }
+
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="wordmark" href="/"><span class="badge"><svg viewBox="0 0 100 100"><path d="M25 72V32l14 22 11-17 11 17 14-22v40" stroke="white" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="name">Super<span class="mark">MD</span></span></a>
+  <nav>
+    <a href="/docs/">Docs</a>
+    <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download</a>
+    <a href="https://github.com/SuperJackfruitLabs/supermd">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+<aside class="sidebar">
+<h4>Using SuperMD</h4>
+<ul>
+<li><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/editing/">Editing</a></li>
+<li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
+<li><a href="/docs/diagrams/">Diagrams</a></li>
+<li><a href="/docs/workspace/">Working with a Folder</a></li>
+<li><a href="/docs/themes/">Themes</a></li>
+</ul>
+<h4>Extending SuperMD</h4>
+<ul>
+<li><a href="/docs/plugins/">Plugins</a></li>
+<li><a href="/docs/writing-plugins/">Writing a Plugin</a></li>
+<li class="current"><a href="/docs/capabilities/">Capabilities</a></li>
+<li><a href="/docs/grammars/">Grammar Plugins</a></li>
+</ul>
+
+</aside>
+<main class="doc">
+<h1>Capabilities</h1>
+<p>Plugins are pure by default: no filesystem, no network, no environment, no clock. Capabilities widen that — always host-mediated, always with user consent. This page is the author-facing contract.</p>
+<h2>Declaring capabilities</h2>
+<pre><code class="language-toml">capabilities = ["workspace-read", "net"]
+</code></pre>
+<p>Unknown capability names reject the plugin at load, so older SuperMD versions fail your plugin clearly instead of running it half-working.</p>
+<h2><code>workspace-read</code></h2>
+<p>After a one-time consent banner, the user's open workspace is mounted <strong>read-only</strong> at <code>/workspace</code> inside your sandbox. Standard file APIs work under that path; everything else stays invisible. Until consent is granted, your plugin's calls return a consent-shaped error and SuperMD shows the banner — after granting, the user retries the action.</p>
+<h2><code>net</code></h2>
+<p>Declaring <code>net</code> gives you a host <code>fetch</code> function — your plugin never opens a socket. The host enforces:</p>
+<ul>
+<li><strong>Per-domain consent</strong>: the first request to a domain returns the error <code>consent required: &lt;domain&gt;</code> and shows the user a banner naming that domain. Granted domains are remembered in settings and revocable. Denied domains fail quietly thereafter.</li>
+<li><strong>HTTPS only</strong> — <code>http://</code> URLs are rejected.</li>
+<li><strong>Limits</strong>: 5-second timeout per request, 2 MB response cap, at most 4 fetches per plugin call, redirects followed only to domains the user has granted.</li>
+</ul>
+<p>Requests take a method (GET or POST), URL, headers, and optional body; responses carry status, headers, and body bytes. Propagate fetch errors as your own errors — that's what routes the consent banner.</p>
+<p>A useful pattern: net-capable paste plugins run <em>after</em> the paste, asynchronously — the pasted text lands instantly and your replacement is applied only if the user hasn't typed in the meantime. Design for both outcomes.</p>
+<h2>Files are never yours to place</h2>
+<p>There is no write capability. Exporters and templates return <strong>content</strong>; SuperMD owns every path:</p>
+<ul>
+<li><code>export-document</code> returns files as relative paths + bytes; the user picks the destination in a save dialog. Paths containing <code>..</code> or absolute paths are rejected outright.</li>
+<li><code>render-template</code> returns a workspace-relative filename + content; SuperMD validates it, creates it inside the open workspace, and never overwrites an existing file.</li>
+</ul>
+<h2>Time limits and crash isolation</h2>
+<ul>
+<li>Compute is capped at <strong>2 seconds</strong> per call; a call that exceeds it is interrupted and returns an error. Net-capable calls get additional allowance for network time, so a slow server isn't misread as a hang.</li>
+<li>A panic inside your plugin becomes an error result, and your plugin gets a fresh instance on the next call. You cannot take the editor down.</li>
+<li>Failures are always data: a failing renderer shows an error where the diagram would be; a failing formatter leaves the document untouched; a failing hook lets the save proceed.</li>
+</ul>
+
+<div class="pager"><a class="prev-link" href="/docs/writing-plugins/">&larr; Writing a Plugin</a><span class="pager-gap"></span><a class="next-link" href="/docs/grammars/">Grammar Plugins &rarr;</a></div>
+</main>
+</div>
+<footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>
+</body>
+</html>
