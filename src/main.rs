@@ -4,6 +4,7 @@
 mod diagram;
 mod diff;
 mod editor;
+mod extensions;
 mod files;
 mod finder;
 mod git;
