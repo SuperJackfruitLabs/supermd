@@ -6,6 +6,7 @@
 <title>Editing — SuperMD Docs</title>
 <meta name="description" content="SuperMD's editor is hybrid: your document always looks typeset, and the raw Markdown appears exactly where — and only where — you're working. There is no separate source mode to switch into and no preview pane to keep in sync. The page is the editor.">
 <link rel="canonical" href="https://supermd.app/docs/editing/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
@@ -29,8 +30,19 @@
     display: flex; align-items: center; justify-content: space-between;
     padding: 18px 28px; border-bottom: 1px solid var(--border);
   }
-  .wordmark { font-weight: 700; font-size: 19px; color: var(--strong); }
-  .wordmark .mark { color: var(--accent); font-weight: 800; }
+  .wordmark {
+    display: inline-flex; align-items: center; gap: 9px;
+    font-weight: 800; font-size: 19px; color: var(--strong); letter-spacing: -0.015em;
+    font-family: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wordmark:hover { text-decoration: none; }
+  .wordmark .badge {
+    width: 26px; height: 26px; border-radius: 6px; flex: none;
+    background: linear-gradient(180deg, #e5a63b, #c9821c);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .wordmark .badge svg { width: 17px; height: 17px; display: block; }
+  .wordmark .mark { color: var(--accent); }
   header.top nav a { margin-left: 20px; color: var(--fg); font-size: 15px; }
   .layout { display: flex; max-width: 1080px; margin: 0 auto; }
   .sidebar {
@@ -100,7 +112,7 @@
 </head>
 <body>
 <header class="top">
-  <a class="wordmark" href="/">Super<span class="mark">MD</span></a>
+  <a class="wordmark" href="/"><span class="badge"><svg viewBox="0 0 100 100"><path d="M25 72V32l14 22 11-17 11 17 14-22v40" stroke="white" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Super<span class="mark">MD</span></a>
   <nav>
     <a href="/docs/">Docs</a>
     <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download</a>
