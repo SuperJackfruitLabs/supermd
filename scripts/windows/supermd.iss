@@ -19,6 +19,7 @@ DisableProgramGroupPage=yes
 
 [Files]
 Source: "..\..\target\release\supermd.exe"; DestDir: "{app}"
+Source: "..\..\dist\default-plugins\*"; DestDir: "{app}\plugins"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\SuperMD"; Filename: "{app}\supermd.exe"

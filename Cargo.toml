@@ -31,6 +31,7 @@ wasmtime-wasi = "48"
 regex = "1.13.1"
 ureq = "3"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+tempfile = "3"
 sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
@@ -71,4 +72,5 @@ assets = [
     ["assets/linux/supermd.desktop", "usr/share/applications/", "644"],
     ["assets/linux/supermd-128.png", "usr/share/icons/hicolor/128x128/apps/supermd.png", "644"],
     ["assets/linux/supermd-512.png", "usr/share/icons/hicolor/512x512/apps/supermd.png", "644"],
+    ["dist/default-plugins/**/*", "usr/lib/supermd/plugins/", "644"],
 ]

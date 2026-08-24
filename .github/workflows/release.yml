@@ -48,6 +48,8 @@ jobs:
           echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "Signing as: $IDENTITY"
 
+      - name: Build plugins (bundle payload)
+        run: bash scripts/build_plugins.sh
       - name: Bundle
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -118,6 +120,10 @@ jobs:
         run: |
           bash scripts/build_plugins.sh
           (cd dist && zip -r supermd-plugins.zip plugins)
+          for d in dist/plugins/*/; do
+            name=$(basename "$d")
+            (cd dist/plugins && zip -r "../plugin-$name.zip" "$name")
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -125,6 +131,7 @@ jobs:
             dist/supermd-linux-*.tar.gz
             dist/*.deb
             dist/supermd-plugins.zip
+            dist/plugin-*.zip
           if-no-files-found: error
 
   windows:
@@ -138,6 +145,9 @@ jobs:
           cache-on-failure: true
       - name: Run tests
         run: cargo test
+      - name: Build plugins (installer payload)
+        shell: bash
+        run: bash scripts/build_plugins.sh
       - name: Bundle
         shell: pwsh
         run: |
