@@ -30,6 +30,7 @@ wasmtime = { version = "48", default-features = false, features = ["runtime", "c
 wasmtime-wasi = "48"
 regex = "1.13.1"
 ureq = "3"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1145,6 +1145,40 @@ pub fn write_export(files: &[(String, Vec<u8>)], dest: &ExportDest) -> Result<()
     }
 }
 
+// ── templates (host-owned writes, workspace-only) ────────────────────
+
+/// Create a template's file under the workspace root, validating the
+/// relative path. Never overwrites: (path, false) means it already
+/// existed and the caller should just open it.
+pub fn materialize_template(
+    root: &Path,
+    filename: &str,
+    content: &str,
+) -> Result<(PathBuf, bool), String> {
+    validate_export_paths(&[(filename.to_string(), Vec::new())])?;
+    let target = root.join(filename);
+    if target.exists() {
+        return Ok((target, false));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&target, content).map_err(|e| e.to_string())?;
+    Ok((target, true))
+}
+
+/// Context for render-template: wasm has no clock, so the host supplies
+/// local date/time strings.
+pub fn template_context(workspace: &str) -> TemplateContext {
+    let now = chrono::Local::now();
+    TemplateContext {
+        date: now.format("%Y-%m-%d").to_string(),
+        time: now.format("%H:%M").to_string(),
+        weekday: now.format("%A").to_string(),
+        workspace: workspace.to_string(),
+    }
+}
+
 /// Global handle; plugin calls lock briefly on the background executor.
 pub struct ExtensionState(pub std::sync::Arc<std::sync::Mutex<ExtensionHost>>);
 
@@ -1450,6 +1484,37 @@ pub fn compile_decorations(metas: &[PluginMeta]) -> Vec<CompiledDecoration> {
                 .map(|regex| CompiledDecoration { regex, style: d.style.clone() })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    #[test]
+    fn materialize_validates_creates_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(materialize_template(dir.path(), "../evil.md", "x").is_err());
+        assert!(materialize_template(dir.path(), "/abs.md", "x").is_err());
+        let (path, created) =
+            materialize_template(dir.path(), "journal/day.md", "# hi\n").unwrap();
+        assert!(created);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# hi\n");
+        let (path2, created2) =
+            materialize_template(dir.path(), "journal/day.md", "OVERWRITE").unwrap();
+        assert_eq!(path, path2);
+        assert!(!created2);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# hi\n", "never overwrites");
+    }
+
+    #[test]
+    fn template_context_shapes() {
+        let ctx = template_context("notes");
+        assert_eq!(ctx.workspace, "notes");
+        assert_eq!(ctx.date.len(), 10, "{}", ctx.date);
+        assert_eq!(ctx.date.chars().nth(4), Some('-'));
+        assert_eq!(ctx.time.len(), 5, "{}", ctx.time);
+        assert!(!ctx.weekday.is_empty());
+    }
 }
 
 #[cfg(test)]

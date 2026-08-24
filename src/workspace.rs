@@ -979,6 +979,13 @@ impl Workspace {
                         });
                     }
                 }
+                for (plugin, id, name) in crate::extensions::template_entries() {
+                    entries.push(crate::palette::PaletteEntry {
+                        plugin,
+                        id: format!("__template:{id}"),
+                        title: format!("New: {name}"),
+                    });
+                }
                 let failures = host
                     .failures()
                     .iter()
@@ -1032,9 +1039,52 @@ impl Workspace {
         &mut self,
         plugin: String,
         id: String,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Templates need a workspace, not an editor — handled before
+        // the editable-tab guard.
+        if let Some(template_id) = id.strip_prefix("__template:") {
+            let Some(root) = self.tree.as_ref().map(|t| t.root.clone()) else {
+                self.show_command_error("Open a folder to use templates".to_string(), cx);
+                return;
+            };
+            let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+                return;
+            };
+            let host = state.0.clone();
+            let ctx_data = crate::extensions::template_context(
+                &root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            let template_id = template_id.to_string();
+            let run = cx.background_executor().spawn(async move {
+                host.lock().unwrap().render_template(&plugin, &template_id, &ctx_data)
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = run.await;
+                this.update_in(cx, |this, window, cx| match result {
+                    Ok((filename, content)) => {
+                        match crate::extensions::materialize_template(&root, &filename, &content)
+                        {
+                            Ok((path, _created)) => {
+                                if let Some(tree) = &mut this.tree {
+                                    tree.refresh();
+                                }
+                                this.open_path(&path, window, cx);
+                            }
+                            Err(e) => this.show_command_error(e, cx),
+                        }
+                    }
+                    Err(e) => this.show_command_error(e, cx),
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         let Some(Tab::Editor { editor, view: EditorView::Edit }) = self.tabs.get(self.active)
         else {
             self.show_command_error("Commands need an editable tab".to_string(), cx);
