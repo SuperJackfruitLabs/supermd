@@ -12,6 +12,8 @@ pub struct Settings {
     pub reopen_last: bool,
     /// Absolute workspace paths, most recent first, max 8.
     pub recent_workspaces: Vec<String>,
+    /// Run the first formatter plugin before every save (default off).
+    pub format_on_save: bool,
 }
 
 impl Default for Settings {
@@ -21,6 +23,7 @@ impl Default for Settings {
             dark_theme: "Jackfruit Dark".into(),
             reopen_last: true,
             recent_workspaces: Vec::new(),
+            format_on_save: false,
         }
     }
 }
@@ -82,6 +85,11 @@ mod tests {
         };
         save(dir.path(), &s).unwrap();
         assert_eq!(load(dir.path()), s);
+    }
+
+    #[test]
+    fn format_on_save_defaults_off() {
+        assert!(!Settings::default().format_on_save);
     }
 
     #[test]

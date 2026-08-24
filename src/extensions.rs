@@ -425,6 +425,28 @@ pub fn fence_table() -> &'static [(String, String, Vec<String>)] {
     FENCE_TABLE.get().map(|v| v.as_slice()).unwrap_or(&[])
 }
 
+static FORMAT_PLUGINS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+static PASTE_PLUGINS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+pub fn set_surface_tables(metas: &[PluginMeta]) {
+    let _ = FORMAT_PLUGINS.set(metas.iter().filter(|m| m.formats).map(|m| m.name.clone()).collect());
+    let _ = PASTE_PLUGINS.set(metas.iter().filter(|m| m.paste).map(|m| m.name.clone()).collect());
+}
+
+pub fn format_plugins() -> &'static [String] {
+    FORMAT_PLUGINS.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
+pub fn paste_plugins() -> &'static [String] {
+    PASTE_PLUGINS.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
+/// Apply a formatted result only if the document did not change while
+/// the formatter ran.
+pub fn apply_if_unchanged(snapshot: &str, current: &str, formatted: String) -> Option<String> {
+    (snapshot == current).then_some(formatted)
+}
+
 /// Host-compiled decoration rules (regex validated at manifest parse).
 pub struct CompiledDecoration {
     pub regex: regex::Regex,
@@ -705,6 +727,12 @@ title = "About Dot"
         )
         .unwrap_err();
         assert!(err.contains("net"), "{err}");
+    }
+
+    #[test]
+    fn apply_if_unchanged_guards_generation() {
+        assert_eq!(apply_if_unchanged("a", "a", "A".into()), Some("A".into()));
+        assert_eq!(apply_if_unchanged("a", "ab", "A".into()), None);
     }
 
     #[test]

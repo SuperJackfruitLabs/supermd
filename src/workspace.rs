@@ -924,7 +924,7 @@ impl Workspace {
         let (entries, failures) = match cx.try_global::<crate::extensions::ExtensionState>() {
             Some(state) => {
                 let host = state.0.lock().unwrap();
-                let entries = host
+                let mut entries = host
                     .plugins()
                     .iter()
                     .flat_map(|p| {
@@ -935,6 +935,13 @@ impl Workspace {
                         }).collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
+                for name in crate::extensions::format_plugins() {
+                    entries.push(crate::palette::PaletteEntry {
+                        plugin: name.clone(),
+                        id: "__format".into(),
+                        title: format!("Format: {name}"),
+                    });
+                }
                 let failures = host
                     .failures()
                     .iter()
@@ -1002,6 +1009,37 @@ impl Workspace {
         };
         let host = state.0.clone();
         let (document, selection) = editor.read(cx).command_snapshot();
+        if id == "__format" {
+            let snapshot = document.clone();
+            let run = cx.background_executor().spawn(async move {
+                host.lock().unwrap().format_document(&plugin, &document)
+            });
+            cx.spawn(async move |this, cx| {
+                let result = run.await;
+                this.update(cx, |this, cx| match result {
+                    Ok(formatted) => {
+                        let current = editor.read(cx).command_snapshot().0;
+                        match crate::extensions::apply_if_unchanged(&snapshot, &current, formatted)
+                        {
+                            Some(text) => editor.update(cx, |editor, cx| {
+                                editor.apply_command_output(
+                                    &crate::extensions::CommandOutput::ReplaceDocument(text),
+                                    cx,
+                                );
+                            }),
+                            None => this.show_command_error(
+                                "document changed while formatting; run again".into(),
+                                cx,
+                            ),
+                        }
+                    }
+                    Err(e) => this.show_command_error(e, cx),
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         let run = cx.background_executor().spawn(async move {
             host.lock().unwrap().run_command(&plugin, &id, &document, selection)
         });

@@ -492,7 +492,32 @@ impl Editor {
     }
 
     /// The one save path: conflict check → backup → atomic write.
+    /// Format-on-save (opt-in): synchronous under the plugin epoch cap;
+    /// any failure saves the original unformatted text.
+    fn maybe_format_before_save(&mut self, cx: &mut Context<Self>) {
+        if !crate::settings::load(&crate::settings::config_dir()).format_on_save {
+            return;
+        }
+        let Some(plugin) = crate::extensions::format_plugins().first() else {
+            return;
+        };
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let snapshot = self.core.buffer.text();
+        let result = state.0.lock().unwrap().format_document(plugin, &snapshot);
+        if let Ok(formatted) = result {
+            if formatted != snapshot {
+                self.apply_command_output(
+                    &crate::extensions::CommandOutput::ReplaceDocument(formatted),
+                    cx,
+                );
+            }
+        }
+    }
+
     pub fn flush(&mut self, cx: &mut Context<Self>) {
+        self.maybe_format_before_save(cx);
         if !self.save.take_flush_now() {
             return;
         }
@@ -759,7 +784,22 @@ impl Editor {
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.insert_str(&text, cx);
+            // Paste processors: first Some wins; errors/None pass the
+            // original through. Synchronous under the epoch deadline —
+            // paste is an explicit action.
+            let mut out = text.clone();
+            if !crate::extensions::paste_plugins().is_empty() {
+                if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
+                    let mut host = state.0.lock().unwrap();
+                    for plugin in crate::extensions::paste_plugins() {
+                        if let Ok(Some(replaced)) = host.process_paste(plugin, &text) {
+                            out = replaced;
+                            break;
+                        }
+                    }
+                }
+            }
+            self.insert_str(&out, cx);
         }
     }
 

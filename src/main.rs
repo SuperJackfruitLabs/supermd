@@ -168,6 +168,7 @@ fn main() {
             }
             extensions::set_decoration_table(extensions::compile_decorations(&host.plugins()));
             extensions::set_inline_table(extensions::compile_inline(&host.plugins()));
+            extensions::set_surface_tables(&host.plugins());
             extensions::set_fence_table(
                 host.plugins()
                     .iter()
