@@ -241,3 +241,135 @@ mod tests {
         assert!(filter("zzz", &titles).is_empty());
     }
 }
+
+#[cfg(test)]
+mod gpui_tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    fn entries() -> Vec<PaletteEntry> {
+        let e = |plugin: &str, id: &str, title: &str| PaletteEntry {
+            plugin: plugin.into(),
+            id: id.into(),
+            title: title.into(),
+        };
+        vec![
+            e("toc", "toc.insert", "Insert Table of Contents"),
+            e("toc", "toc.update", "Update Table of Contents"),
+            e("tidy", "__format", "Format: tidy"),
+            e("html-export", "__export:html", "Export: HTML"),
+            e("daily-note", "__template:daily", "New: Daily Note"),
+        ]
+    }
+
+    fn open_palette(
+        cx: &mut TestAppContext,
+        entries: Vec<PaletteEntry>,
+        failures: Vec<String>,
+    ) -> (gpui::Entity<Palette>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(
+                crate::theme::Theme::dark(),
+            )))
+        });
+        let (palette, cx) = cx.add_window_view(|_, cx| Palette::new(entries, failures, cx));
+        cx.update(|window, app| {
+            let handle = palette.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+        (palette, cx)
+    }
+
+    fn set_query(palette: &gpui::Entity<Palette>, cx: &mut VisualTestContext, q: &str) {
+        palette.update_in(cx, |p, _, cx| {
+            p.input.update(cx, |input, cx| {
+                input.content = q.to_string().into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn renders_entries_and_failures_and_refilters(cx: &mut TestAppContext) {
+        let (palette, cx) =
+            open_palette(cx, entries(), vec!["badplugin: manifest broke".into()]);
+        cx.update(|_, app| {
+            let p = palette.read(app);
+            assert_eq!(p.matches.len(), 5);
+            assert_eq!(p.selected, 0);
+        });
+        set_query(&palette, cx, "export");
+        cx.update(|_, app| {
+            let p = palette.read(app);
+            assert_eq!(p.matches, vec![3], "only Export: HTML matches");
+            assert_eq!(p.selected, 0, "selection resets on refilter");
+        });
+        set_query(&palette, cx, "");
+        cx.update(|_, app| assert_eq!(palette.read(app).matches.len(), 5));
+    }
+
+    #[gpui::test]
+    fn up_and_down_wrap_selection(cx: &mut TestAppContext) {
+        let (palette, cx) = open_palette(cx, entries(), Vec::new());
+        cx.dispatch_action(PaletteDown);
+        cx.dispatch_action(PaletteDown);
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(palette.read(app).selected, 2));
+        for _ in 0..3 {
+            cx.dispatch_action(PaletteUp);
+        }
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(palette.read(app).selected, 4, "up wraps past zero"));
+        cx.dispatch_action(PaletteDown);
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(palette.read(app).selected, 0, "down wraps to start"));
+    }
+
+    #[gpui::test]
+    fn confirm_emits_the_filtered_selection(cx: &mut TestAppContext) {
+        let (palette, cx) = open_palette(cx, entries(), Vec::new());
+        let run: Rc<RefCell<Option<(String, String)>>> = Rc::default();
+        cx.update(|_, app| {
+            let sink = run.clone();
+            app.subscribe(&palette, move |_, event: &PaletteEvent, _| {
+                if let PaletteEvent::Run { plugin, id } = event {
+                    *sink.borrow_mut() = Some((plugin.clone(), id.clone()));
+                }
+            })
+            .detach();
+        });
+        set_query(&palette, cx, "daily");
+        cx.dispatch_action(PaletteConfirm);
+        cx.run_until_parked();
+        assert_eq!(
+            run.borrow().clone(),
+            Some(("daily-note".to_string(), "__template:daily".to_string()))
+        );
+    }
+
+    #[gpui::test]
+    fn dismiss_emits_and_empty_palette_confirms_nothing(cx: &mut TestAppContext) {
+        let (palette, cx) = open_palette(cx, Vec::new(), Vec::new());
+        let events: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        cx.update(|_, app| {
+            let sink = events.clone();
+            app.subscribe(&palette, move |_, event: &PaletteEvent, _| {
+                sink.borrow_mut().push(match event {
+                    PaletteEvent::Run { .. } => "run",
+                    PaletteEvent::Dismissed => "dismissed",
+                });
+            })
+            .detach();
+        });
+        // Nothing to confirm (also exercises the empty-state render).
+        cx.dispatch_action(PaletteConfirm);
+        cx.dispatch_action(PaletteDismiss);
+        cx.run_until_parked();
+        assert_eq!(*events.borrow(), vec!["dismissed"]);
+    }
+}

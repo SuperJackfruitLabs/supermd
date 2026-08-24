@@ -316,6 +316,7 @@ pub struct TransportRequest {
     pub body: Option<Vec<u8>>,
 }
 
+#[derive(Debug)]
 pub struct TransportResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
@@ -1894,6 +1895,56 @@ mod host_tests {
         assert_eq!(host.format_document("probe", "abc").unwrap(), "abc");
     }
 
+    /// Every world binding runs its conversion arm for every surface,
+    /// even when the plugin answers "unused" — and the 0.4 world's
+    /// host-api import reaches the same fetch ladder as 0.3's.
+    #[test]
+    fn version_arms_convert_across_all_surfaces() {
+        let Some(dir) = fixtures_dir() else { eprintln!("SKIP"); return; };
+        let mut host = ExtensionHost::load(&dir);
+        let theme = crate::diagram::DiagramTheme::default_light();
+        for plugin in ["fetcher", "probe"] {
+            assert!(host.render_block(plugin, "x", "y", &theme).is_err());
+            assert!(host.run_command(plugin, "id", "doc", 0..0).is_err());
+            assert!(host.render_inline(plugin, "p", "m").is_err());
+            assert_eq!(host.process_paste(plugin, "text").unwrap(), None);
+        }
+        assert!(host.export_document("probe", "d", "nope", &theme).is_err());
+        // v4 fetch: same ladder, same consent shape, then success.
+        let (t, calls) = mock_transport(vec![Ok(TransportResponse {
+            status: 200,
+            headers: vec![],
+            body: b"pong".to_vec(),
+            redirect: None,
+        })]);
+        host.set_transport(t);
+        let e = host
+            .format_document("probe", "fetchv4:https://example.com/x")
+            .unwrap_err();
+        assert!(e.contains("consent required: example.com"), "{e}");
+        assert!(calls.lock().unwrap().is_empty());
+        let mut grants = std::collections::BTreeMap::new();
+        grants.insert("probe".to_string(), vec!["net:example.com".to_string()]);
+        host.set_grants(grants);
+        assert_eq!(
+            host.format_document("probe", "fetchv4:https://example.com/x").unwrap(),
+            "v4 status=200 body=pong"
+        );
+    }
+
+    #[test]
+    fn ureq_transport_rejects_unknown_methods_without_network() {
+        let t = ureq_transport();
+        let e = t(&TransportRequest {
+            method: "PATCH".into(),
+            url: "https://example.com".into(),
+            headers: vec![],
+            body: None,
+        })
+        .unwrap_err();
+        assert!(e.contains("PATCH"), "{e}");
+    }
+
     #[test]
     fn unknown_plugin_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -1901,6 +1952,61 @@ mod host_tests {
         assert!(host
             .render_block("ghost", "x", "y", &crate::diagram::DiagramTheme::default_light())
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod drainer_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    /// The background drainer resolves queued inline misses through the
+    /// host and publishes them to the cache (bumping the generation).
+    #[gpui::test]
+    fn drainer_resolves_queued_inline_misses(cx: &mut TestAppContext) {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        if !dir.join("echo/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built");
+            return;
+        }
+        let host = ExtensionHost::load(&dir);
+        cx.update(|cx| {
+            cx.set_global(ExtensionState(std::sync::Arc::new(std::sync::Mutex::new(host))));
+        });
+        clear_inline_cache();
+        let gen_before = inline_generation();
+        enqueue_inline(vec![(
+            "echo".to_string(),
+            "cov".to_string(),
+            ":drain:".to_string(),
+        )]);
+        // Re-enqueueing an unresolved key is a no-op (dedup path).
+        enqueue_inline(vec![(
+            "echo".to_string(),
+            "cov".to_string(),
+            ":drain:".to_string(),
+        )]);
+        cx.update(|cx| start_inline_drainer(cx));
+        for _ in 0..50 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(60));
+            cx.run_until_parked();
+            if inline_lookup("echo", "cov", ":drain:").is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            inline_lookup("echo", "cov", ":drain:"),
+            Some("[cov::drain:]".to_string())
+        );
+        assert!(inline_generation() > gen_before, "cache generation advanced");
+        // Resolved keys are not re-queued.
+        enqueue_inline(vec![(
+            "echo".to_string(),
+            "cov".to_string(),
+            ":drain:".to_string(),
+        )]);
+        assert!(INLINE_QUEUE.lock().unwrap().is_empty());
+        clear_inline_cache();
     }
 }
 

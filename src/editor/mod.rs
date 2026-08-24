@@ -2630,6 +2630,115 @@ mod tests {
         })
     }
 
+    /// Widgets (table, image, diagrams) render through the projector
+    /// registry: the initial frame draws each claim's widget arm, and
+    /// diagram results (ready or failed) land after the background
+    /// render settles.
+    #[gpui::test]
+    fn projector_widgets_render_in_the_window(cx: &mut TestAppContext) {
+        let doc = "intro line\n\n\
+                   | h1 | h2 |\n| --- | --- |\n| a | b |\n\n\
+                   ![pic](missing.png)\n\n\
+                   ```mermaid\nflowchart TD\n  A --> B\n```\n\n\
+                   ```mermaid\nthis is not a diagram\n```\n\n\
+                   tail\n";
+        let (_fx, editor, cx) = open_editor(cx, "widgets.md", doc);
+        // Cursor sits in the intro line: every claim is untouched.
+        assert_eq!(widget_count(&editor, cx), 4, "table, image, two diagrams");
+        // Let the diagram renders finish and redraw (ready + failed arms).
+        for _ in 0..20 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+        }
+        cx.update(|_, app| {
+            editor.update(app, |_, cx| cx.notify());
+        });
+        cx.run_until_parked();
+        assert_eq!(widget_count(&editor, cx), 4, "widgets survive the redraw");
+        // Touching a widget's range dissolves it back to source lines.
+        editor.update_in(cx, |editor, _, cx| {
+            let table_start = doc.find('|').unwrap();
+            editor.core.set_cursor(table_start);
+            editor.after_edit(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(widget_count(&editor, cx), 3, "touched table dissolves");
+    }
+
+    /// Load the fixture plugins into the tables + global; false = skip.
+    fn with_plugins(cx: &mut TestAppContext) -> bool {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/plugins");
+        if !dir.join("probe/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built");
+            return false;
+        }
+        let mut host = crate::extensions::ExtensionHost::load(&dir);
+        crate::extensions::refresh_tables(&mut host);
+        cx.update(|cx| {
+            cx.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
+        });
+        true
+    }
+
+    #[gpui::test]
+    fn save_hooks_transform_on_flush(cx: &mut TestAppContext) {
+        if !with_plugins(cx) {
+            return;
+        }
+        // probe's on-save appends a marker when the doc says "hookme".
+        let (_fx, editor, cx) = open_editor(cx, "hooked.md", "hookme");
+        editor.update_in(cx, |editor, _, cx| {
+            editor.save.record_edit(Instant::now());
+            editor.flush(cx);
+        });
+        cx.run_until_parked();
+        let text = buffer_text(&editor, cx);
+        assert!(text.contains("<!-- saved -->"), "{text}");
+        crate::extensions::set_surface_tables(&[]);
+    }
+
+    #[gpui::test]
+    fn net_paste_plugins_enrich_after_the_paste(cx: &mut TestAppContext) {
+        if !with_plugins(cx) {
+            return;
+        }
+        let (_fx, editor, cx) = open_editor(cx, "enrich.md", "");
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_string("enrichme".into()))
+        });
+        cx.dispatch_action(Paste);
+        // The paste lands synchronously; the async enrich pass then
+        // replaces the pasted range (often within the first park).
+        for _ in 0..20 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+            if buffer_text(&editor, cx) == "[enriched]" {
+                break;
+            }
+        }
+        assert_eq!(buffer_text(&editor, cx), "[enriched]");
+        crate::extensions::set_surface_tables(&[]);
+    }
+
+    #[gpui::test]
+    fn status_widgets_fill_the_editor_status(cx: &mut TestAppContext) {
+        if !with_plugins(cx) {
+            return;
+        }
+        let (_fx, editor, cx) = open_editor(cx, "status.md", "12345");
+        for _ in 0..10 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(200));
+            cx.run_until_parked();
+            if cx.update(|_, app| editor.read(app).status().is_some()) {
+                break;
+            }
+        }
+        let status = cx.update(|_, app| editor.read(app).status());
+        assert_eq!(status.map(|s| s.to_string()), Some("status:5".to_string()));
+        crate::extensions::set_surface_tables(&[]);
+    }
+
     #[gpui::test]
     fn typing_flows_through_the_window_input_handler(cx: &mut TestAppContext) {
         let (_fx, editor, cx) = open_editor(cx, "note.md", "");

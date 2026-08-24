@@ -3,6 +3,7 @@
 
 wit_bindgen::generate!({ path: "../../wit-v4", world: "extension" });
 
+use supermd::extension::host_api;
 use supermd::extension::types as t;
 
 struct Plugin;
@@ -20,12 +21,33 @@ impl Guest for Plugin {
         Err("unused".into())
     }
 
+    /// "fetchv4:<url>" exercises the 0.4 world's host-api import.
     fn format_document(d: String) -> Result<String, String> {
+        if let Some(url) = d.strip_prefix("fetchv4:") {
+            let resp = host_api::fetch(&host_api::FetchRequest {
+                method: "GET".into(),
+                url: url.into(),
+                headers: vec![],
+                body: None,
+            })?;
+            return Ok(format!(
+                "v4 status={} body={}",
+                resp.status,
+                String::from_utf8_lossy(&resp.body)
+            ));
+        }
         Ok(d)
     }
 
-    fn process_paste(_: String) -> Result<Option<String>, String> {
-        Ok(None)
+    /// Enricher probe (probe is net-capable, so it runs on the async
+    /// post-paste pass): "enrichme" gets a replacement, everything
+    /// else passes through.
+    fn process_paste(text: String) -> Result<Option<String>, String> {
+        if text == "enrichme" {
+            Ok(Some("[enriched]".to_string()))
+        } else {
+            Ok(None)
+        }
     }
 
     fn export_document(_: String, _: String, _: t::Theme) -> Result<Vec<ExportFile>, String> {

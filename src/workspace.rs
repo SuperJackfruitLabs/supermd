@@ -4754,4 +4754,233 @@ mod tests {
         assert!(dismissed, "the Not-now button cleared the banner");
         assert!(move_failed, "the Move button reported the expected failure");
     }
+
+    // ── plugin shell: palette commands, templates, exports, consent,
+    //    viewers, reload ──────────────────────────────────────────────
+
+    /// Load the fixture plugins into the ExtensionState global and the
+    /// contribution tables. Skips (returns false) when fixtures are
+    /// absent.
+    fn with_plugins(cx: &mut TestAppContext) -> bool {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        if !dir.join("echo/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built (scripts/build_plugins.sh --fixtures)");
+            return false;
+        }
+        let mut host = crate::extensions::ExtensionHost::load(&dir);
+        crate::extensions::refresh_tables(&mut host);
+        cx.update(|cx| {
+            cx.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
+        });
+        true
+    }
+
+    fn active_editor_text(ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> String {
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            match w.tabs.get(w.active) {
+                Some(Tab::Editor { editor, .. }) => editor.read(app).text(),
+                _ => panic!("active tab is not an editor"),
+            }
+        })
+    }
+
+    #[gpui::test]
+    fn palette_opens_and_plugin_commands_apply(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, a, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        // The palette overlay builds its entries from the host tables.
+        cx.dispatch_action(TogglePalette);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).palette.is_some(), "palette open"));
+        cx.dispatch_action(TogglePalette);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).palette.is_none(), "palette toggled away"));
+
+        // A plain command inserts at the cursor…
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("echo".into(), "echo.run".into(), window, cx)
+        });
+        cx.run_until_parked();
+        assert!(active_editor_text(&ws, cx).contains("echo:echo.run"));
+
+        // …and the formatter path rewrites the whole document (echo's
+        // format-document uppercases).
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("echo".into(), "__format".into(), window, cx)
+        });
+        cx.run_until_parked();
+        let text = active_editor_text(&ws, cx);
+        assert!(text.contains("ECHO:ECHO.RUN"), "{text}");
+    }
+
+    #[gpui::test]
+    fn template_command_materializes_and_opens_the_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("probe".into(), "__template:note".into(), window, cx)
+        });
+        cx.run_until_parked();
+        let journal = std::fs::read_dir(root.path().join("from-template"))
+            .unwrap()
+            .flatten()
+            .next()
+            .expect("template file created");
+        assert!(journal.file_name().to_string_lossy().starts_with("note-"));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let path = w.tabs[w.active].path(app).expect("template tab open");
+            assert!(path.starts_with(root.path().join("from-template")));
+        });
+        // Running it again opens the existing file instead of erroring.
+        let before = std::fs::read_dir(root.path().join("from-template")).unwrap().count();
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("probe".into(), "__template:note".into(), window, cx)
+        });
+        cx.run_until_parked();
+        let after = std::fs::read_dir(root.path().join("from-template")).unwrap().count();
+        assert_eq!(before, after, "idempotent");
+    }
+
+    #[gpui::test]
+    fn export_writes_through_the_save_dialog(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, a, _) = workspace_fixture();
+        let dest = root.path().join("exported.txt");
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        // fetcher's "one" format returns a single file: the flow ends
+        // in prompt_for_new_path. The export runs in the background, so
+        // park first (prompt becomes pending), then answer it.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("fetcher".into(), "__export:one".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_new_path_selection({
+            let dest = dest.clone();
+            move |_| Some(dest.clone())
+        });
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "# a\n");
+    }
+
+    #[gpui::test]
+    fn consent_banner_flow_persists_grants(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, a, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        // reader declares workspace-read with no grant: the formatter
+        // path raises the consent banner instead of running.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("reader".into(), "__format".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(
+                w.consent_request,
+                Some(("reader".to_string(), "workspace-read".to_string()))
+            );
+        });
+        ws.update_in(cx, |ws, _, cx| ws.resolve_consent(true, cx));
+        cx.run_until_parked();
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        assert_eq!(settings.plugin_grants["reader"], ["workspace-read"]);
+        cx.update(|_, app| assert!(ws.read(app).consent_request.is_none()));
+
+        // A second request denied persists the refusal.
+        ws.update_in(cx, |ws, _, cx| {
+            ws.handle_plugin_error("probe".into(), "consent required: example.com".into(), cx)
+        });
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| ws.resolve_consent(false, cx));
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        assert_eq!(settings.plugin_grants["probe"], ["denied:net:example.com"]);
+    }
+
+    #[gpui::test]
+    fn viewer_files_open_rendered_and_toggle_to_source(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, _, _) = workspace_fixture();
+        let prb = root.path().join("view-me.prb");
+        std::fs::write(&prb, "probe body\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&prb, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(
+                matches!(w.tabs[w.active], Tab::Editor { view: EditorView::Preview(_), .. }),
+                "viewer file opens as a rendered preview"
+            );
+        });
+        // ⌘E to source and back to the (re-rendered) view.
+        cx.dispatch_action(TogglePreview);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(matches!(w.tabs[w.active], Tab::Editor { view: EditorView::Edit, .. }));
+        });
+        cx.dispatch_action(TogglePreview);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(matches!(
+                w.tabs[w.active],
+                Tab::Editor { view: EditorView::Preview(_), .. }
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn reload_plugins_rebuilds_the_host(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        // A plugins dir under the temp HOME with just the echo fixture.
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        let plugins = crate::settings::config_dir().join("plugins/echo");
+        std::fs::create_dir_all(&plugins).unwrap();
+        for f in ["plugin.toml", "plugin.wasm"] {
+            std::fs::copy(fixtures.join("echo").join(f), plugins.join(f)).unwrap();
+        }
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.reload_plugins(&ReloadPlugins, window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let state = app.global::<crate::extensions::ExtensionState>();
+            let names: Vec<String> =
+                state.0.lock().unwrap().plugins().iter().map(|p| p.name.clone()).collect();
+            assert_eq!(names, ["echo"], "reload swapped to the temp-HOME plugin set");
+        });
+        let _ = ws;
+    }
 }

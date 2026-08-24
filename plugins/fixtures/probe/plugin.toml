@@ -1,7 +1,9 @@
 name = "probe"
 version = "0.1.0"
 formats = true
+paste = true
 hooks = ["save"]
+capabilities = ["net"]
 
 [[viewers]]
 extensions = ["prb"]
