@@ -38,6 +38,12 @@ pub struct Theme {
     pub find_match_bg: Hsla,
     pub find_active_bg: Hsla,
 
+    // Diff view washes
+    pub diff_added_bg: Hsla,
+    pub diff_added_fg: Hsla,
+    pub diff_deleted_bg: Hsla,
+    pub diff_deleted_fg: Hsla,
+
     pub syntax: SyntaxColors,
 
     pub body_family: SharedString,
@@ -69,6 +75,11 @@ impl Theme {
             selected_bg: rgb(0xe8e1d0).into(),
             find_match_bg: rgb(0xf6e3a8).into(),
             find_active_bg: rgb(0xecc153).into(),
+
+            diff_added_bg: rgb(0xe6f0dc).into(),
+            diff_added_fg: rgb(0x3d6b2f).into(),
+            diff_deleted_bg: rgb(0xf7e3e0).into(),
+            diff_deleted_fg: rgb(0xa04b3d).into(),
 
             syntax: SyntaxColors {
                 keyword: rgb(0xa626a4).into(),
@@ -112,6 +123,11 @@ impl Theme {
             selected_bg: rgb(0x3a362c).into(),
             find_match_bg: rgb(0x574a1c).into(),
             find_active_bg: rgb(0x7d6a24).into(),
+
+            diff_added_bg: rgb(0x2c3a26).into(),
+            diff_added_fg: rgb(0xa8c897).into(),
+            diff_deleted_bg: rgb(0x3d2723).into(),
+            diff_deleted_fg: rgb(0xd18b7f).into(),
 
             syntax: SyntaxColors {
                 keyword: rgb(0xc678dd).into(),
@@ -175,6 +191,10 @@ struct ThemeFileColors {
     selected_bg: String,
     find_match_bg: String,
     find_active_bg: String,
+    diff_added_bg: Option<String>,
+    diff_added_fg: Option<String>,
+    diff_deleted_bg: Option<String>,
+    diff_deleted_fg: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -238,6 +258,19 @@ impl LoadedTheme {
         theme.selected_bg = parse_hex(&c.selected_bg)?;
         theme.find_match_bg = parse_hex(&c.find_match_bg)?;
         theme.find_active_bg = parse_hex(&c.find_active_bg)?;
+        // Optional keys keep their appearance defaults when absent.
+        if let Some(v) = &c.diff_added_bg {
+            theme.diff_added_bg = parse_hex(v)?;
+        }
+        if let Some(v) = &c.diff_added_fg {
+            theme.diff_added_fg = parse_hex(v)?;
+        }
+        if let Some(v) = &c.diff_deleted_bg {
+            theme.diff_deleted_bg = parse_hex(v)?;
+        }
+        if let Some(v) = &c.diff_deleted_fg {
+            theme.diff_deleted_fg = parse_hex(v)?;
+        }
         let s = &file.syntax;
         theme.syntax = SyntaxColors {
             keyword: parse_hex(&s.keyword)?,
@@ -366,6 +399,53 @@ attribute = "#d19a66"
         assert_eq!(loaded.theme.bg, gpui::rgb(0x111111).into());
         assert_eq!(loaded.theme.syntax.kind, gpui::rgb(0xe5c07b).into());
         assert_eq!(loaded.theme.find_active_bg, gpui::rgb(0x776600).into());
+    }
+
+    #[test]
+    fn builtin_appearances_have_distinct_diff_colors() {
+        assert_ne!(Theme::light().diff_added_bg, Theme::dark().diff_added_bg);
+        assert_ne!(Theme::light().diff_deleted_bg, Theme::dark().diff_deleted_bg);
+        assert_ne!(Theme::light().diff_added_fg, Theme::light().diff_deleted_fg);
+    }
+
+    #[test]
+    fn theme_file_diff_keys_optional_and_parsed() {
+        let toml_src = r##"
+name = "T"
+appearance = "dark"
+[colors]
+bg = "#111111"
+fg = "#dddddd"
+fg_strong = "#ffffff"
+fg_muted = "#888888"
+accent = "#ff0000"
+link = "#ff0001"
+code_bg = "#222222"
+code_fg = "#cccccc"
+border = "#333333"
+panel_bg = "#191919"
+hover_bg = "#252525"
+selected_bg = "#303030"
+find_match_bg = "#554400"
+find_active_bg = "#776600"
+diff_added_bg = "#112233"
+[syntax]
+keyword = "#c678dd"
+function = "#61afef"
+type = "#e5c07b"
+string = "#98c379"
+comment = "#5c6370"
+constant = "#d19a66"
+property = "#e06c75"
+operator = "#8a919c"
+tag = "#e06c75"
+attribute = "#d19a66"
+"##;
+        let loaded = LoadedTheme::from_toml(toml_src).unwrap();
+        assert_eq!(loaded.theme.diff_added_bg, gpui::rgb(0x112233).into());
+        // unspecified keys fall back to appearance defaults
+        assert_eq!(loaded.theme.diff_deleted_bg, Theme::dark().diff_deleted_bg);
+        assert_eq!(loaded.theme.diff_added_fg, Theme::dark().diff_added_fg);
     }
 
     #[test]
