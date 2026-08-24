@@ -8,6 +8,7 @@ mod input;
 mod markdown;
 mod reader;
 mod search;
+mod search_ui;
 mod seti;
 mod settings;
 #[cfg(test)]
@@ -92,7 +93,12 @@ fn main() {
             KeyBinding::new("cmd-e", TogglePreview, None),
             KeyBinding::new("cmd-shift-d", workspace::ShowChanges, None),
             KeyBinding::new("escape", workspace::ShowChanges, Some("DiffView")),
-            KeyBinding::new("cmd-shift-f", ToggleFocusMode, None),
+            KeyBinding::new("cmd-shift-f", workspace::ToggleSearch, None),
+            KeyBinding::new("ctrl-cmd-f", ToggleFocusMode, None),
+            KeyBinding::new("up", search_ui::SearchUp, Some("Search")),
+            KeyBinding::new("down", search_ui::SearchDown, Some("Search")),
+            KeyBinding::new("enter", search_ui::SearchConfirm, Some("Search")),
+            KeyBinding::new("escape", search_ui::SearchDismiss, Some("Search")),
             KeyBinding::new("cmd-1", workspace::FocusSidebar, None),
             KeyBinding::new("cmd-/", workspace::ToggleShortcuts, None),
             KeyBinding::new("cmd-t", workspace::ToggleThemePicker, None),
@@ -206,6 +212,7 @@ fn main() {
                     MenuItem::action("Toggle Outline", ToggleOutline),
                     MenuItem::separator(),
                     MenuItem::action("Go to File…", ToggleFinder),
+                    MenuItem::action("Search in Workspace…", workspace::ToggleSearch),
                 ],
             },
             Menu {

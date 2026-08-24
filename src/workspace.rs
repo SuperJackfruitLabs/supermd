@@ -28,6 +28,7 @@ actions!(
         ToggleSidebar,
         ToggleOutline,
         ToggleFinder,
+        ToggleSearch,
         TogglePreview,
         ShowChanges,
         ToggleFocusMode,
@@ -61,7 +62,8 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌘ F", "Find in file"),
             ("⌘ E", "Toggle edit / preview"),
             ("⌘ ⇧ D", "Show changes vs git HEAD"),
-            ("⌘ ⇧ F", "Focus mode"),
+            ("⌘ ⇧ F", "Search in workspace"),
+            ("⌃ ⌘ F", "Focus mode"),
             ("⌘ B", "Toggle sidebar"),
             ("⌘ ⇧ O", "Toggle outline"),
             ("⌘ 1", "Focus sidebar"),
@@ -140,7 +142,7 @@ impl Tab {
 
 /// Seti's 12 palette variables mapped onto our theme so icons read well
 /// in both appearances.
-fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
+pub(crate) fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
     let s = &t.syntax;
     match color {
         SetiColor::Blue => s.function,
@@ -178,6 +180,7 @@ pub struct Workspace {
     focus_mode: bool,
     pre_focus_panels: (bool, bool),
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
+    search: Option<(Entity<crate::search_ui::SearchOverlay>, gpui::Subscription)>,
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
     sidebar_selected: usize,
@@ -226,6 +229,7 @@ impl Workspace {
             focus_mode: false,
             pre_focus_panels: (true, true),
             finder: None,
+            search: None,
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
@@ -615,6 +619,44 @@ impl Workspace {
 
     fn dismiss_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finder = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn toggle_search(&mut self, _: &ToggleSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.dismiss_search(window, cx);
+            return;
+        }
+        let Some(tree) = self.tree.as_ref() else {
+            return;
+        };
+        let root = tree.root.clone();
+        let overlay = cx.new(|cx| crate::search_ui::SearchOverlay::new(root, cx));
+        let subscription = cx.subscribe_in(
+            &overlay,
+            window,
+            |this, _overlay, event, window, cx| match event {
+                crate::search_ui::SearchEvent::Open { path, line } => {
+                    let (path, line) = (path.clone(), *line);
+                    this.dismiss_search(window, cx);
+                    this.open_path(&path, window, cx);
+                    if let Some(Tab::Editor { editor, .. }) = this.tabs.get(this.active) {
+                        editor.update(cx, |editor, cx| {
+                            editor.scroll_to_line((line as usize).saturating_sub(1), cx);
+                        });
+                    }
+                }
+                crate::search_ui::SearchEvent::Dismissed => this.dismiss_search(window, cx),
+            },
+        );
+        window.focus(&overlay.focus_handle(cx));
+        self.search = Some((overlay, subscription));
+        cx.notify();
+    }
+
+    fn dismiss_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -1570,6 +1612,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::toggle_finder))
+            .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::toggle_focus_mode))
@@ -1640,6 +1683,32 @@ impl Render for Workspace {
                                     cx.stop_propagation();
                                 })
                                 .child(finder),
+                        ),
+                )
+            })
+            .when_some(self.search.as_ref(), |root, (overlay, _)| {
+                let overlay = overlay.clone();
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .pt(px(110.))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.dismiss_search(window, cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(overlay),
                         ),
                 )
             })
