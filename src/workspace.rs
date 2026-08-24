@@ -736,6 +736,13 @@ impl Workspace {
                 let editor = make_editor(&path, text, &langs, cx);
                 self.tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 self.active = self.tabs.len() - 1;
+                if let Some(viewer) = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .and_then(crate::extensions::viewer_for_extension)
+                {
+                    self.spawn_viewer_render(viewer, self.tabs.len() - 1, cx);
+                }
                 self.focus_active(window, cx);
                 cx.notify();
             }
@@ -805,6 +812,45 @@ impl Workspace {
         }
     }
 
+    /// Render a tab's file through its viewer plugin and swap the tab
+    /// to Preview when done. Failure leaves the source editor — a
+    /// broken viewer never hides a file.
+    fn spawn_viewer_render(&mut self, plugin: String, tab_ix: usize, cx: &mut Context<Self>) {
+        let Some(Tab::Editor { editor, .. }) = self.tabs.get(tab_ix) else {
+            return;
+        };
+        let editor = editor.clone();
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let host = state.0.clone();
+        let filename = editor.read(cx).title().to_string();
+        let content = editor.read(cx).text();
+        let run = cx.background_executor().spawn(async move {
+            host.lock().unwrap().render_view(&plugin, &filename, &content)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = run.await;
+            if let Ok(markdown) = result {
+                this.update(cx, |this, cx| {
+                    let langs = languages(cx);
+                    let title = editor.read(cx).title();
+                    let reader = cx.new(|_| Reader::from_source(title, &markdown, &langs));
+                    // Only swap if that tab still shows this editor in
+                    // Edit view (the user may have toggled or closed).
+                    if let Some(Tab::Editor { editor: e, view }) = this.tabs.get_mut(tab_ix) {
+                        if *e == editor && matches!(view, EditorView::Edit) {
+                            *view = EditorView::Preview(reader);
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     fn toggle_preview(&mut self, _: &TogglePreview, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Tab::Editor { editor, view }) = self.tabs.get(self.active) else {
             return;
@@ -817,12 +863,24 @@ impl Workspace {
             }
         } else {
             editor.update(cx, |editor, cx| editor.flush(cx));
-            let title = editor.read(cx).title();
-            let text = editor.read(cx).text();
-            let langs = languages(cx);
-            let reader = cx.new(|_| Reader::from_source(title, &text, &langs));
-            if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
-                *view = EditorView::Preview(reader);
+            // Viewer-claimed files re-render through the plugin so
+            // edits show; everything else previews its own markdown.
+            let viewer = editor
+                .read(cx)
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .and_then(crate::extensions::viewer_for_extension);
+            if let Some(plugin) = viewer {
+                self.spawn_viewer_render(plugin, self.active, cx);
+            } else {
+                let title = editor.read(cx).title();
+                let text = editor.read(cx).text();
+                let langs = languages(cx);
+                let reader = cx.new(|_| Reader::from_source(title, &text, &langs));
+                if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
+                    *view = EditorView::Preview(reader);
+                }
             }
         }
         self.focus_active(window, cx);
