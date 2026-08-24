@@ -397,6 +397,7 @@ mod grammar_tests {
     /// global and parallel tests would race it.
     #[test]
     fn grammar_registry_scenarios() {
+        let _tables = crate::extensions::table_test_guard();
         // 1. load + highlight + extension resolution
         let failures = load_plugin_grammars(&[graphql_spec()]);
         assert!(failures.is_empty(), "{failures:?}");
