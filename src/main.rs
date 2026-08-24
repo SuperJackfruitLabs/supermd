@@ -12,6 +12,7 @@ mod highlight;
 mod input;
 mod install;
 mod markdown;
+mod palette;
 mod platform;
 mod reader;
 mod search;
@@ -196,6 +197,11 @@ fn main() {
             KeyBinding::new(&platform::keybinding("cmd-shift-d"), workspace::ShowChanges, None),
             KeyBinding::new(&platform::keybinding("escape"), workspace::ShowChanges, Some("DiffView")),
             KeyBinding::new(&platform::keybinding("cmd-shift-f"), workspace::ToggleSearch, None),
+            KeyBinding::new(&platform::keybinding("cmd-shift-p"), workspace::TogglePalette, None),
+            KeyBinding::new(&platform::keybinding("up"), palette::PaletteUp, Some("Palette")),
+            KeyBinding::new(&platform::keybinding("down"), palette::PaletteDown, Some("Palette")),
+            KeyBinding::new(&platform::keybinding("enter"), palette::PaletteConfirm, Some("Palette")),
+            KeyBinding::new(&platform::keybinding("escape"), palette::PaletteDismiss, Some("Palette")),
             KeyBinding::new(&platform::keybinding("ctrl-cmd-f"), ToggleFocusMode, None),
             KeyBinding::new(&platform::keybinding("up"), search_ui::SearchUp, Some("Search")),
             KeyBinding::new(&platform::keybinding("down"), search_ui::SearchDown, Some("Search")),
@@ -330,6 +336,8 @@ fn main() {
                     MenuItem::action("Toggle Outline", ToggleOutline),
                     MenuItem::separator(),
                     MenuItem::action("Go to File…", ToggleFinder),
+                    MenuItem::action("Command Palette…", workspace::TogglePalette),
+                    MenuItem::action("Open Plugins Folder", workspace::OpenPluginsFolder),
                     MenuItem::action("Search in Workspace…", workspace::ToggleSearch),
                 ],
             },

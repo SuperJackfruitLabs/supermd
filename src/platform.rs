@@ -114,3 +114,15 @@ mod tests {
         assert!(!mono_font().is_empty());
     }
 }
+
+/// Open a directory in the system file manager.
+pub fn reveal_dir(path: &std::path::Path) {
+    let tool = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(tool).arg(path).spawn();
+}

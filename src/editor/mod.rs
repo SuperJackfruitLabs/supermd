@@ -533,6 +533,36 @@ impl Editor {
         self.after_edit(cx);
     }
 
+    /// Apply a plugin command result as one undo group.
+    pub fn apply_command_output(
+        &mut self,
+        out: &crate::extensions::CommandOutput,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::extensions::CommandOutput as O;
+        self.core.break_undo_group();
+        match out {
+            O::ReplaceDocument(s) => {
+                self.core.selection = Selection { anchor: 0, head: self.core.buffer.text().len() };
+                self.core.insert(s, Instant::now());
+            }
+            O::ReplaceSelection(s) => {
+                self.core.insert(s, Instant::now());
+            }
+            O::InsertAtCursor(s) => {
+                self.core.set_cursor(self.core.selection.head);
+                self.core.insert(s, Instant::now());
+            }
+        }
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    /// Snapshot for building a plugin command-input.
+    pub fn command_snapshot(&self) -> (String, std::ops::Range<usize>) {
+        (self.core.buffer.text(), self.core.selection.range())
+    }
+
     // ── action handlers ────────────────────────────────────────────────
 
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {

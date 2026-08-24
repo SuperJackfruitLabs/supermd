@@ -29,6 +29,8 @@ actions!(
         ToggleOutline,
         ToggleFinder,
         ToggleSearch,
+        TogglePalette,
+        OpenPluginsFolder,
         TogglePreview,
         ShowChanges,
         ToggleFocusMode,
@@ -95,6 +97,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌘ E", "Toggle edit / preview"),
             ("⌘ ⇧ D", "Show changes vs git HEAD"),
             ("⌘ ⇧ F", "Search in workspace"),
+            ("⌘ ⇧ P", "Command palette (plugins)"),
             ("⌃ ⌘ F", "Focus mode"),
             ("⌘ B", "Toggle sidebar"),
             ("⌘ ⇧ O", "Toggle outline"),
@@ -230,6 +233,9 @@ pub struct Workspace {
     pre_focus_panels: (bool, bool),
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
     search: Option<(Entity<crate::search_ui::SearchOverlay>, gpui::Subscription)>,
+    palette: Option<(Entity<crate::palette::Palette>, gpui::Subscription)>,
+    /// Transient plugin-command error, auto-cleared.
+    command_error: Option<SharedString>,
     /// Index of the transient preview tab (at most one; italic title).
     preview_tab: Option<usize>,
     /// Newer released version tag, when the launch check found one.
@@ -302,6 +308,8 @@ impl Workspace {
             pre_focus_panels: (true, true),
             finder: None,
             search: None,
+            palette: None,
+            command_error: None,
             preview_tab: None,
             update_available: None,
             startup_recents: crate::settings::load(&crate::settings::config_dir())
@@ -906,6 +914,119 @@ impl Workspace {
         self.search = None;
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.dismiss_palette(window, cx);
+            return;
+        }
+        let (entries, failures) = match cx.try_global::<crate::extensions::ExtensionState>() {
+            Some(state) => {
+                let host = state.0.lock().unwrap();
+                let entries = host
+                    .plugins()
+                    .iter()
+                    .flat_map(|p| {
+                        p.commands.iter().map(|c| crate::palette::PaletteEntry {
+                            plugin: p.name.clone(),
+                            id: c.id.clone(),
+                            title: c.title.clone(),
+                        }).collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let failures = host
+                    .failures()
+                    .iter()
+                    .map(|(dir, e)| format!("{}: {e}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+                    .collect();
+                (entries, failures)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        let palette = cx.new(|cx| crate::palette::Palette::new(entries, failures, cx));
+        let subscription = cx.subscribe_in(
+            &palette,
+            window,
+            |this, _p, event, window, cx| match event {
+                crate::palette::PaletteEvent::Run { plugin, id } => {
+                    let (plugin, id) = (plugin.clone(), id.clone());
+                    this.dismiss_palette(window, cx);
+                    this.run_plugin_command(plugin, id, window, cx);
+                }
+                crate::palette::PaletteEvent::Dismissed => this.dismiss_palette(window, cx),
+            },
+        );
+        window.focus(&palette.focus_handle(cx));
+        self.palette = Some((palette, subscription));
+        cx.notify();
+    }
+
+    fn dismiss_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn show_command_error(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.command_error = Some(msg.into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            this.update(cx, |this, cx| {
+                this.command_error = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn run_plugin_command(
+        &mut self,
+        plugin: String,
+        id: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Tab::Editor { editor, view: EditorView::Edit }) = self.tabs.get(self.active)
+        else {
+            self.show_command_error("Commands need an editable tab".to_string(), cx);
+            return;
+        };
+        let editor = editor.clone();
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let host = state.0.clone();
+        let (document, selection) = editor.read(cx).command_snapshot();
+        let run = cx.background_executor().spawn(async move {
+            host.lock().unwrap().run_command(&plugin, &id, &document, selection)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = run.await;
+            this.update(cx, |this, cx| match result {
+                Ok(out) => {
+                    editor.update(cx, |editor, cx| editor.apply_command_output(&out, cx));
+                }
+                Err(e) => this.show_command_error(e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_plugins_folder(
+        &mut self,
+        _: &OpenPluginsFolder,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let dir = crate::settings::config_dir().join("plugins");
+        let _ = std::fs::create_dir_all(&dir);
+        crate::platform::reveal_dir(&dir);
     }
 
     // ── sidebar keyboard navigation ────────────────────────────────────
@@ -2066,6 +2187,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::toggle_finder))
             .on_action(cx.listener(Self::toggle_search))
+            .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(Self::open_plugins_folder))
             .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent_ix(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent_ix(1, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent2, w, cx| this.open_recent_ix(2, w, cx)))
@@ -2356,6 +2479,54 @@ impl Render for Workspace {
                                     cx,
                                     |t, w, c| t.toggle_shortcuts(&ToggleShortcuts, w, c),
                                 )),
+                        ),
+                )
+            })
+            .when_some(self.palette.as_ref(), |root, (palette, _)| {
+                let palette = palette.clone();
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .pt(px(110.))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.dismiss_palette(window, cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(palette),
+                        ),
+                )
+            })
+            .when_some(self.command_error.clone(), |root, msg| {
+                let t = theme(cx);
+                root.child(
+                    div()
+                        .absolute()
+                        .bottom_4()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_3()
+                                .py(px(6.))
+                                .rounded_md()
+                                .bg(t.diff_deleted_bg)
+                                .text_size(px(12.))
+                                .text_color(t.diff_deleted_fg)
+                                .child(msg),
                         ),
                 )
             })
