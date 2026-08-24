@@ -2665,6 +2665,30 @@ mod tests {
         assert_eq!(widget_count(&editor, cx), 3, "touched table dissolves");
     }
 
+    /// A fenced block claimed by the echo plugin renders through the
+    /// PluginBlock projector (pending spinner, then the rasterized SVG
+    /// or the failure arm).
+    #[gpui::test]
+    fn plugin_fence_renders_as_a_widget(cx: &mut TestAppContext) {
+        if !with_plugins(cx) {
+            return;
+        }
+        let doc = "intro\n\n```echo-fixture\nhello widget\n```\n\ntail\n";
+        let (_fx, editor, cx) = open_editor(cx, "plugin-widget.md", doc);
+        assert_eq!(widget_count(&editor, cx), 1, "echo fence claimed");
+        // Let the background plugin render + rasterize land, then
+        // redraw so the Ready/Failed arm executes.
+        for _ in 0..30 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+        }
+        editor.update_in(cx, |_, _, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(widget_count(&editor, cx), 1, "widget survives the redraw");
+        crate::extensions::set_surface_tables(&[]);
+        crate::extensions::set_fence_table(Vec::new());
+    }
+
     /// Load the fixture plugins into the tables + global; false = skip.
     fn with_plugins(cx: &mut TestAppContext) -> bool {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

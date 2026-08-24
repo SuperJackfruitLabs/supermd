@@ -4957,6 +4957,63 @@ mod tests {
     }
 
     #[gpui::test]
+    fn status_strip_renders_widget_text(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, a, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        // Let the debounced widget refresh land, then draw the strip.
+        for _ in 0..10 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(200));
+            cx.run_until_parked();
+        }
+        let status = cx.update(|_, app| {
+            let w = ws.read(app);
+            match w.tabs.get(w.active) {
+                Some(Tab::Editor { editor, .. }) => editor.read(app).status(),
+                _ => None,
+            }
+        });
+        assert!(status.is_some(), "probe's len widget filled the strip");
+        ws.update_in(cx, |_, _, cx| cx.notify());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn template_errors_surface_in_the_command_strip(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        // No folder open: templates need a workspace root.
+        let (ws, cx) = open_arg(cx, None);
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("probe".into(), "__template:note".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let msg = ws.read(app).command_error.clone().expect("error strip");
+            assert!(msg.contains("folder"), "{msg}");
+        });
+
+        // Unknown template id: the plugin's error lands in the strip.
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("probe".into(), "__template:ghost".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let msg = ws.read(app).command_error.clone().expect("error strip");
+            assert!(msg.contains("ghost") || msg.contains("unknown"), "{msg}");
+        });
+    }
+
+    #[gpui::test]
     fn reload_plugins_rebuilds_the_host(cx: &mut TestAppContext) {
         let _home = temp_home();
         if !with_plugins(cx) {

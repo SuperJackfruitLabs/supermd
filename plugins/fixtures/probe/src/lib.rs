@@ -66,6 +66,9 @@ impl Guest for Plugin {
     }
 
     fn render_template(id: String, context: TemplateContext) -> Result<TemplateFile, String> {
+        if id != "note" {
+            return Err(format!("unknown template {id}"));
+        }
         Ok(TemplateFile {
             filename: format!("from-template/{id}-{}.md", context.date),
             content: format!(
