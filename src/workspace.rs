@@ -2855,6 +2855,33 @@ impl Render for Workspace {
                         ),
                 )
             })
+            .when_some(
+                // Status strip: widget-plugin text for the active editor.
+                match self.tabs.get(self.active) {
+                    Some(Tab::Editor { editor, view: EditorView::Edit })
+                        if !crate::extensions::widget_plugins().is_empty() =>
+                    {
+                        editor.read(cx).status()
+                    }
+                    _ => None,
+                },
+                |root, status| {
+                    let t = theme(cx);
+                    root.child(
+                        div()
+                            .absolute()
+                            .bottom_2()
+                            .right_4()
+                            .px_2()
+                            .py(px(3.))
+                            .rounded_md()
+                            .bg(t.panel_bg)
+                            .text_size(px(11.))
+                            .text_color(t.fg_muted)
+                            .child(status),
+                    )
+                },
+            )
             .when_some(self.command_error.clone(), |root, msg| {
                 let t = theme(cx);
                 root.child(

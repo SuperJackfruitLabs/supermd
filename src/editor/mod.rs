@@ -129,6 +129,10 @@ pub struct Editor {
     scroll_anim: Option<gpui::Task<()>>,
     /// A paste awaiting (or retrying) net enrichment.
     pending_enrich: Option<PendingEnrich>,
+    /// Latest widget-plugin status line ("1,234 words · 6 min read").
+    status_text: Option<SharedString>,
+    /// Debounce handle: replacing it cancels the pending refresh.
+    status_task: Option<gpui::Task<()>>,
 }
 
 /// Snapshot taken right after a paste lands, so a background enricher
@@ -241,8 +245,11 @@ impl Editor {
             scrollbar_dragging: false,
             scroll_anim: None,
             pending_enrich: None,
+            status_text: None,
+            status_task: None,
         };
         editor.restyle(langs);
+        editor.schedule_status(cx);
         editor
     }
 
@@ -513,7 +520,49 @@ impl Editor {
             self.recompute_matches(&query);
         }
         self.reveal_cursor();
+        self.schedule_status(cx);
         cx.notify();
+    }
+
+    /// Latest widget status line, if any plugin produced one.
+    pub fn status(&self) -> Option<SharedString> {
+        self.status_text.clone()
+    }
+
+    /// Debounced status-widget refresh (500ms after the last edit).
+    /// Zero cost when no widget plugins are loaded.
+    pub fn schedule_status(&mut self, cx: &mut Context<Self>) {
+        if crate::extensions::widget_plugins().is_empty() {
+            return;
+        }
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let host = state.0.clone();
+        self.status_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let Ok(document) = this.update(cx, |this, _| this.core.buffer.text()) else {
+                return;
+            };
+            let text = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut host = host.lock().unwrap();
+                    let parts: Vec<String> = crate::extensions::widget_plugins()
+                        .iter()
+                        .filter_map(|p| host.status_text(p, &document).ok())
+                        .collect();
+                    parts.join(" · ")
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.status_text = (!text.is_empty()).then(|| text.into());
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Replace the buffer with the on-disk content (clean buffers only —

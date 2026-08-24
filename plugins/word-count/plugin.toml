@@ -1,0 +1,5 @@
+name = "word-count"
+version = "0.1.0"
+
+[[widgets]]
+id = "words"
