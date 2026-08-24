@@ -43,6 +43,10 @@ launch (File → Open Recent has the rest).
   queries, plus an extras registry), in fenced blocks and standalone
   files alike. Code files get a real code editor: monospace, full
   width, line-number gutter, auto-indent.
+- **Live diagrams** — ` ```mermaid ` fences render as native,
+  theme-matched diagrams (merman — pure Rust, no browser). Click one
+  to edit its source; click away and it's a picture again. All 35
+  mermaid diagram families.
 - **Show Changes** — ⌘⇧D diffs the open file against git HEAD, with
   word-level marks rendered in the editor's own typography (added words
   on a green wash, deleted words struck through in red, inline in the

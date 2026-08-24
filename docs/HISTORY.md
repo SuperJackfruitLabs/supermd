@@ -17,3 +17,4 @@ The phase-by-phase build record that used to live in WELCOME.md.
 | 10 | Show Changes (git diff view), sidebar dots | Done |
 | 11 | Workspace search, ignore-aware walking, gix, preview tabs | Done |
 | 12 | Onboarding: DMG, welcome tour, recents, open events | Done |
+| 13 | Projector registry + live mermaid diagrams | Done |

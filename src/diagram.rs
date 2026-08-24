@@ -14,7 +14,8 @@ use crate::theme::Theme;
 /// The palette handed to mermaid's `base` theme via an init directive.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DiagramTheme {
-    pub background: String, // #rrggbb
+    pub background: String, // #rrggbb — the canvas
+    pub surface: String,    // node fill (raised, like code_bg)
     pub primary: String,
     pub text: String,
     pub muted: String,
@@ -37,11 +38,18 @@ impl DiagramTheme {
     pub fn from_theme(t: &Theme) -> Self {
         Self {
             background: hex(t.bg),
+            surface: hex(t.code_bg),
             primary: hex(t.accent),
             text: hex(t.fg),
             muted: hex(t.fg_muted),
             border: hex(t.border),
-            font_body: t.body_family.to_string(),
+            // ".SystemUIFont" is a private name resvg's fontdb cannot
+            // resolve; substitute the closest real face.
+            font_body: if t.body_family.starts_with('.') {
+                "Helvetica Neue, Helvetica, Arial, sans-serif".to_string()
+            } else {
+                t.body_family.to_string()
+            },
             dark: t.is_dark,
         }
     }
@@ -57,6 +65,7 @@ impl DiagramTheme {
     pub fn fingerprint(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.background.hash(&mut h);
+        self.surface.hash(&mut h);
         self.primary.hash(&mut h);
         self.text.hash(&mut h);
         self.muted.hash(&mut h);
@@ -66,34 +75,69 @@ impl DiagramTheme {
         h.finish()
     }
 
-    /// Mermaid init directive carrying the palette.
-    fn init_directive(&self) -> String {
-        format!(
-            concat!(
-                "%%{{init: {{\"theme\":\"base\",\"themeVariables\":{{",
-                "\"background\":\"{bg}\",\"primaryColor\":\"{bg}\",",
-                "\"primaryTextColor\":\"{text}\",\"primaryBorderColor\":\"{primary}\",",
-                "\"lineColor\":\"{muted}\",\"textColor\":\"{text}\",",
-                "\"secondaryColor\":\"{bg}\",\"tertiaryColor\":\"{bg}\",",
-                "\"fontFamily\":\"{font}\",\"darkMode\":{dark}",
-                "}}}}}}%%\n"
-            ),
-            bg = self.background,
-            text = self.text,
-            primary = self.primary,
-            muted = self.muted,
-            font = self.font_body,
-            dark = self.dark,
-        )
+    /// Mermaid site config carrying the palette. htmlLabels is forced
+    /// off — resvg cannot rasterize foreignObject HTML labels.
+    fn site_config(&self) -> serde_json::Value {
+        serde_json::json!({
+            "theme": "base",
+            "htmlLabels": false,
+            "flowchart": { "htmlLabels": false },
+            "fontFamily": self.font_body,
+            "themeVariables": {
+                "background": self.background,
+                "mainBkg": self.surface,
+                "primaryColor": self.surface,
+                "primaryTextColor": self.text,
+                "primaryBorderColor": self.primary,
+                "secondaryColor": self.surface,
+                "secondaryTextColor": self.text,
+                "tertiaryColor": self.background,
+                "tertiaryTextColor": self.text,
+                "lineColor": self.muted,
+                "textColor": self.text,
+                "nodeBorder": self.primary,
+                "clusterBkg": self.background,
+                "clusterBorder": self.border,
+                "actorBkg": self.surface,
+                "actorBorder": self.primary,
+                "actorTextColor": self.text,
+                "actorLineColor": self.muted,
+                "signalColor": self.text,
+                "signalTextColor": self.text,
+                "noteBkgColor": self.surface,
+                "noteTextColor": self.text,
+                "noteBorderColor": self.border,
+                "labelBoxBkgColor": self.surface,
+                "labelTextColor": self.text,
+                "edgeLabelBackground": self.background,
+                "fontFamily": self.font_body,
+                "darkMode": self.dark,
+            },
+        })
     }
 }
 
 // ── rendering ──────────────────────────────────────────────────────────
 
-/// Mermaid source → themed standalone SVG.
+/// Mermaid source → themed standalone SVG, through merman's
+/// resvg-safe pipeline (no foreignObject, themed root background).
 pub fn to_svg(source: &str, theme: &DiagramTheme) -> Result<String, String> {
-    let themed = format!("{}{}", theme.init_directive(), source);
-    merman::render_svg(&themed).map_err(|e| e.to_string())
+    let pipeline = merman::svg::SvgOutputPolicy {
+        preset: merman::svg::SvgPipelinePreset::ResvgSafe,
+        css_override_policy: merman::svg::CssOverridePolicy::StripExistingImportant,
+        root_background_color: Some(theme.background.clone()),
+        drop_native_duplicate_fallbacks: false,
+        scoped_css: None,
+    }
+    .pipeline();
+    let renderer = merman::svg::HeadlessRenderer::new()
+        .with_site_config(merman::MermaidConfig::from_value(theme.site_config()))
+        .with_svg_pipeline(pipeline);
+    match renderer.render_svg_sync(source) {
+        Ok(Some(svg)) => Ok(svg),
+        Ok(None) => Err("no mermaid diagram detected".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 fn fontdb() -> &'static resvg::usvg::fontdb::Database {
@@ -240,6 +284,10 @@ mod tests {
         let t = DiagramTheme::default_light();
         let svg = to_svg("flowchart LR\n  a[Start] --> b[End]\n", &t).unwrap();
         assert!(svg.contains("Start") && svg.contains("End"), "{}", &svg[..200.min(svg.len())]);
+        // Theme must reach the SVG: canvas background + no HTML labels
+        // (resvg cannot draw foreignObject).
+        assert!(svg.contains(&t.background), "canvas not themed");
+        assert!(!svg.contains("foreignObject"), "HTML labels leaked through");
     }
 
     #[test]
@@ -288,3 +336,4 @@ mod tests {
         assert_eq!(DiagramKey::bucket(650.0), 640);
     }
 }
+

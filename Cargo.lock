@@ -7050,6 +7050,7 @@ dependencies = [
  "resvg 0.48.1",
  "ropey",
  "serde",
+ "serde_json",
  "similar",
  "tempfile",
  "toml 1.1.4+spec-1.1.0",
