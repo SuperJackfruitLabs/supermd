@@ -1,0 +1,6 @@
+name = "graphql"
+version = "0.1.0"
+
+[[grammars]]
+name = "graphql"
+extensions = ["graphql", "gql"]
