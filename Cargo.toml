@@ -37,6 +37,7 @@ tempfile = "3"
 # test-support unlocks TestAppContext/VisualTestContext for driving the
 # GPUI shell headlessly; feature unification scopes it to test builds.
 gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
+layout-rs = "0.1.3"
 
 [profile.release]
 strip = true

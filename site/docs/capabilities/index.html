@@ -79,6 +79,17 @@
     text-align: center; color: var(--muted); font-size: 13px;
     padding: 28px 0 40px; border-top: 1px solid var(--border);
   }
+  .diagram-preview {
+    background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px; margin-bottom: 14px; text-align: center;
+  }
+  .diagram-preview svg { max-width: 100%; height: auto; }
+  .diagram-preview .dark { display: none; }
+  @media (prefers-color-scheme: dark) {
+    .diagram-preview .light { display: none; }
+    .diagram-preview .dark { display: block; }
+  }
+  .diagram-preview figcaption { color: var(--muted); font-size: 12px; margin-top: 8px; }
   @media (max-width: 900px) {
     .layout { flex-direction: column; }
     .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); min-height: 0; }

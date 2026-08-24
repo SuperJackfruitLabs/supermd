@@ -145,6 +145,161 @@ fn escape_attr(s: &str) -> String {
     s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;")
 }
 
+// ── diagram previews ────────────────────────────────────────────────
+// Fenced examples whose content is a ```mermaid or ```dot block get a
+// real rendered preview injected below the code, in light and dark,
+// using the same engines the app ships (merman; layout-rs like the
+// bundled dot plugin).
+
+struct DocsPalette {
+    background: &'static str,
+    surface: &'static str,
+    text: &'static str,
+    muted: &'static str,
+    primary: &'static str,
+    border: &'static str,
+}
+
+/// The landing page palette, mirrored for diagram theming.
+fn docs_palette(dark: bool) -> DocsPalette {
+    if dark {
+        DocsPalette {
+            background: "#2b2822",
+            surface: "#262420",
+            text: "#d9d4c8",
+            muted: "#8f897a",
+            primary: "#e5a63b",
+            border: "#383428",
+        }
+    } else {
+        DocsPalette {
+            background: "#f6f2e9",
+            surface: "#f8f5ec",
+            text: "#33302a",
+            muted: "#918b7d",
+            primary: "#c9821c",
+            border: "#eae5d8",
+        }
+    }
+}
+
+const DIAGRAM_FONT: &str = "Helvetica Neue, Helvetica, Arial, sans-serif";
+
+fn render_mermaid(source: &str, p: &DocsPalette) -> Result<String, String> {
+    let site_config = serde_json::json!({
+        "theme": "base",
+        "htmlLabels": false,
+        "flowchart": { "htmlLabels": false },
+        "fontFamily": DIAGRAM_FONT,
+        "themeVariables": {
+            "background": p.background,
+            "mainBkg": p.surface,
+            "primaryColor": p.surface,
+            "primaryTextColor": p.text,
+            "primaryBorderColor": p.primary,
+            "secondaryColor": p.surface,
+            "secondaryTextColor": p.text,
+            "tertiaryColor": p.background,
+            "tertiaryTextColor": p.text,
+            "lineColor": p.muted,
+            "textColor": p.text,
+            "nodeBorder": p.primary,
+            "clusterBkg": p.background,
+            "clusterBorder": p.border,
+            "fontFamily": DIAGRAM_FONT,
+        },
+    });
+    let pipeline = merman::svg::SvgOutputPolicy {
+        preset: merman::svg::SvgPipelinePreset::ResvgSafe,
+        css_override_policy: merman::svg::CssOverridePolicy::StripExistingImportant,
+        root_background_color: Some(p.background.to_string()),
+        drop_native_duplicate_fallbacks: false,
+        scoped_css: None,
+    }
+    .pipeline();
+    let renderer = merman::svg::HeadlessRenderer::new()
+        .with_site_config(merman::MermaidConfig::from_value(site_config))
+        .with_svg_pipeline(pipeline);
+    match renderer.render_svg_sync(source) {
+        Ok(Some(svg)) => Ok(svg),
+        Ok(None) => Err("no mermaid diagram detected".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Same recolor approach as the bundled dot plugin.
+fn render_dot(source: &str, p: &DocsPalette) -> Result<String, String> {
+    use layout::backends::svg::SVGWriter;
+    use layout::gv::{DotParser, GraphBuilder};
+    let mut parser = DotParser::new(source);
+    let graph = parser.process().map_err(|e| format!("dot parse: {e}"))?;
+    let mut builder = GraphBuilder::new();
+    builder.visit_graph(&graph);
+    let mut visual = builder.get();
+    let mut writer = SVGWriter::new();
+    visual.do_it(false, false, false, &mut writer);
+    let svg = writer.finalize();
+    Ok(svg
+        .replace("fill=\"#ffffffff\"", &format!("fill=\"{}\"", p.surface))
+        .replace("fill=\"#000000ff\"", &format!("fill=\"{}\"", p.text))
+        .replace("stroke=\"#000000ff\"", &format!("stroke=\"{}\"", p.muted))
+        .replace(
+            "<svg ",
+            &format!("<svg style=\"background-color:{}\" ", p.background),
+        )
+        .replace("<text ", &format!("<text fill=\"{}\" ", p.text))
+        .replace("<text>", &format!("<text fill=\"{}\">", p.text)))
+}
+
+fn decode_entities(s: &str) -> String {
+    s.replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Append rendered light+dark previews after every markdown example
+/// whose content is a single ```mermaid or ```dot fence.
+fn inject_diagram_previews(html: &str) -> Result<String, String> {
+    const OPEN: &str = "<pre><code class=\"language-markdown\">```";
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(ix) = rest.find(OPEN) {
+        let after_open = ix + OPEN.len();
+        let Some(end_rel) = rest[after_open..].find("</code></pre>") else {
+            break;
+        };
+        let block_end = after_open + end_rel + "</code></pre>".len();
+        out.push_str(&rest[..block_end]);
+        let inner = &rest[after_open..after_open + end_rel];
+        let (lang, body) = inner.split_once('\n').unwrap_or(("", ""));
+        let source = decode_entities(body.trim_end_matches("```\n").trim_end_matches("```"));
+        let rendered = match lang.trim() {
+            "mermaid" => Some((
+                render_mermaid(&source, &docs_palette(false))?,
+                render_mermaid(&source, &docs_palette(true))?,
+            )),
+            "dot" | "graphviz" => Some((
+                render_dot(&source, &docs_palette(false))?,
+                render_dot(&source, &docs_palette(true))?,
+            )),
+            _ => None,
+        };
+        if let Some((light, dark)) = rendered {
+            out.push_str(&format!(
+                "\n<figure class=\"diagram-preview\">\
+                 <div class=\"light\">{light}</div>\
+                 <div class=\"dark\">{dark}</div>\
+                 <figcaption>…renders as</figcaption></figure>\n"
+            ));
+        }
+        rest = &rest[block_end..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 /// The complete HTML document for one page.
 fn render_page(page: &Page, nav: &[Page], markdown: &str) -> Result<String, String> {
     let ix = nav
@@ -152,7 +307,7 @@ fn render_page(page: &Page, nav: &[Page], markdown: &str) -> Result<String, Stri
         .position(|p| p.file == page.file)
         .ok_or_else(|| format!("{} not in nav", page.file))?;
     let slug = slug_of(&page.file);
-    let body = markdown_to_html(markdown);
+    let body = inject_diagram_previews(&markdown_to_html(markdown))?;
     let description = escape_attr(&first_paragraph_text(markdown));
 
     let mut sidebar = String::new();
@@ -311,6 +466,17 @@ const PAGE_CSS: &str = r#"  :root {
     text-align: center; color: var(--muted); font-size: 13px;
     padding: 28px 0 40px; border-top: 1px solid var(--border);
   }
+  .diagram-preview {
+    background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px; margin-bottom: 14px; text-align: center;
+  }
+  .diagram-preview svg { max-width: 100%; height: auto; }
+  .diagram-preview .dark { display: none; }
+  @media (prefers-color-scheme: dark) {
+    .diagram-preview .light { display: none; }
+    .diagram-preview .dark { display: block; }
+  }
+  .diagram-preview figcaption { color: var(--muted); font-size: 12px; margin-top: 8px; }
   @media (max-width: 900px) {
     .layout { flex-direction: column; }
     .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); min-height: 0; }
@@ -530,6 +696,22 @@ group = "Extending SuperMD"
         let twice = patch_sitemap(&once, &slugs).unwrap();
         assert_eq!(once, twice, "idempotent");
         assert!(patch_sitemap("<urlset></urlset>", &slugs).is_err(), "missing markers");
+    }
+
+    #[test]
+    fn diagram_examples_gain_rendered_previews() {
+        let md = "````markdown\n```mermaid\nflowchart TD\n  A --> B\n```\n````\n\n\
+                  ````markdown\n```dot\ndigraph { a -> b }\n```\n````\n\n\
+                  ````markdown\n```rust\nfn x() {}\n```\n````\n";
+        let html = inject_diagram_previews(&markdown_to_html(md)).unwrap();
+        assert_eq!(html.matches("diagram-preview").count(), 2, "mermaid + dot only");
+        assert_eq!(html.matches("class=\"light\"").count(), 2);
+        assert_eq!(html.matches("class=\"dark\"").count(), 2);
+        assert!(html.contains("<svg"), "real SVGs injected");
+        // both palettes actually differ
+        assert!(html.contains("#f6f2e9") && html.contains("#2b2822"), "light+dark rendered");
+        // the original code samples stay visible above the previews
+        assert!(html.contains("```mermaid"));
     }
 
     #[test]
