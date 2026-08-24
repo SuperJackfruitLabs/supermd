@@ -48,13 +48,12 @@ jobs:
             libfreetype6-dev
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Measure coverage
-        # Excluded: shell files still mostly out of unit-test reach
-        # (window/element plumbing; workspace and main are next in line as
-        # gpui-test-support coverage grows). editor/mod.rs and search_ui.rs
-        # earned their way back into scope via TestAppContext tests.
+        # Whole app except main.rs, whose bulk is the live Application::run
+        # boot path (real platform, menus, open dialogs) that the headless
+        # gpui test platform cannot enter. Everything else is in scope.
         run: |
           cargo llvm-cov --json --summary-only \
-            --ignore-filename-regex 'src/(view|input|reader|workspace|main)\.rs' \
+            --ignore-filename-regex 'src/main\.rs' \
             > coverage.json
           PCT=$(jq -r '.data[0].totals.lines.percent | . * 10 | round / 10' coverage.json)
           echo "PCT=$PCT" >> "$GITHUB_ENV"

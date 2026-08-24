@@ -2466,6 +2466,18 @@ mod tests {
             cx.set_global(crate::highlight::SyntaxLanguages(Arc::new(
                 crate::highlight::Languages::new(),
             )));
+            // Editor flushes go through the session-backup registry;
+            // root it under the temp HOME (never the real ~/.supermd).
+            cx.set_global(crate::editor::SessionBackups(Arc::new(Mutex::new(
+                crate::editor::autosave::BackupRegistry::new(
+                    crate::settings::config_dir().join("backups"),
+                ),
+            ))));
+            cx.set_global(crate::theme::ThemeState {
+                themes: crate::theme::builtin_themes(),
+                settings: crate::settings::Settings::default(),
+                system_dark: false,
+            });
         });
         let root = root.to_path_buf();
         cx.add_window_view(|_, cx| Workspace::new(Some(root), cx))
@@ -2581,5 +2593,596 @@ mod tests {
             settings.contains(other_root.to_str().unwrap()),
             "recents recorded under temp HOME: {settings}"
         );
+    }
+
+    // ── additional interaction-test helpers ────────────────────────────
+
+    /// Author git fixtures with the system git CLI (same pattern as the
+    /// src/git.rs tests).
+    fn sh_git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    fn active_editor(ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> Entity<Editor> {
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { editor, .. }) = w.tabs.get(w.active) else { panic!("active tab is not an editor") };
+            editor.clone()
+        })
+    }
+
+    // ── sidebar keyboard browsing ───────────────────────────────────────
+
+    #[gpui::test]
+    fn sidebar_keyboard_browsing_previews_and_enter_pins(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.focus_sidebar(&FocusSidebar, window, cx));
+        cx.update(|window, app| {
+            let w = ws.read(app);
+            assert!(w.show_sidebar);
+            assert!(w.sidebar_focus.is_focused(window));
+        });
+
+        // Rows are [a.md, b.md]; ↓ from row 0 lands on b and previews it.
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_down(&SidebarDown, window, cx));
+        cx.update(|window, app| {
+            let w = ws.read(app);
+            assert_eq!(w.sidebar_selected, 1);
+            assert_eq!(tab_paths(w, app), vec![Some(b.clone())]);
+            assert_eq!(w.preview_tab, Some(0));
+            assert!(
+                w.sidebar_focus.is_focused(window),
+                "preview-on-navigate keeps focus in the sidebar"
+            );
+        });
+
+        // ↑ back to a: the single preview slot is reused, not pushed.
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_up(&SidebarUp, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.sidebar_selected, 0);
+            assert_eq!(tab_paths(w, app), vec![Some(a.clone())]);
+            assert_eq!(w.preview_tab, Some(0));
+        });
+
+        // ⏎ pins the previewed file and moves focus to the document.
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_open(&SidebarOpen, window, cx));
+        cx.update(|window, app| {
+            let w = ws.read(app);
+            assert_eq!(w.preview_tab, None, "enter pins the preview tab");
+            assert_eq!(tab_paths(w, app), vec![Some(a.clone())]);
+            assert!(!w.sidebar_focus.is_focused(window), "enter focuses the document");
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_expand_collapse_and_step_into(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let sub = root.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let c = sub.join("c.md");
+        std::fs::write(&c, "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.focus_sidebar(&FocusSidebar, window, cx));
+        // Directories sort first, so row 0 is `sub`; → expands it.
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_expand(&SidebarExpand, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.tree.as_ref().is_some_and(|t| t.is_expanded(&sub)));
+        });
+        // → on an already-expanded folder steps into its first child,
+        // previewing it.
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_expand(&SidebarExpand, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.sidebar_selected, 1);
+            assert_eq!(tab_paths(w, app), vec![Some(c.clone())]);
+        });
+        // ← on a file jumps to its parent directory row…
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_collapse(&SidebarCollapse, window, cx));
+        cx.update(|_, app| assert_eq!(ws.read(app).sidebar_selected, 0));
+        // …and on the expanded directory folds it shut.
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_collapse(&SidebarCollapse, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.tree.as_ref().is_some_and(|t| !t.is_expanded(&sub)));
+        });
+    }
+
+    // ── panel toggles and focus mode ────────────────────────────────────
+
+    #[gpui::test]
+    fn focus_mode_restores_previous_panel_state(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_outline(&ToggleOutline, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.show_sidebar);
+            assert!(!w.show_outline);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_focus_mode(&ToggleFocusMode, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.focus_mode);
+            assert!(!w.show_sidebar);
+            assert!(!w.show_outline);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_focus_mode(&ToggleFocusMode, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(!w.focus_mode);
+            assert!(w.show_sidebar, "leaving focus mode restores the sidebar");
+            assert!(!w.show_outline, "outline stays hidden as it was before");
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_sidebar(&ToggleSidebar, window, cx));
+        cx.update(|_, app| assert!(!ws.read(app).show_sidebar));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_sidebar(&ToggleSidebar, window, cx));
+        cx.update(|_, app| assert!(ws.read(app).show_sidebar));
+    }
+
+    // ── tab cycling and closing via dispatched actions ─────────────────
+
+    #[gpui::test]
+    fn tab_actions_cycle_and_close(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // With no tabs, cycling is a no-op rather than a panic.
+        cx.update(|window, app| window.focus(&ws.read(app).focus_handle));
+        cx.run_until_parked();
+        cx.dispatch_action(NextTab);
+        cx.dispatch_action(PrevTab);
+        cx.update(|_, app| assert!(ws.read(app).tabs.is_empty()));
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&b, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(ws.read(app).active, 1));
+
+        // Actions dispatched at the focused editor bubble to the workspace.
+        cx.dispatch_action(NextTab);
+        cx.update(|_, app| assert_eq!(ws.read(app).active, 0, "next wraps around"));
+        cx.dispatch_action(PrevTab);
+        cx.update(|_, app| assert_eq!(ws.read(app).active, 1));
+
+        cx.dispatch_action(CloseTab);
+        cx.update(|window, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app), vec![Some(a.clone())]);
+            assert_eq!(w.active, 0);
+            let Some(Tab::Editor { editor, .. }) = w.tabs.first() else { panic!("expected editor tab") };
+            assert!(
+                editor.focus_handle(app).is_focused(window),
+                "surviving tab regains focus"
+            );
+        });
+    }
+
+    // ── finder and search overlay integration ───────────────────────────
+
+    #[gpui::test]
+    fn finder_events_route_open_and_dismiss(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_finder(&ToggleFinder, window, cx));
+        let finder = cx.update(|window, app| {
+            let w = ws.read(app);
+            let Some((finder, _)) = &w.finder else { panic!("finder should be open") };
+            assert!(finder.focus_handle(app).is_focused(window));
+            finder.clone()
+        });
+
+        cx.update(|_, app| {
+            finder.update(app, |_, cx| cx.emit(FinderEvent::OpenPath(b.clone())))
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.finder.is_none(), "opening a hit dismisses the finder");
+            assert_eq!(tab_paths(w, app), vec![Some(b.clone())]);
+            assert_eq!(w.preview_tab, None, "finder opens are deliberate (pinned)");
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_finder(&ToggleFinder, window, cx));
+        let finder = cx.update(|_, app| {
+            let Some((finder, _)) = &ws.read(app).finder else { panic!("finder should be open") };
+            finder.clone()
+        });
+        cx.update(|_, app| finder.update(app, |_, cx| cx.emit(FinderEvent::Dismissed)));
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).finder.is_none()));
+
+        // ⌘P again while open: the second toggle dismisses.
+        ws.update_in(cx, |ws, window, cx| ws.toggle_finder(&ToggleFinder, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_finder(&ToggleFinder, window, cx));
+        cx.update(|_, app| assert!(ws.read(app).finder.is_none()));
+    }
+
+    #[gpui::test]
+    fn search_events_open_the_hit_and_dismiss_the_overlay(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, b) = workspace_fixture();
+        std::fs::write(&b, "one\ntwo\nthree\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_search(&ToggleSearch, window, cx));
+        let overlay = cx.update(|window, app| {
+            let w = ws.read(app);
+            let Some((overlay, _)) = &w.search else { panic!("search should be open") };
+            assert!(overlay.focus_handle(app).is_focused(window));
+            overlay.clone()
+        });
+
+        cx.update(|_, app| {
+            overlay.update(app, |_, cx| {
+                cx.emit(crate::search_ui::SearchEvent::Open { path: b.clone(), line: 3 })
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.search.is_none(), "opening a hit dismisses the overlay");
+            assert_eq!(w.tabs.get(w.active).and_then(|t| t.path(app)), Some(b.clone()));
+            assert_eq!(w.preview_tab, None);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_search(&ToggleSearch, window, cx));
+        let overlay = cx.update(|_, app| {
+            let Some((overlay, _)) = &ws.read(app).search else { panic!("search should be open") };
+            overlay.clone()
+        });
+        cx.update(|_, app| {
+            overlay.update(app, |_, cx| cx.emit(crate::search_ui::SearchEvent::Dismissed))
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).search.is_none()));
+    }
+
+    // ── theme picker ────────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn theme_picker_arrows_preview_live_and_cancel_restores(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let initial = cx.update(|_, app| theme(app));
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        cx.update(|window, app| {
+            let w = ws.read(app);
+            let Some(picker) = &w.theme_picker else { panic!("picker should be open") };
+            assert_eq!(picker.pos, 0);
+            assert!(w.theme_picker_focus.is_focused(window));
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.theme_picker_down(&ThemePickerDown, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(picker) = &w.theme_picker else { panic!("picker should be open") };
+            assert_eq!(picker.pos, 1);
+            let expected = app.global::<crate::theme::ThemeState>().themes[picker.order[1]]
+                .theme
+                .clone();
+            assert!(Arc::ptr_eq(&theme(app), &expected), "arrows preview the theme live");
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.theme_picker_up(&ThemePickerUp, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(picker) = &w.theme_picker else { panic!("picker should be open") };
+            assert_eq!(picker.pos, 0);
+        });
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_cancel(&ThemePickerCancel, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(ws.read(app).theme_picker.is_none());
+            assert!(Arc::ptr_eq(&theme(app), &initial), "escape restores the saved theme");
+        });
+
+        // Toggling while open cancels too.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        cx.update(|_, app| assert!(ws.read(app).theme_picker.is_none()));
+    }
+
+    #[gpui::test]
+    fn theme_picker_confirm_persists_the_choice(cx: &mut TestAppContext) {
+        let home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| ws.theme_picker_down(&ThemePickerDown, window, cx));
+        let (picked_name, picked_theme) = cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(picker) = &w.theme_picker else { panic!("picker should be open") };
+            let state = app.global::<crate::theme::ThemeState>();
+            let loaded = &state.themes[picker.order[picker.pos]];
+            assert!(!loaded.theme.is_dark, "second row is still a light theme");
+            (loaded.name.clone(), loaded.theme.clone())
+        });
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(ws.read(app).theme_picker.is_none());
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(state.settings.light_theme, picked_name);
+            assert!(
+                Arc::ptr_eq(&theme(app), &picked_theme),
+                "confirm re-resolves the active theme"
+            );
+        });
+        let settings = std::fs::read_to_string(
+            home._dir.path().join(".supermd").join("settings.toml"),
+        )
+        .unwrap();
+        assert!(settings.contains(&picked_name), "picked theme persisted: {settings}");
+    }
+
+    // ── edit/preview flip, new file ─────────────────────────────────────
+
+    #[gpui::test]
+    fn toggle_preview_flips_the_active_editor_tab(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // With no tabs, ⌘E is a no-op.
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.update(|_, app| assert!(ws.read(app).tabs.is_empty()));
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view, .. }) = w.tabs.get(w.active) else { panic!("expected editor tab") };
+            assert!(matches!(view, EditorView::Preview(_)), "⌘E shows the rendered preview");
+        });
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view, .. }) = w.tabs.get(w.active) else { panic!("expected editor tab") };
+            assert!(matches!(view, EditorView::Edit), "⌘E again returns to the editor");
+        });
+    }
+
+    #[gpui::test]
+    fn new_file_creates_untitled_files_in_the_workspace_root(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.new_file(&NewFile, window, cx));
+        let first = root.path().join("Untitled.md");
+        assert!(first.exists(), "new file written to disk");
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app), vec![Some(first.clone())]);
+            assert_eq!(w.active, 0);
+            assert_eq!(w.preview_tab, None, "new files open pinned");
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.new_file(&NewFile, window, cx));
+        let second = root.path().join("Untitled 2.md");
+        assert!(second.exists(), "second new file picks the next free name");
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app), vec![Some(first.clone()), Some(second.clone())]);
+            assert_eq!(w.active, 1);
+        });
+    }
+
+    // ── external file changes ───────────────────────────────────────────
+
+    #[gpui::test]
+    fn fs_events_reload_clean_buffers_and_keep_dirty_edits(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        let editor = active_editor(&ws, cx);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&a, "# changed\n").unwrap();
+        // Events under ignored paths are dropped without touching tabs.
+        let hidden = root.path().join(".git").join("HEAD");
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&hidden), cx));
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).text(), "# a\n", "ignored paths do not reload")
+        });
+
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&a), cx));
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "# changed\n", "clean buffers reload from disk");
+            assert!(!ed.save.is_dirty());
+        });
+
+        // A dirty buffer keeps its unsaved edits when the disk changes.
+        cx.simulate_input("XY");
+        cx.update(|_, app| assert!(editor.read(app).save.is_dirty()));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&a, "# external\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&a), cx));
+        cx.update(|_, app| {
+            let text = editor.read(app).text();
+            assert!(text.contains("XY"), "dirty buffers keep unsaved edits: {text}");
+            assert!(!text.contains("external"));
+        });
+
+        // flush_all force-writes the dirty buffer over the conflicting
+        // disk copy (which gets backed up under the temp HOME first).
+        ws.update_in(cx, |ws, _, cx| ws.flush_all(cx));
+        let expected = cx.update(|_, app| editor.read(app).text());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), expected);
+        cx.update(|_, app| assert!(!editor.read(app).save.is_dirty()));
+    }
+
+    #[gpui::test]
+    fn watcher_reloads_files_changed_on_disk(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        // The macOS fs-events backend reports canonical paths; open the
+        // canonicalized root so they match the tab's path.
+        let root_canon = root.path().canonicalize().unwrap();
+        let a = root_canon.join("a.md");
+        let (ws, cx) = open_workspace(cx, &root_canon);
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        ws.update_in(cx, |ws, _, cx| ws.setup_watcher(cx));
+        cx.update(|_, app| assert!(ws.read(app)._watcher.is_some()));
+        cx.run_until_parked();
+        let editor = active_editor(&ws, cx);
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&a, "# watched\n").unwrap();
+        // Real fs events arrive on wall-clock time; the drain loop runs
+        // on the test clock. Interleave both until the reload lands.
+        let mut reloaded = false;
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(250));
+            cx.run_until_parked();
+            if cx.update(|_, app| editor.read(app).text()) == "# watched\n" {
+                reloaded = true;
+                break;
+            }
+        }
+        assert!(reloaded, "watcher-driven reload of a clean buffer");
+    }
+
+    // ── git status dots ─────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn refresh_git_status_marks_uncommitted_files(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        sh_git(root.path(), &["init", "-q"]);
+        sh_git(root.path(), &["add", "-A"]);
+        sh_git(root.path(), &["commit", "-qm", "init"]);
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|_, app| {
+            assert!(ws.read(app).git_modified.is_empty(), "clean repo has no dots")
+        });
+
+        std::fs::write(&a, "# modified\n").unwrap();
+        ws.update_in(cx, |ws, _, _| ws.refresh_git_status());
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.git_modified.contains(&a), "modified file gets a dot");
+            assert!(!w.git_modified.contains(&b), "clean file stays clean");
+        });
+    }
+
+    // ── update pill, image zoom, shortcuts overlay ──────────────────────
+
+    #[gpui::test]
+    fn update_available_pill_state_renders(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, _, cx| {
+            ws.update_available = Some("v99.0.0".into());
+            cx.notify();
+        });
+        // Force render passes with the pill visible; an action still
+        // routes through the workspace while it is shown.
+        cx.update(|window, app| window.focus(&ws.read(app).focus_handle));
+        cx.run_until_parked();
+        cx.dispatch_action(ToggleSidebar);
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.update_available, Some(SharedString::from("v99.0.0")));
+            assert!(!w.show_sidebar, "action routed while the pill is shown");
+        });
+    }
+
+    #[gpui::test]
+    fn image_tabs_zoom_and_shortcut_overlay_toggles(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let pic = root.path().join("pic.png");
+        std::fs::write(&pic, b"\x89PNG\r\n\x1a\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&pic, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Image { path, zoom, .. }) = w.tabs.get(w.active) else { panic!("expected image tab") };
+            assert_eq!(path, &pic);
+            assert_eq!(*zoom, 1.0);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.zoom_in(&ZoomIn, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.zoom_in(&ZoomIn, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Image { zoom, .. }) = w.tabs.get(w.active) else { panic!("expected image tab") };
+            assert!((zoom - 1.5625).abs() < 1e-4, "zoom in compounds: {zoom}");
+        });
+        ws.update_in(cx, |ws, window, cx| ws.zoom_out(&ZoomOut, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Image { zoom, .. }) = w.tabs.get(w.active) else { panic!("expected image tab") };
+            assert!((zoom - 1.25).abs() < 1e-4, "zoom out steps back: {zoom}");
+        });
+        ws.update_in(cx, |ws, window, cx| ws.zoom_reset(&ZoomReset, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Image { zoom, .. }) = w.tabs.get(w.active) else { panic!("expected image tab") };
+            assert_eq!(*zoom, 1.0);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_shortcuts(&ToggleShortcuts, window, cx));
+        cx.update(|window, app| {
+            let w = ws.read(app);
+            assert!(w.show_shortcuts);
+            assert!(w.shortcuts_focus.is_focused(window));
+        });
+        ws.update_in(cx, |ws, window, cx| ws.toggle_shortcuts(&ToggleShortcuts, window, cx));
+        cx.update(|_, app| assert!(!ws.read(app).show_shortcuts));
     }
 }
