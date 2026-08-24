@@ -5,7 +5,7 @@
 //! in ~/.supermd/plugins/<your-plugin>/.
 
 wit_bindgen::generate!({
-    path: "../wit-v3",
+    path: "../wit-v4",
     world: "extension",
 });
 
@@ -49,6 +49,22 @@ impl Guest for Plugin {
         _theme: t::Theme,
     ) -> Result<Vec<ExportFile>, String> {
         Err("this plugin has no exporters".to_string())
+    }
+
+    fn render_view(_filename: String, _content: String) -> Result<String, String> {
+        Err("this plugin has no viewers".to_string())
+    }
+
+    fn status_text(_document: String) -> Result<String, String> {
+        Err("this plugin has no widgets".to_string())
+    }
+
+    fn render_template(_id: String, _context: TemplateContext) -> Result<TemplateFile, String> {
+        Err("this plugin has no templates".to_string())
+    }
+
+    fn on_save(_path: String, _document: String) -> Result<Option<String>, String> {
+        Ok(None)
     }
 }
 

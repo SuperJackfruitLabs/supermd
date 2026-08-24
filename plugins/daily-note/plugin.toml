@@ -1,0 +1,6 @@
+name = "daily-note"
+version = "0.1.0"
+
+[[templates]]
+id = "daily"
+name = "Daily Note"

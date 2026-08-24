@@ -741,7 +741,7 @@ impl Workspace {
                     .and_then(|e| e.to_str())
                     .and_then(crate::extensions::viewer_for_extension)
                 {
-                    self.spawn_viewer_render(viewer, self.tabs.len() - 1, cx);
+                    self.spawn_viewer_render(viewer, self.tabs.len() - 1, window, cx);
                 }
                 self.focus_active(window, cx);
                 cx.notify();
@@ -815,7 +815,13 @@ impl Workspace {
     /// Render a tab's file through its viewer plugin and swap the tab
     /// to Preview when done. Failure leaves the source editor — a
     /// broken viewer never hides a file.
-    fn spawn_viewer_render(&mut self, plugin: String, tab_ix: usize, cx: &mut Context<Self>) {
+    fn spawn_viewer_render(
+        &mut self,
+        plugin: String,
+        tab_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(Tab::Editor { editor, .. }) = self.tabs.get(tab_ix) else {
             return;
         };
@@ -829,10 +835,10 @@ impl Workspace {
         let run = cx.background_executor().spawn(async move {
             host.lock().unwrap().render_view(&plugin, &filename, &content)
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = run.await;
             if let Ok(markdown) = result {
-                this.update(cx, |this, cx| {
+                this.update_in(cx, |this, window, cx| {
                     let langs = languages(cx);
                     let title = editor.read(cx).title();
                     let reader = cx.new(|_| Reader::from_source(title, &markdown, &langs));
@@ -841,6 +847,12 @@ impl Workspace {
                     if let Some(Tab::Editor { editor: e, view }) = this.tabs.get_mut(tab_ix) {
                         if *e == editor && matches!(view, EditorView::Edit) {
                             *view = EditorView::Preview(reader);
+                            // The editor's focus handle just left the
+                            // tree; refocus so keybindings keep
+                            // dispatching (palette, ⌘E, …).
+                            if tab_ix == this.active {
+                                this.focus_active(window, cx);
+                            }
                             cx.notify();
                         }
                     }
@@ -872,7 +884,7 @@ impl Workspace {
                 .and_then(|e| e.to_str())
                 .and_then(crate::extensions::viewer_for_extension);
             if let Some(plugin) = viewer {
-                self.spawn_viewer_render(plugin, self.active, cx);
+                self.spawn_viewer_render(plugin, self.active, window, cx);
             } else {
                 let title = editor.read(cx).title();
                 let text = editor.read(cx).text();

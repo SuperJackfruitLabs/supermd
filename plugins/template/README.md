@@ -71,6 +71,22 @@ immediately. Built-in languages always win name collisions. Ship
 several grammars in one plugin by setting `files = "<stem>"` on each
 entry (`<stem>.wasm` + `<stem>.scm`).
 
+## Viewers, widgets, templates, hooks
+
+- `[[viewers]] extensions = ["csv"]` + `render-view` — the file's
+  content in, MARKDOWN out; SuperMD renders it with the built-in
+  pretty view (⌘E toggles to the raw source). Read-only projections.
+- `[[widgets]] id = "words"` + `status-text` — one line of text for
+  the status strip, refreshed ~½s after edits. Text only, no actions.
+- `[[templates]] id = "daily"` name = "Daily Note"` + `render-template`
+  — palette "New: Daily Note"; return a workspace-relative filename +
+  content. The host validates the path, never overwrites (existing
+  file just opens), and supplies date/time/weekday/workspace in the
+  context (wasm has no clock).
+- `hooks = ["save"]` + `on-save` — pre-save transform that always
+  runs (not gated by the format-on-save setting); return none to
+  leave the save untouched. Only the `save` event exists.
+
 ## Troubleshooting
 
 - "failed: <name>" in the palette → the manifest didn't parse or the
