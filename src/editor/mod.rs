@@ -10,6 +10,7 @@ pub mod display;
 pub mod find;
 pub mod movement;
 pub mod projection;
+pub mod projector;
 pub mod spans;
 
 use std::collections::HashMap;
@@ -109,6 +110,7 @@ pub struct Editor {
     spans: Vec<StyleSpan>,
     line_kinds: Vec<LineKind>,
     blocks: Vec<blocks::BlockInfo>,
+    claims: Vec<(usize, projector::Claim)>,
     projection: Vec<projection::Item>,
     path: PathBuf,
     pub save: SavePolicy,
@@ -169,6 +171,7 @@ impl Editor {
             spans: Vec::new(),
             line_kinds: Vec::new(),
             blocks: Vec::new(),
+            claims: Vec::new(),
             projection: Vec::new(),
             path: path.to_path_buf(),
             save: SavePolicy::default(),
@@ -216,6 +219,12 @@ impl Editor {
             Provider::Markdown => blocks::blocks(&text),
             _ => Vec::new(),
         };
+        self.claims = {
+            let line_ranges: Vec<Range<usize>> = (0..self.core.buffer.line_count())
+                .map(|ix| self.core.buffer.line_range(ix))
+                .collect();
+            projector::discover_all(&text, &self.blocks, &line_ranges)
+        };
         self.layout_cache.clear();
         self.projection = self.compute_projection();
         self.list_state.reset(self.projection.len());
@@ -225,7 +234,12 @@ impl Editor {
         let line_ranges: Vec<Range<usize>> = (0..self.core.buffer.line_count())
             .map(|ix| self.core.buffer.line_range(ix))
             .collect();
-        projection::project(&line_ranges, &self.blocks, self.core.selection.range())
+        projection::project(
+            &line_ranges,
+            &self.blocks,
+            &self.claims,
+            self.core.selection.range(),
+        )
     }
 
     // ── diff mode ("Show Changes") ─────────────────────────────────────
@@ -2090,12 +2104,17 @@ impl Render for Editor {
                                     .into_any_element()
                             }
                         }
-                        Some(projection::Item::Table { lines }) => column(
-                            render_table(&editor_entity, ix, lines, &t, cx),
-                        ),
-                        Some(projection::Item::Image { line, alt, dest }) => column(
-                            render_image(&editor_entity, ix, line, &alt, &dest, &t, cx),
-                        ),
+                        Some(projection::Item::Widget { projector, lines, payload }) => {
+                            let mut wctx = projector::WidgetCtx {
+                                editor: &editor_entity,
+                                item_ix: ix,
+                                lines,
+                                payload: &payload,
+                                theme: &t,
+                                cx,
+                            };
+                            column(projector::projectors()[projector].render(&mut wctx))
+                        }
                         None => div().into_any_element(),
                     }
                 })
