@@ -2551,4 +2551,920 @@ mod tests {
             .unwrap();
         assert_eq!(sel.range, 1..1, "UTF-16 offset for a BMP CJK char is 1");
     }
+
+    // ── helpers for path-based fixtures (git repos, bad backup roots) ──
+
+    use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase};
+
+    /// Open an editor on an existing file at `path`, with fresh globals
+    /// whose backups live in the returned tempdir.
+    fn open_editor_path<'a>(
+        cx: &'a mut TestAppContext,
+        path: &Path,
+    ) -> (tempfile::TempDir, Entity<Editor>, &'a mut VisualTestContext) {
+        let backups = tempfile::tempdir().unwrap();
+        let langs = Arc::new(Languages::new());
+        let backup_root = backups.path().join("backups");
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(
+                crate::theme::Theme::dark(),
+            )));
+            cx.set_global(crate::highlight::SyntaxLanguages(langs.clone()));
+            cx.set_global(SessionBackups(Arc::new(Mutex::new(
+                autosave::BackupRegistry::new(backup_root),
+            ))));
+        });
+        let contents = std::fs::read_to_string(path).unwrap();
+        let file = path.to_path_buf();
+        let (editor, cx) =
+            cx.add_window_view(move |_, cx| Editor::from_text(&file, contents, &langs, cx));
+        cx.update(|window, app| {
+            let handle = editor.read(app).focus_handle.clone();
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+        (backups, editor, cx)
+    }
+
+    /// Author git fixtures with the system CLI (same approach as
+    /// src/git.rs tests) so no git library shows up in fixture setup.
+    fn sh_git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    fn commit_all(dir: &Path) {
+        sh_git(dir, &["add", "-A"]);
+        sh_git(dir, &["commit", "-qm", "commit"]);
+    }
+
+    /// Window-space point for a display index on a painted line, biased
+    /// one pixel into the glyph so hit-testing is unambiguous.
+    fn point_for_index(
+        editor: &Entity<Editor>,
+        cx: &mut VisualTestContext,
+        line_ix: usize,
+        disp_ix: usize,
+    ) -> Point<Pixels> {
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let entry = ed.layout_cache.get(&line_ix).expect("line painted");
+            let lh = entry.line_height;
+            let pos = entry.line.position_for_index(disp_ix, lh).expect("index in line");
+            point(
+                entry.origin.x + pos.x + px(1.),
+                entry.origin.y + pos.y + lh * 0.5,
+            )
+        })
+    }
+
+    fn scroll_offset_y(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> Pixels {
+        cx.update(|_, app| {
+            -editor
+                .read(app)
+                .list_state
+                .scroll_px_offset_for_scrollbar()
+                .y
+        })
+    }
+
+    // ── plain files and remaining action handlers ──────────────────────
+
+    #[gpui::test]
+    fn plain_text_files_use_code_layout_without_highlighting(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "notes.txt", "alpha\nbeta\n");
+        assert_eq!(Editor::read_file(&fx.path).unwrap(), "alpha\nbeta\n");
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.is_code_mode(), "plain files render mono with a gutter");
+            assert!(ed.spans.is_empty(), "no styling spans for plain text");
+            assert_eq!(ed.gutter_label(0), "1");
+            assert_eq!(
+                Focusable::focus_handle(ed, app),
+                ed.focus_handle,
+                "the trait hands out the editor's own focus handle"
+            );
+        });
+        cx.simulate_input("x");
+        assert_eq!(buffer_text(&editor, cx), "xalpha\nbeta\n");
+        // Scrubbing a document that does not overflow is a no-op.
+        editor.update_in(cx, |ed, _, cx| {
+            ed.scrollbar_scrub(point(px(0.), px(0.)), cx);
+        });
+        assert_eq!(scroll_offset_y(&editor, cx), px(0.));
+    }
+
+    #[test]
+    fn syntax_color_maps_every_known_capture_root() {
+        let t = crate::theme::Theme::dark();
+        let colored = (0..crate::highlight::CAPTURE_NAMES.len())
+            .filter(|ix| Editor::syntax_color(*ix as u8, &t).is_some())
+            .count();
+        assert!(colored > 0, "capture names resolve to syntax colors");
+        // Out-of-range captures resolve to no color at all.
+        assert!(Editor::syntax_color(u8::MAX, &t).is_none());
+    }
+
+    #[gpui::test]
+    fn remaining_movement_and_selection_actions(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "alpha beta\ngamma delta\nomega\n");
+        // Arrow over an active selection collapses to its edges.
+        cx.dispatch_action(SelectWordRight);
+        cx.dispatch_action(MoveLeft);
+        assert_eq!(head(&editor, cx), 0, "left collapses to selection start");
+        cx.dispatch_action(SelectWordRight);
+        cx.dispatch_action(MoveRight);
+        assert_eq!(head(&editor, cx), 5, "right collapses to selection end");
+        // Plain cursor arrows.
+        cx.dispatch_action(MoveLeft);
+        assert_eq!(head(&editor, cx), 4);
+        // Grapheme-wise selection.
+        cx.dispatch_action(SelectRight);
+        cx.update(|_, app| assert_eq!(editor.read(app).core.selection.range(), 4..5));
+        cx.dispatch_action(SelectLeft);
+        cx.update(|_, app| assert!(editor.read(app).core.selection.is_cursor()));
+        // Word-wise movement and selection.
+        cx.dispatch_action(MoveWordRight);
+        assert_eq!(head(&editor, cx), 5, "word-right lands at the end of alpha");
+        cx.dispatch_action(MoveWordRight);
+        assert_eq!(head(&editor, cx), 10, "word-right lands at the end of beta");
+        cx.dispatch_action(SelectWordLeft);
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selected_text(), "beta");
+        });
+        // Line-edge selection extends from the existing anchor (10).
+        cx.dispatch_action(SelectLineEnd);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.core.selection.head, 10, "head extends to line end");
+        });
+        cx.dispatch_action(SelectLineStart);
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), 0..10);
+        });
+        // Vertical selection through the painted geometry.
+        cx.dispatch_action(DocStart);
+        cx.dispatch_action(SelectDown);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.core.buffer.line_of_byte(ed.core.selection.head), 1);
+            assert_eq!(ed.core.selection.anchor, 0);
+        });
+        cx.dispatch_action(SelectUp);
+        cx.update(|_, app| assert!(editor.read(app).core.selection.is_cursor()));
+        // Page movement clamps to the document.
+        cx.dispatch_action(PageDown);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let last = ed.core.buffer.line_count() - 1;
+            assert_eq!(ed.core.buffer.line_of_byte(ed.core.selection.head), last);
+        });
+        cx.dispatch_action(PageUp);
+        assert_eq!(head(&editor, cx), 0);
+    }
+
+    // ── mouse: click, drag-select, shift-click ─────────────────────────
+
+    #[gpui::test]
+    fn mouse_click_places_cursor_and_drag_selects(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "alpha beta gamma\nsecond line\n");
+        let p2 = point_for_index(&editor, cx, 0, 2);
+        let p10 = point_for_index(&editor, cx, 0, 10);
+        let p14 = point_for_index(&editor, cx, 0, 14);
+
+        cx.simulate_mouse_down(p2, MouseButton::Left, Modifiers::none());
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.dragging, "mouse down starts a drag");
+            assert_eq!(ed.core.selection.head, 2);
+            assert!(ed.core.selection.is_cursor());
+        });
+        cx.simulate_mouse_move(p10, MouseButton::Left, Modifiers::none());
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), 2..10, "drag extends");
+        });
+        cx.simulate_mouse_up(p10, MouseButton::Left, Modifiers::none());
+        cx.update(|_, app| assert!(!editor.read(app).dragging));
+        // Moving without a pressed button changes nothing.
+        cx.simulate_mouse_move(p2, None, Modifiers::none());
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), 2..10);
+        });
+        // Shift-click extends from the existing anchor.
+        cx.simulate_mouse_down(p14, MouseButton::Left, Modifiers::shift());
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), 2..14);
+        });
+        // Dragging below every painted line falls back to the nearest
+        // line and extends the selection toward the end.
+        let below = cx.update(|_, app| {
+            let ed = editor.read(app);
+            let bottom = ed
+                .layout_cache
+                .values()
+                .map(|e| e.origin.y + e.line.size(e.line_height).height)
+                .fold(px(0.), Pixels::max);
+            point(p14.x, bottom + px(50.))
+        });
+        cx.simulate_mouse_move(below, MouseButton::Left, Modifiers::shift());
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(
+                ed.core.buffer.line_of_byte(ed.core.selection.head) >= 1,
+                "the head snapped to the closest (last) line"
+            );
+        });
+        cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::shift());
+    }
+
+    #[gpui::test]
+    fn clicking_a_checkbox_glyph_toggles_the_task(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "todo.md", "- [ ] milk\n- [x] eggs\n");
+        // Park the cursor on the trailing line so both tasks render as
+        // glyph replacements.
+        cx.dispatch_action(DocEnd);
+        let end = head(&editor, cx);
+        cx.run_until_parked();
+
+        let click = cx.update(|_, app| {
+            let ed = editor.read(app);
+            let entry = ed.layout_cache.get(&0).expect("task line painted");
+            let seg = entry
+                .display
+                .segs
+                .iter()
+                .find(|s| s.toggle.is_some())
+                .expect("checkbox replacement segment");
+            assert_eq!(seg.toggle, Some(false));
+            let lh = entry.line_height;
+            let pos = entry.line.position_for_index(seg.disp.start, lh).unwrap();
+            point(entry.origin.x + pos.x + px(1.), entry.origin.y + pos.y + lh * 0.5)
+        });
+        cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(click, MouseButton::Left, Modifiers::none());
+        assert_eq!(buffer_text(&editor, cx), "- [x] milk\n- [x] eggs\n");
+        assert_eq!(head(&editor, cx), end, "toggle never moves the cursor");
+        assert!(cx.update(|_, app| !editor.read(app).dragging));
+
+        // The checked task on line 1 toggles back the other way.
+        cx.run_until_parked();
+        let click = cx.update(|_, app| {
+            let ed = editor.read(app);
+            let entry = ed.layout_cache.get(&1).expect("second task painted");
+            let seg = entry
+                .display
+                .segs
+                .iter()
+                .find(|s| s.toggle.is_some())
+                .expect("checkbox replacement segment");
+            assert_eq!(seg.toggle, Some(true));
+            let lh = entry.line_height;
+            let pos = entry.line.position_for_index(seg.disp.start, lh).unwrap();
+            point(entry.origin.x + pos.x + px(1.), entry.origin.y + pos.y + lh * 0.5)
+        });
+        cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(click, MouseButton::Left, Modifiers::none());
+        assert_eq!(buffer_text(&editor, cx), "- [x] milk\n- [ ] eggs\n");
+    }
+
+    // ── widget interactions ────────────────────────────────────────────
+
+    #[gpui::test]
+    fn clicking_a_table_row_drops_the_cursor_onto_its_source_line(cx: &mut TestAppContext) {
+        let src = "intro\n\n|h1|h2|\n|-|-|\n|a|b|\n\ntail\n";
+        let (_fx, editor, cx) = open_editor(cx, "table.md", src);
+        assert_eq!(widget_count(&editor, cx), 1, "the table projects a widget");
+
+        // The widget fills the vertical gap between the painted lines
+        // around it; the header row sits at its top.
+        let click = cx.update(|_, app| {
+            let ed = editor.read(app);
+            let above = ed.layout_cache.get(&1).expect("blank line above painted");
+            let below = ed.layout_cache.get(&5).expect("blank line below painted");
+            let widget_top = above.origin.y + above.line.size(above.line_height).height;
+            assert!(below.origin.y - widget_top > px(30.), "widget occupies space");
+            point(above.origin.x + px(40.), widget_top + px(15.))
+        });
+        cx.simulate_click(click, Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let ed = editor.read(app);
+            let header_start = ed.core.buffer.line_range(2).start;
+            assert_eq!(ed.core.selection.head, header_start, "cursor lands on the header row");
+            assert!(ed.focus_handle.is_focused(window));
+        });
+        assert_eq!(widget_count(&editor, cx), 0, "the table dissolves under the cursor");
+    }
+
+    #[gpui::test]
+    fn missing_image_renders_fallback_and_click_dissolves_to_source(cx: &mut TestAppContext) {
+        let src = "intro\n\n![pic](missing.png)\n\ntail\n";
+        let (_fx, editor, cx) = open_editor(cx, "img.md", src);
+        assert_eq!(widget_count(&editor, cx), 1, "the image projects a widget");
+
+        let click = cx.update(|_, app| {
+            let ed = editor.read(app);
+            let above = ed.layout_cache.get(&1).expect("blank line above painted");
+            let below = ed.layout_cache.get(&3).expect("blank line below painted");
+            let widget_top = above.origin.y + above.line.size(above.line_height).height;
+            point(above.origin.x + px(40.), (widget_top + below.origin.y) * 0.5)
+        });
+        cx.simulate_click(click, Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(
+                ed.core.selection.head,
+                ed.core.buffer.line_range(2).start,
+                "click drops the cursor onto the image's source line"
+            );
+        });
+        assert_eq!(widget_count(&editor, cx), 0);
+    }
+
+    #[gpui::test]
+    fn existing_local_image_renders_the_image_widget(cx: &mut TestAppContext) {
+        // Minimal valid 1x1 transparent PNG.
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49,
+            0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
+            0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44,
+            0x41, 0x54, 0x78, 0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D,
+            0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
+            0x60, 0x82,
+        ];
+        let (fx, editor, cx) = open_editor(cx, "img.md", "intro\n\n![p](pic.png)\n");
+        std::fs::write(fx.path.parent().unwrap().join("pic.png"), PNG).unwrap();
+        editor.update_in(cx, |_, _, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(widget_count(&editor, cx), 1, "existing image stays a widget");
+    }
+
+    // ── scrolling: wheel, scrollbar, animated outline jumps ────────────
+
+    fn long_doc() -> String {
+        (0..300).map(|i| format!("line {i}\n")).collect()
+    }
+
+    #[gpui::test]
+    fn wheel_scrolling_moves_the_list_and_notifies(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "long.md", &long_doc());
+        assert_eq!(scroll_offset_y(&editor, cx), px(0.));
+        let center = cx.update(|_, app| {
+            editor.read(app).list_state.viewport_bounds().center()
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: center,
+            delta: ScrollDelta::Lines(point(0., -5.)),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        assert!(
+            scroll_offset_y(&editor, cx) > px(0.),
+            "wheel scroll moves the list down"
+        );
+    }
+
+    #[gpui::test]
+    fn scrollbar_drag_scrubs_through_the_document(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "long.md", &long_doc());
+        let vp = cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(
+                ed.list_state.max_offset_for_scrollbar().height > px(0.),
+                "long doc overflows the viewport"
+            );
+            ed.list_state.viewport_bounds()
+        });
+        let track_x = vp.origin.x + vp.size.width - px(6.);
+
+        cx.simulate_mouse_down(
+            point(track_x, vp.origin.y + vp.size.height * 0.8),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.update(|_, app| assert!(editor.read(app).scrollbar_dragging));
+
+        // While dragging, gpui compensates the reported offset to hold
+        // the thumb steady, so meaningful reads happen after release.
+        cx.simulate_mouse_move(
+            point(track_x, vp.origin.y + vp.size.height * 0.3),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(
+            point(track_x, vp.origin.y + vp.size.height * 0.3),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.update(|_, app| assert!(!editor.read(app).scrollbar_dragging));
+        assert!(
+            scroll_offset_y(&editor, cx) > px(0.),
+            "the drag scrolled into the document"
+        );
+    }
+
+    #[gpui::test]
+    fn scroll_to_line_animates_long_jumps_and_skips_short_ones(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "long.md", &long_doc());
+        // Tiny jump: already at the top, no animation task.
+        editor.update_in(cx, |ed, _, cx| ed.scroll_to_line(0, cx));
+        cx.update(|_, app| assert!(editor.read(app).scroll_anim.is_none()));
+
+        editor.update_in(cx, |ed, _, cx| ed.scroll_to_line(200, cx));
+        cx.update(|_, app| {
+            assert!(editor.read(app).scroll_anim.is_some(), "long jump animates")
+        });
+        for _ in 0..40 {
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(12));
+        }
+        cx.run_until_parked();
+        assert!(
+            scroll_offset_y(&editor, cx) > px(500.),
+            "animation lands deep in the document"
+        );
+    }
+
+    // ── vertical movement geometry ─────────────────────────────────────
+
+    #[gpui::test]
+    fn vertical_movement_navigates_wrapped_rows_and_line_edges(cx: &mut TestAppContext) {
+        let text = format!("{}\ntail", "word ".repeat(60));
+        let (_fx, editor, cx) = open_editor(cx, "wrap.md", &text);
+        let line0_end = text.find('\n').unwrap();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let entry = ed.layout_cache.get(&0).expect("wrapped line painted");
+            assert!(
+                entry.line.size(entry.line_height).height > entry.line_height,
+                "the long line wraps into multiple rows"
+            );
+        });
+
+        // Down from the first visual row stays inside the wrapped line.
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(5);
+            cx.notify();
+        });
+        cx.dispatch_action(MoveDown);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.core.buffer.line_of_byte(ed.core.selection.head), 0);
+            assert!(ed.core.selection.head > 5, "moved down a visual row");
+        });
+        cx.dispatch_action(MoveUp);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.core.selection.head < 10, "back near the start of row one");
+        });
+        // Up from the very first row clamps to offset 0.
+        cx.dispatch_action(MoveUp);
+        assert_eq!(head(&editor, cx), 0);
+
+        // Down from the last wrapped row crosses into the painted neighbor.
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(line0_end);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(MoveDown);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.core.buffer.line_of_byte(ed.core.selection.head), 1);
+        });
+        // And back up into the neighbor's bottom row.
+        cx.dispatch_action(MoveUp);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.core.buffer.line_of_byte(ed.core.selection.head), 0);
+        });
+
+        // Down past the last line clamps to the end of the document.
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(line0_end + 3);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(MoveDown);
+        assert_eq!(head(&editor, cx), text.len());
+    }
+
+    #[gpui::test]
+    fn vertical_movement_degrades_to_logical_lines_without_layout(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "alpha\nbeta\ngamma\n");
+        editor.update_in(cx, |ed, _, cx| {
+            // Neighbor missing from the cache: land on its line start.
+            ed.core.set_cursor(2);
+            ed.layout_cache.remove(&1);
+            ed.vertical_move(1, false, cx);
+            assert_eq!(ed.core.selection.head, ed.core.buffer.line_range(1).start);
+            // Current line missing entirely: logical movement.
+            ed.layout_cache.clear();
+            ed.vertical_move(1, false, cx);
+            assert_eq!(ed.core.selection.head, ed.core.buffer.line_range(2).start);
+            ed.layout_cache.clear();
+            ed.vertical_move(-1, false, cx);
+            assert_eq!(ed.core.selection.head, ed.core.buffer.line_range(1).end);
+        });
+    }
+
+    // ── IME protocol details ───────────────────────────────────────────
+
+    #[gpui::test]
+    fn ime_protocol_queries_use_utf16_and_painted_geometry(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "héllo\nworld\n");
+        // text_for_range round-trips through UTF-16 offsets.
+        let mut actual = None;
+        let text = editor.update_in(cx, |ed, window, cx| {
+            ed.text_for_range(0..5, &mut actual, window, cx)
+        });
+        assert_eq!(text.as_deref(), Some("héllo"));
+        assert_eq!(actual, Some(0..5));
+
+        // Caret rectangle for the composition popup.
+        let bounds = editor.update_in(cx, |ed, window, cx| {
+            ed.bounds_for_range(0..1, Bounds::default(), window, cx)
+        });
+        let bounds = bounds.expect("line 0 is painted");
+        assert_eq!(bounds.size.width, px(2.), "caret-width rectangle");
+        assert!(bounds.size.height > px(0.));
+
+        // Point → UTF-16 character index over the same glyphs.
+        let p3 = point_for_index(&editor, cx, 0, 3);
+        let ix = editor.update_in(cx, |ed, window, cx| {
+            ed.character_index_for_point(p3, window, cx)
+        });
+        assert_eq!(ix, Some(2), "byte 3 (after the 2-byte é) is UTF-16 index 2");
+
+        // Marking over an explicit range, with an explicit selection.
+        editor.update_in(cx, |ed, window, cx| {
+            ed.replace_and_mark_text_in_range(Some(0..1), "ab", Some(1..1), window, cx);
+        });
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "abéllo\nworld\n");
+            assert_eq!(ed.marked_range, Some(0..2));
+            assert_eq!(ed.core.selection.range(), 1..1, "selection sits inside the mark");
+        });
+        // unmark_text drops the composition without editing.
+        editor.update_in(cx, |ed, window, cx| ed.unmark_text(window, cx));
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.marked_range, None);
+            assert_eq!(ed.text(), "abéllo\nworld\n");
+        });
+        // An empty replacement clears the marked range.
+        editor.update_in(cx, |ed, window, cx| {
+            ed.replace_and_mark_text_in_range(Some(0..2), "", None, window, cx);
+        });
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "éllo\nworld\n");
+            assert_eq!(ed.marked_range, None);
+        });
+    }
+
+    // ── find guards and integration with edits ─────────────────────────
+
+    #[gpui::test]
+    fn find_guards_and_live_recompute_on_edit_and_reload(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "note.md", "one two\n");
+        // Cycling without a find bar is a no-op.
+        cx.dispatch_action(FindNext);
+        assert_eq!(head(&editor, cx), 0);
+        // Recomputing without a find bar is a no-op.
+        editor.update_in(cx, |ed, _, _| ed.recompute_matches("one"));
+
+        cx.dispatch_action(OpenFind);
+        // Empty query: cycling is a no-op.
+        cx.dispatch_action(FindNext);
+        cx.dispatch_action(FindPrev);
+        assert_eq!(head(&editor, cx), 0);
+        // Opening again just refocuses the existing input.
+        cx.dispatch_action(OpenFind);
+        cx.update(|window, app| {
+            let ed = editor.read(app);
+            let input = ed.find.as_ref().unwrap().input.clone();
+            assert!(input.read(app).focus_handle.is_focused(window));
+        });
+
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "one".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).find.as_ref().unwrap().matches.len(), 1);
+        });
+
+        // Editing while the bar is open recomputes matches.
+        editor.update_in(cx, |ed, _, cx| ed.insert_str("one ", cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).find.as_ref().unwrap().matches.len(), 2);
+        });
+
+        // Reloading from disk recomputes them too.
+        std::fs::write(&fx.path, "one one one\n").unwrap();
+        editor.update_in(cx, |ed, _, cx| ed.reload_from_disk(cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).find.as_ref().unwrap().matches.len(), 3);
+        });
+    }
+
+    #[gpui::test]
+    fn reload_from_disk_handles_missing_files_and_char_boundaries(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "note.md", "abc");
+        cx.dispatch_action(MoveRight);
+        assert_eq!(head(&editor, cx), 1);
+
+        // Vanished file: the buffer is left untouched.
+        std::fs::remove_file(&fx.path).unwrap();
+        editor.update_in(cx, |ed, _, cx| ed.reload_from_disk(cx));
+        assert_eq!(buffer_text(&editor, cx), "abc");
+
+        // New content puts the clamped cursor inside a multibyte char:
+        // it backs up to the previous boundary.
+        std::fs::write(&fx.path, "é\n").unwrap();
+        editor.update_in(cx, |ed, _, cx| ed.reload_from_disk(cx));
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "é\n");
+            assert_eq!(ed.core.selection.head, 0, "head backs off the é's mid-byte");
+        });
+    }
+
+    // ── flush failure paths ────────────────────────────────────────────
+
+    #[gpui::test]
+    fn backup_failures_never_block_the_save(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "note.md", "v1\n");
+        // Re-root the session backups under a plain file so every
+        // create_dir_all inside the registry fails.
+        let blocker = fx.backups.path().join("blocker");
+        std::fs::write(&blocker, "not a dir").unwrap();
+        cx.update(|_, app| {
+            app.set_global(SessionBackups(Arc::new(Mutex::new(
+                autosave::BackupRegistry::new(blocker.join("backups")),
+            ))));
+        });
+
+        cx.simulate_input("A");
+        cx.dispatch_action(SaveNow);
+        assert_eq!(
+            std::fs::read_to_string(&fx.path).unwrap(),
+            "Av1\n",
+            "the save succeeds even though the backup failed"
+        );
+        cx.update(|_, app| assert!(!editor.read(app).save.is_dirty()));
+
+        // Same failure on the conflict path: disk changed underneath us,
+        // the forced backup fails, and the write still goes through.
+        std::fs::write(&fx.path, "theirs\n").unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        let f = std::fs::File::options().write(true).open(&fx.path).unwrap();
+        f.set_modified(later).unwrap();
+        cx.simulate_input("B");
+        cx.dispatch_action(SaveNow);
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), "ABv1\n");
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn failed_write_keeps_the_buffer_dirty(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let (fx, editor, cx) = open_editor(cx, "note.md", "v1\n");
+        cx.simulate_input("A");
+        let dir = fx.path.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        cx.dispatch_action(SaveNow);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&fx.path).unwrap(),
+            "v1\n",
+            "the write never happened"
+        );
+        cx.update(|_, app| {
+            assert!(editor.read(app).save.is_dirty(), "a failed save stays dirty and retries")
+        });
+    }
+
+    // ── styled rendering ───────────────────────────────────────────────
+
+    #[gpui::test]
+    fn rich_markdown_renders_every_style_kind(cx: &mut TestAppContext) {
+        let src = "# Title\n\n**bold** *em* ~~gone~~ `code` [l](https://x)\n\n- item\n- [ ] task\n1. ordered\n\n> quote\n\n***\n\n```rust\n// note\nlet s = \"hi\";\n```\n\ntext\n";
+        let (_fx, editor, cx) = open_editor(cx, "rich.md", src);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(!ed.is_code_mode());
+            assert_eq!(ed.heading_lines(), vec![(1, "Title".to_string(), 0)]);
+            assert!(
+                ed.line_kinds.iter().any(|k| matches!(k, LineKind::Code)),
+                "fence content lines are marked as code"
+            );
+        });
+        // Select everything so lines render both with markers revealed
+        // and with whole-line selection quads.
+        cx.dispatch_action(SelectAll);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.core.selection.range(), 0..ed.core.buffer.len_bytes());
+        });
+    }
+
+    #[gpui::test]
+    fn wrapped_selection_paints_across_visual_rows(cx: &mut TestAppContext) {
+        let text = "word ".repeat(80);
+        let (_fx, editor, cx) = open_editor(cx, "wrap.md", &text);
+        cx.dispatch_action(SelectAll);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let entry = ed.layout_cache.get(&0).expect("line painted");
+            assert!(
+                entry.line.size(entry.line_height).height >= entry.line_height * 3.,
+                "selection spans at least three visual rows"
+            );
+        });
+    }
+
+    // ── diff mode against a real repository ────────────────────────────
+
+    #[gpui::test]
+    fn diff_view_shows_word_level_changes_against_head(cx: &mut TestAppContext) {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        let file = repo.path().join("note.md");
+        std::fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
+        commit_all(repo.path());
+        std::fs::write(&file, "alpha\nBETA now\ngamma\ndelta\n").unwrap();
+
+        let (_bk, editor, cx) = open_editor_path(cx, &file);
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.diff_active());
+            let d = ed.diff.as_ref().unwrap();
+            assert!(d.missing.is_none(), "a committed baseline was found");
+            assert!(d.adds > 0, "added words counted");
+            assert!(d.dels > 0, "deleted words counted");
+            assert!(!d.changes.is_empty());
+            let merged = ed.view_buffer().text();
+            assert!(merged.contains("beta"), "deleted text stays in the merged doc");
+            assert!(merged.contains("BETA now"));
+            assert!(merged.contains("delta"));
+        });
+
+        // The diff view is read-only: clicking never touches the buffer
+        // or the selection.
+        let before = buffer_text(&editor, cx);
+        let sel_before = cx.update(|_, app| editor.read(app).core.selection.range());
+        let target = cx.update(|_, app| {
+            let ed = editor.read(app);
+            let entry = ed.layout_cache.get(&0).expect("diff line painted");
+            point(
+                entry.origin.x + px(4.),
+                entry.origin.y + entry.line_height * 0.5,
+            )
+        });
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
+        assert_eq!(buffer_text(&editor, cx), before);
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), sel_before);
+        });
+
+        // Outline jumps are disabled while diffing.
+        editor.update_in(cx, |ed, _, cx| ed.scroll_to_line(2, cx));
+        cx.update(|_, app| assert!(editor.read(app).scroll_anim.is_none()));
+
+        // refresh recomputes in place; exit restores the projection.
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.refresh_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(editor.read(app).diff_active()));
+        editor.update_in(cx, |ed, _, cx| ed.exit_diff(cx));
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(!editor.read(app).diff_active()));
+    }
+
+    #[gpui::test]
+    fn diff_view_on_code_files_shows_diff_gutter_labels(cx: &mut TestAppContext) {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        let file = repo.path().join("main.rs");
+        std::fs::write(&file, "fn main() {\n}\n").unwrap();
+        commit_all(repo.path());
+        std::fs::write(&file, "fn main() {\n    let x = 1;\n}\n").unwrap();
+
+        let (_bk, editor, cx) = open_editor_path(cx, &file);
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.is_code_mode());
+            let d = ed.diff.as_ref().unwrap();
+            assert!(d.missing.is_none());
+            assert!(!d.gutter.is_empty(), "code diffs carry gutter labels");
+            // Diff gutter labels come from the diff doc, not raw indices.
+            assert_eq!(ed.gutter_label(0), d.gutter[0]);
+        });
+    }
+
+    #[gpui::test]
+    fn diff_view_reports_untracked_files(cx: &mut TestAppContext) {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        std::fs::write(repo.path().join("old.md"), "x\n").unwrap();
+        commit_all(repo.path());
+        // Plain-text provider exercises the no-highlight diff path too.
+        let file = repo.path().join("fresh.txt");
+        std::fs::write(&file, "brand new\n").unwrap();
+
+        let (_bk, editor, cx) = open_editor_path(cx, &file);
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let d = editor.read(app).diff.as_ref().unwrap().missing.as_ref();
+            assert!(matches!(d, Some(crate::git::Baseline::Untracked)));
+        });
+    }
+
+    #[gpui::test]
+    fn diff_view_reports_binary_baselines(cx: &mut TestAppContext) {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        let file = repo.path().join("data.md");
+        std::fs::write(&file, [0u8, 159, 146, 150]).unwrap();
+        commit_all(repo.path());
+        std::fs::write(&file, "now text\n").unwrap();
+
+        let (_bk, editor, cx) = open_editor_path(cx, &file);
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let d = editor.read(app).diff.as_ref().unwrap().missing.as_ref();
+            assert!(matches!(d, Some(crate::git::Baseline::Binary)));
+        });
+    }
+
+    #[gpui::test]
+    fn diff_view_with_no_changes_shows_the_empty_state(cx: &mut TestAppContext) {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        let file = repo.path().join("clean.md");
+        std::fs::write(&file, "same\n").unwrap();
+        commit_all(repo.path());
+
+        let (_bk, editor, cx) = open_editor_path(cx, &file);
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let d = ed.diff.as_ref().unwrap();
+            assert!(d.missing.is_none());
+            assert!(d.changes.is_empty(), "identical content diffs to nothing");
+            assert_eq!((d.adds, d.dels), (0, 0));
+        });
+    }
 }

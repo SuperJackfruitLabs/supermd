@@ -48,13 +48,11 @@ jobs:
             libfreetype6-dev
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Measure coverage
-        # Whole app except main.rs, whose bulk is the live Application::run
-        # boot path (real platform, menus, open dialogs) that the headless
-        # gpui test platform cannot enter. Everything else is in scope.
+        # Whole project, no exclusions. The residue is documented at each
+        # site: OS dialogs the headless test platform leaves unimplemented,
+        # network fetches, and the live window bootstrap in main's run().
         run: |
-          cargo llvm-cov --json --summary-only \
-            --ignore-filename-regex 'src/main\.rs' \
-            > coverage.json
+          cargo llvm-cov --json --summary-only > coverage.json
           PCT=$(jq -r '.data[0].totals.lines.percent | . * 10 | round / 10' coverage.json)
           echo "PCT=$PCT" >> "$GITHUB_ENV"
           echo "### Test coverage: ${PCT}% (lines)" >> "$GITHUB_STEP_SUMMARY"

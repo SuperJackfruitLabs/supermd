@@ -2459,6 +2459,15 @@ mod tests {
         cx: &'a mut TestAppContext,
         root: &Path,
     ) -> (Entity<Workspace>, &'a mut gpui::VisualTestContext) {
+        open_arg(cx, Some(root.to_path_buf()))
+    }
+
+    /// Like `open_workspace`, but takes the raw launch argument so tests
+    /// can exercise the single-file / welcome-document startup paths.
+    fn open_arg(
+        cx: &mut TestAppContext,
+        arg: Option<PathBuf>,
+    ) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
         cx.update(|cx| {
             cx.set_global(crate::theme::ActiveTheme(Arc::new(
                 crate::theme::Theme::dark(),
@@ -2479,8 +2488,7 @@ mod tests {
                 system_dark: false,
             });
         });
-        let root = root.to_path_buf();
-        cx.add_window_view(|_, cx| Workspace::new(Some(root), cx))
+        cx.add_window_view(|_, cx| Workspace::new(arg, cx))
     }
 
     fn tab_paths(ws: &Workspace, cx: &App) -> Vec<Option<PathBuf>> {
@@ -3184,5 +3192,951 @@ mod tests {
         });
         ws.update_in(cx, |ws, window, cx| ws.toggle_shortcuts(&ToggleShortcuts, window, cx));
         cx.update(|_, app| assert!(!ws.read(app).show_shortcuts));
+    }
+
+    // ── pure helpers ────────────────────────────────────────────────────
+
+    #[test]
+    fn seti_tint_maps_every_palette_color() {
+        let t = crate::theme::Theme::dark();
+        assert_eq!(seti_tint(SetiColor::Blue, &t), t.syntax.function);
+        assert_eq!(seti_tint(SetiColor::Green, &t), t.syntax.string);
+        assert_eq!(seti_tint(SetiColor::Grey, &t), t.fg_muted);
+        assert_eq!(seti_tint(SetiColor::Ignore, &t), t.fg_muted);
+        assert_eq!(seti_tint(SetiColor::GreyLight, &t), t.fg);
+        assert_eq!(seti_tint(SetiColor::Orange, &t), t.syntax.constant);
+        assert_eq!(seti_tint(SetiColor::SetiPrimary, &t), t.syntax.constant);
+        assert_eq!(seti_tint(SetiColor::Pink, &t), t.syntax.property);
+        assert_eq!(seti_tint(SetiColor::Purple, &t), t.syntax.keyword);
+        assert_eq!(seti_tint(SetiColor::Red, &t), t.accent);
+        assert_eq!(seti_tint(SetiColor::White, &t), t.fg);
+        assert_eq!(seti_tint(SetiColor::Yellow, &t), t.syntax.kind);
+    }
+
+    #[test]
+    fn welcome_file_write_failure_still_returns_path() {
+        // A config "dir" that is actually a file: create_dir_all and the
+        // write both fail; the function still hands back the would-be path.
+        let dir = tempfile::tempdir().unwrap();
+        let bogus = dir.path().join("not-a-dir");
+        std::fs::write(&bogus, "file").unwrap();
+        let p = ensure_welcome_file(&bogus);
+        assert_eq!(p, bogus.join("Welcome.md"));
+        assert!(!p.exists());
+    }
+
+    #[test]
+    fn record_recent_tolerates_unwritable_config() {
+        let home = temp_home();
+        // ~/.supermd exists as a *file*, so settings::save must fail;
+        // record_recent swallows the error.
+        std::fs::write(home._dir.path().join(".supermd"), "block").unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        record_recent(ws_dir.path());
+    }
+
+    // ── startup argument variants ───────────────────────────────────────
+
+    #[gpui::test]
+    fn single_file_arg_covers_no_tree_paths(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let recent1 = tempfile::tempdir().unwrap();
+        let recent2 = tempfile::tempdir().unwrap();
+        record_recent(&recent1.path().canonicalize().unwrap());
+        record_recent(&recent2.path().canonicalize().unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("solo.md");
+        std::fs::write(&file, "# solo\n").unwrap();
+        let (ws, cx) = open_arg(cx, Some(file.clone()));
+
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.tree.is_none(), "file argument opens single-file mode");
+            assert_eq!(tab_paths(w, app), vec![Some(file.clone())]);
+            assert_eq!(w.startup_recents.len(), 2, "recents loaded at launch");
+            assert!(w.git_modified.is_empty(), "no tree, no git dots");
+        });
+
+        // Everything that needs a tree is a quiet no-op.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.focus_sidebar(&FocusSidebar, window, cx);
+            ws.sidebar_up(&SidebarUp, window, cx);
+            ws.sidebar_down(&SidebarDown, window, cx);
+            ws.sidebar_expand(&SidebarExpand, window, cx);
+            ws.sidebar_collapse(&SidebarCollapse, window, cx);
+            ws.sidebar_open(&SidebarOpen, window, cx);
+            ws.toggle_finder(&ToggleFinder, window, cx);
+            ws.toggle_search(&ToggleSearch, window, cx);
+            ws.new_file(&NewFile, window, cx);
+            ws.setup_watcher(cx);
+            ws.open_path_preview(&dir.path().to_path_buf(), true, window, cx);
+            ws.set_active(99, window, cx);
+            ws.close_tab_at(99, window, cx);
+            ws.adjust_zoom(Some(2.0), cx); // active tab is not an image
+            ws.on_fs_events(std::slice::from_ref(&file), cx); // no tree: no visibility filter
+        });
+        cx.run_until_parked(); // renders the "No folder open" sidebar + recents
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.finder.is_none());
+            assert!(w.search.is_none());
+            assert_eq!(tab_paths(w, app).len(), 1, "no-ops left the tabs alone");
+        });
+
+        // The recent-workspace rows sit at the bottom of the centered
+        // empty-state stack; sweep upward from below it, stopping well
+        // above the "Open Folder…" button (which would open an OS dialog
+        // the test platform cannot service). A row click installs a tree.
+        let (_w, h) = viewport(cx);
+        let mut y = h / 2. + 110.;
+        while y > h / 2. + 20. {
+            click_at(cx, 120., y);
+            if cx.update(|_, app| ws.read(app).tree.is_some()) {
+                break;
+            }
+            y -= 6.;
+        }
+        cx.update(|_, app| {
+            assert!(ws.read(app).tree.is_some(), "a recent row click opened the workspace");
+        });
+        // Back to the no-tree state for the direct open_recent calls.
+        ws.update_in(cx, |ws, _, cx| {
+            ws.tree = None;
+            ws._watcher = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        // Recents: an out-of-range slot is ignored; slot 0 is the most
+        // recently recorded directory and opening it installs a tree.
+        ws.update_in(cx, |ws, window, cx| ws.open_recent_ix(7, window, cx));
+        cx.update(|_, app| assert!(ws.read(app).tree.is_none()));
+        let newest = recent2.path().canonicalize().unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.open_recent_ix(0, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.tree.as_ref().map(|t| t.root.clone()), Some(newest));
+        });
+    }
+
+    #[gpui::test]
+    fn missing_file_arg_yields_empty_workspace(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.md");
+        let (ws, cx) = open_arg(cx, Some(missing));
+
+        cx.run_until_parked(); // renders the empty-state pane
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.tabs.is_empty(), "unreadable file argument opens nothing");
+            assert!(w.tree.is_none());
+            // Focusable impl hands back the workspace focus handle.
+            assert_eq!(w.focus_handle(app), w.focus_handle);
+        });
+
+        // Tab-less no-ops.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.show_changes(&ShowChanges, window, cx);
+            ws.toggle_preview(&TogglePreview, window, cx);
+            ws.close_tab(&CloseTab, window, cx);
+        });
+        cx.update(|_, app| assert!(ws.read(app).tabs.is_empty()));
+    }
+
+    #[gpui::test]
+    fn no_arg_opens_the_editable_welcome_file(cx: &mut TestAppContext) {
+        let home = temp_home();
+        let (ws, cx) = open_arg(cx, None);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { editor, .. }) = w.tabs.first() else {
+                panic!("welcome should open as an editable tab");
+            };
+            assert!(editor.read(app).path().ends_with("Welcome.md"));
+        });
+        assert!(home._dir.path().join(".supermd/Welcome.md").exists());
+    }
+
+    #[gpui::test]
+    fn unwritable_config_falls_back_to_readonly_welcome(cx: &mut TestAppContext) {
+        let home = temp_home();
+        // ~/.supermd as a file: the welcome doc cannot be written, so the
+        // workspace falls back to the built-in read-only Reader.
+        std::fs::write(home._dir.path().join(".supermd"), "block").unwrap();
+        let (ws, cx) = open_arg(cx, None);
+        cx.run_until_parked(); // renders the Reader (and its outline)
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(tab @ Tab::Reader(reader)) = w.tabs.first() else {
+                panic!("fallback should be a Reader tab");
+            };
+            assert_eq!(tab.title(app), reader.read(app).title);
+            assert_eq!(tab.path(app), None, "built-in welcome has no path");
+            assert!(w.show_outline, "outline panel renders the reader toc");
+        });
+    }
+
+    // ── external opens (Finder events, drops) ───────────────────────────
+
+    #[gpui::test]
+    fn external_open_queue_routes_dirs_and_files(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let pending: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        ws.update_in(cx, |ws, window, cx| {
+            ws.watch_external_opens(pending.clone(), window, cx)
+        });
+        // First poll finds an empty queue and keeps looping.
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(350));
+        cx.run_until_parked();
+
+        let other = tempfile::tempdir().unwrap();
+        let other_root = other.path().canonicalize().unwrap();
+        let missing = root.path().join("gone.md");
+        pending
+            .lock()
+            .unwrap()
+            .extend([other_root.clone(), a.clone(), missing]);
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(350));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(
+                w.tree.as_ref().map(|t| t.root.clone()),
+                Some(other_root),
+                "dropped directory becomes the workspace root"
+            );
+            assert_eq!(tab_paths(w, app), vec![Some(a.clone())], "file opened; missing filtered");
+            assert_eq!(w.preview_tab, None, "external opens are permanent tabs");
+        });
+    }
+
+    // ── diff view (⌘⇧D) ─────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn show_changes_toggles_the_diff_view(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        sh_git(root.path(), &["init", "-q"]);
+        sh_git(root.path(), &["add", "-A"]);
+        sh_git(root.path(), &["commit", "-qm", "init"]);
+        std::fs::write(&a, "# a\nplus a new line\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+
+        ws.update_in(cx, |ws, window, cx| ws.show_changes(&ShowChanges, window, cx));
+        let editor = active_editor(&ws, cx);
+        cx.run_until_parked(); // render the diff view
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view, .. }) = w.tabs.get(w.active) else { panic!() };
+            assert!(matches!(view, EditorView::Diff), "⌘⇧D enters the diff view");
+            assert!(editor.read(app).diff_active());
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.show_changes(&ShowChanges, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view, .. }) = w.tabs.get(w.active) else { panic!() };
+            assert!(matches!(view, EditorView::Edit), "⌘⇧D again leaves the diff view");
+            assert!(!editor.read(app).diff_active());
+        });
+    }
+
+    // ── preview-open corner cases ───────────────────────────────────────
+
+    #[gpui::test]
+    fn preview_open_variants(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let pic = root.path().join("shot.png");
+        std::fs::write(&pic, TINY_PNG).unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // Previewing an unreadable path is a no-op.
+        let missing = root.path().join("gone.md");
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path_preview(&missing, true, window, cx)
+        });
+        cx.update(|_, app| assert!(ws.read(app).tabs.is_empty()));
+
+        // Images preview too (with focus back at the workspace).
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&pic, true, window, cx));
+        cx.update(|window, app| {
+            let w = ws.read(app);
+            assert!(matches!(w.tabs.get(0), Some(Tab::Image { .. })));
+            assert_eq!(w.preview_tab, Some(0));
+            assert!(w.focus_handle.is_focused(window), "image tabs focus the shell");
+        });
+
+        // Activating an existing pinned tab from a different active tab
+        // flushes the old one and focuses the target.
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&b, window, cx));
+        cx.update(|_, app| assert_eq!(ws.read(app).active, 2));
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.active, 1, "existing pinned tab activated in place");
+        });
+
+        // Replacing the preview slot while a different tab is active.
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&b, false, window, cx));
+        cx.update(|_, app| assert_eq!(ws.read(app).active, 2));
+        ws.update_in(cx, |ws, window, cx| ws.set_active(1, window, cx));
+        let c = root.path().join("c.md");
+        std::fs::write(&c, "# c\n").unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&c, false, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.preview_tab, Some(0), "slot index unchanged");
+            assert_eq!(w.tabs[0].path(app), Some(c.clone()), "slot replaced from afar");
+            assert_eq!(w.active, 0);
+        });
+    }
+
+    #[gpui::test]
+    fn open_path_ignores_unreadable_files(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let missing = root.path().join("gone.md");
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&missing, window, cx));
+        cx.update(|_, app| assert!(ws.read(app).tabs.is_empty()));
+    }
+
+    #[gpui::test]
+    fn new_file_write_failure_is_swallowed(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        std::fs::remove_dir_all(root.path()).unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.new_file(&NewFile, window, cx));
+        cx.update(|_, app| {
+            assert!(ws.read(app).tabs.is_empty(), "failed create opens nothing")
+        });
+    }
+
+    // ── watcher lifecycle ───────────────────────────────────────────────
+
+    #[gpui::test]
+    fn rewatch_disconnects_the_old_drain_loop(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let root_canon = root.path().canonicalize().unwrap();
+        let (ws, cx) = open_workspace(cx, &root_canon);
+
+        ws.update_in(cx, |ws, _, cx| ws.setup_watcher(cx));
+        // Replacing the watcher drops the old channel sender; the first
+        // drain loop sees Disconnected on its next tick and exits.
+        ws.update_in(cx, |ws, _, cx| ws.setup_watcher(cx));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(250));
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app)._watcher.is_some()));
+
+        // A vanished root cannot be watched; the watcher stays off.
+        ws.update_in(cx, |ws, _, cx| {
+            if let Some(tree) = &mut ws.tree {
+                tree.root = PathBuf::from("/nonexistent/supermd-test-root");
+            }
+            ws.setup_watcher(cx);
+        });
+        cx.update(|_, app| assert!(ws.read(app)._watcher.is_none()));
+    }
+
+    #[gpui::test]
+    fn drain_loops_exit_when_the_workspace_goes_away(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let root_canon = root.path().canonicalize().unwrap();
+        let (ws, cx) = open_workspace(cx, &root_canon);
+
+        let pending: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(vec![a.clone()]));
+        ws.update_in(cx, |ws, window, cx| {
+            ws.setup_watcher(cx);
+            ws.watch_external_opens(pending.clone(), window, cx);
+        });
+
+        // Queue a real fs event, then tear the window (and workspace)
+        // down; both drain loops must notice and exit rather than spin.
+        std::fs::write(root_canon.join("late.md"), "# late\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        cx.update(|window, _| window.remove_window());
+        drop(ws);
+        for _ in 0..4 {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(400));
+            cx.run_until_parked();
+        }
+    }
+
+    // ── theme picker edges ──────────────────────────────────────────────
+
+    #[gpui::test]
+    fn theme_picker_dark_choice_and_save_failure(cx: &mut TestAppContext) {
+        let home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // Guarded entry points without an open picker.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_apply(0, cx);
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx);
+        });
+        cx.update(|_, app| assert!(ws.read(app).theme_picker.is_none()));
+
+        // Jump straight to the first dark theme and confirm it.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        let (dark_pos, dark_name) = cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(picker) = &w.theme_picker else { panic!("picker open") };
+            let state = app.global::<crate::theme::ThemeState>();
+            let pos = picker
+                .order
+                .iter()
+                .position(|&i| state.themes[i].theme.is_dark)
+                .expect("builtins include a dark theme");
+            (pos, state.themes[picker.order[pos]].name.clone())
+        });
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_apply(dark_pos, cx));
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        cx.update(|_, app| {
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(state.settings.dark_theme, dark_name, "dark slot updated");
+        });
+
+        // Confirm again with an unwritable config dir: the save error is
+        // logged and the picker still closes.
+        let config = home._dir.path().join(".supermd");
+        std::fs::remove_dir_all(&config).unwrap();
+        std::fs::write(&config, "block").unwrap();
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        cx.update(|_, app| assert!(ws.read(app).theme_picker.is_none()));
+    }
+
+    // ── mouse-driven overlays ───────────────────────────────────────────
+
+    /// A valid 1×1 PNG so image tabs can actually decode in render tests.
+    const TINY_PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1,
+        0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84,
+        120, 156, 99, 96, 96, 96, 248, 15, 0, 1, 4, 1, 0, 95, 229, 195, 75, 0, 0,
+        0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    fn click_at(cx: &mut gpui::VisualTestContext, x: f32, y: f32) {
+        cx.simulate_click(gpui::point(px(x), px(y)), gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn double_click_at(cx: &mut gpui::VisualTestContext, x: f32, y: f32) {
+        let position = gpui::point(px(x), px(y));
+        cx.simulate_event(gpui::MouseDownEvent {
+            position,
+            modifiers: gpui::Modifiers::none(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position,
+            modifiers: gpui::Modifiers::none(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+        });
+        cx.run_until_parked();
+    }
+
+    fn viewport(cx: &mut gpui::VisualTestContext) -> (f32, f32) {
+        let size = cx.update(|window, _| window.viewport_size());
+        (f32::from(size.width), f32::from(size.height))
+    }
+
+    #[gpui::test]
+    fn shortcuts_overlay_click_targets(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let (w, h) = viewport(cx);
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_shortcuts(&ToggleShortcuts, window, cx));
+        cx.run_until_parked();
+        // The panel is centered and occludes the middle: clicking it must
+        // not close the overlay.
+        click_at(cx, w / 2., h / 2.);
+        cx.update(|_, app| assert!(ws.read(app).show_shortcuts, "panel click is inert"));
+        // The dimmed background closes it.
+        click_at(cx, 3., 3.);
+        cx.update(|_, app| assert!(!ws.read(app).show_shortcuts, "backdrop click closes"));
+    }
+
+    #[gpui::test]
+    fn theme_picker_click_targets(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let (w, h) = viewport(cx);
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        cx.run_until_parked();
+        click_at(cx, 3., 3.);
+        cx.update(|_, app| {
+            assert!(ws.read(app).theme_picker.is_none(), "backdrop click cancels")
+        });
+
+        // Click near the panel's vertical center until a row click moves
+        // the selection. The panel is centered, but its height depends on
+        // the theme list, so clicks that fall off it cancel the picker —
+        // reopen and keep probing closer to the center.
+        let mut row_clicked = false;
+        for step in 0..40 {
+            let open = cx.update(|_, app| ws.read(app).theme_picker.is_some());
+            if !open {
+                ws.update_in(cx, |ws, window, cx| {
+                    ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+                });
+                cx.run_until_parked();
+            }
+            let before = cx.update(|_, app| ws.read(app).theme_picker.as_ref().map(|p| p.pos));
+            // 0, +8, -8, +16, -16, … around the panel center.
+            let offset = if step % 2 == 0 { (step / 2) as f32 * 8. } else { -(((step + 1) / 2) as f32 * 8.) };
+            click_at(cx, w / 2., h / 2. + offset);
+            let after = cx.update(|_, app| ws.read(app).theme_picker.as_ref().map(|p| p.pos));
+            if after.is_some() && after != before {
+                row_clicked = true;
+                break;
+            }
+        }
+        assert!(row_clicked, "some probe click landed on a theme row");
+    }
+
+    #[gpui::test]
+    fn finder_and_search_overlays_have_click_targets(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let (w, _h) = viewport(cx);
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_finder(&ToggleFinder, window, cx));
+        cx.run_until_parked();
+        click_at(cx, w / 2., 125.); // the palette itself: stays open
+        cx.update(|_, app| assert!(ws.read(app).finder.is_some(), "panel click is inert"));
+        click_at(cx, 5., 5.); // backdrop: dismissed
+        cx.update(|_, app| assert!(ws.read(app).finder.is_none()));
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_search(&ToggleSearch, window, cx));
+        cx.run_until_parked();
+        click_at(cx, w / 2., 125.);
+        cx.update(|_, app| assert!(ws.read(app).search.is_some(), "panel click is inert"));
+        click_at(cx, 5., 5.);
+        cx.update(|_, app| assert!(ws.read(app).search.is_none()));
+    }
+
+    #[gpui::test]
+    fn titlebar_tab_clicks_and_update_pill(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let (w, h) = viewport(cx);
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&b, false, window, cx));
+        ws.update_in(cx, |ws, _, cx| {
+            ws.update_available = Some("v99.0.0".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.active, 1);
+            assert_eq!(w.preview_tab, Some(1));
+        });
+
+        // The tab strip starts just right of the sidebar on macOS; other
+        // platforms put the ☰ app-menu button there first, whose popover
+        // items would swallow the sweep, so gate the tab sweeps.
+        if crate::platform::MACOS {
+            // Sweep double-clicks across the strip. Hits land on either a
+            // tab body (activates; pins when it is the preview tab) or a
+            // × close button (removes the tab — rebuild and keep going).
+            let reset = |cx: &mut gpui::VisualTestContext| {
+                ws.update_in(cx, |ws, window, cx| {
+                    while !ws.tabs.is_empty() {
+                        ws.close_tab_at(0, window, cx);
+                    }
+                    ws.open_path(&a, window, cx);
+                    ws.open_path_preview(&b, false, window, cx);
+                });
+                cx.run_until_parked();
+            };
+            let mut activated = false;
+            let mut pinned = false;
+            let mut closed = false;
+            let mut x = 244.;
+            while x < 900. && !(activated && pinned && closed) {
+                let sane = cx.update(|_, app| {
+                    let w = ws.read(app);
+                    w.tabs.len() == 2 && w.preview_tab == Some(1)
+                });
+                if !sane {
+                    reset(cx);
+                }
+                double_click_at(cx, x, 17.);
+                cx.update(|_, app| {
+                    let w = ws.read(app);
+                    if w.tabs.len() < 2 {
+                        closed = true;
+                    } else if w.preview_tab.is_none() {
+                        pinned = true;
+                    } else if w.active == 0 {
+                        activated = true;
+                    }
+                });
+                x += 8.;
+            }
+            assert!(activated, "a sweep click activated tab 0");
+            assert!(pinned, "a double-click pinned the preview tab");
+            assert!(closed, "a sweep click hit a close button");
+            reset(cx);
+        } else {
+            // Off macOS the ☰ app-menu button leads the titlebar; toggle
+            // it open (rendering the popover) and close via the backdrop.
+            let mut x = 244.;
+            while x < 280. {
+                click_at(cx, x, 17.);
+                if cx.update(|_, app| ws.read(app).app_menu_open) {
+                    break;
+                }
+                x += 8.;
+            }
+            if cx.update(|_, app| ws.read(app).app_menu_open) {
+                click_at(cx, w - 40., h - 40.);
+                cx.update(|_, app| {
+                    assert!(!ws.read(app).app_menu_open, "backdrop click closes the menu")
+                });
+            }
+        }
+
+        // The update pill sits at the right edge of the titlebar.
+        let mut x = w - 12.;
+        while x > w - 220. {
+            click_at(cx, x, 17.);
+            if cx.opened_url().is_some() {
+                break;
+            }
+            x -= 6.;
+        }
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some(crate::update::RELEASES_URL),
+            "pill click opens the releases page"
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_row_clicks_toggle_dirs_preview_and_pin_files(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let sub = root.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("c.md"), "# c\n").unwrap();
+        // A git repo with an uncommitted edit renders the modified dot.
+        sh_git(root.path(), &["init", "-q"]);
+        sh_git(root.path(), &["add", "-A"]);
+        sh_git(root.path(), &["commit", "-qm", "init"]);
+        std::fs::write(&a, "# a modified\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).git_modified.contains(&a)));
+
+        // Sweep down the sidebar. Directory hits flip expansion; the
+        // first file hit opens a preview.
+        let mut dir_clicked = false;
+        let mut file_clicked = false;
+        let mut y = 40.;
+        while y < 400. && !(dir_clicked && file_clicked) {
+            let expanded_before =
+                cx.update(|_, app| ws.read(app).tree.as_ref().is_some_and(|t| t.is_expanded(&sub)));
+            let tabs_before = cx.update(|_, app| ws.read(app).tabs.len());
+            click_at(cx, 120., y);
+            let expanded_after =
+                cx.update(|_, app| ws.read(app).tree.as_ref().is_some_and(|t| t.is_expanded(&sub)));
+            let tabs_after = cx.update(|_, app| ws.read(app).tabs.len());
+            if expanded_after != expanded_before {
+                dir_clicked = true;
+            }
+            if tabs_after > tabs_before {
+                file_clicked = true;
+                cx.update(|_, app| {
+                    assert_eq!(ws.read(app).preview_tab, Some(0), "single click previews")
+                });
+            }
+            y += 5.;
+        }
+        assert!(dir_clicked, "some click toggled the directory row");
+        assert!(file_clicked, "some click previewed a file row");
+
+        // Double-clicking the previewed file's row pins it. Preview a
+        // top-level file so its row stays visible however the folder
+        // rows above it get toggled by the sweep.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path_preview(&a, false, window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(ws.read(app).preview_tab, Some(0)));
+        let mut y = 40.;
+        while y < 400. {
+            double_click_at(cx, 120., y);
+            if cx.update(|_, app| ws.read(app).preview_tab).is_none() {
+                break;
+            }
+            y += 5.;
+        }
+        cx.update(|_, app| {
+            assert_eq!(ws.read(app).preview_tab, None, "double-click pins the preview")
+        });
+    }
+
+    #[gpui::test]
+    fn search_toggle_twice_and_non_editor_hit(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let pic = root.path().join("hit.png");
+        std::fs::write(&pic, TINY_PNG).unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // A second ⌘⇧F while the overlay is open dismisses it.
+        ws.update_in(cx, |ws, window, cx| ws.toggle_search(&ToggleSearch, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_search(&ToggleSearch, window, cx));
+        cx.update(|_, app| assert!(ws.read(app).search.is_none()));
+
+        // A hit that opens a non-editor tab skips the scroll-to-line step.
+        ws.update_in(cx, |ws, window, cx| ws.toggle_search(&ToggleSearch, window, cx));
+        let overlay = cx.update(|_, app| {
+            let Some((overlay, _)) = &ws.read(app).search else { panic!("search open") };
+            overlay.clone()
+        });
+        cx.update(|_, app| {
+            overlay.update(app, |_, cx| {
+                cx.emit(crate::search_ui::SearchEvent::Open { path: pic.clone(), line: 1 })
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.search.is_none());
+            assert!(matches!(w.tabs.get(w.active), Some(Tab::Image { .. })));
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_keyboard_moves_across_row_types(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let sub = root.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("c.md"), "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.focus_sidebar(&FocusSidebar, window, cx));
+
+        // ↑ clamps at the top; the row is a directory, so no preview opens.
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_up(&SidebarUp, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.sidebar_selected, 0);
+            assert!(w.tabs.is_empty(), "landing on a directory previews nothing");
+        });
+
+        // ⏎ on a directory row toggles it instead of opening a tab.
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_open(&SidebarOpen, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.tree.as_ref().is_some_and(|t| t.is_expanded(&sub)));
+            assert!(w.tabs.is_empty());
+        });
+
+        // → on a file row is a no-op.
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_down(&SidebarDown, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.sidebar_expand(&SidebarExpand, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.sidebar_selected, 1, "expand on a file does not move");
+        });
+    }
+
+    #[gpui::test]
+    fn file_drop_events_reach_the_drop_handler(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let (w, h) = viewport(cx);
+        let position = gpui::point(px(w / 2.), px(h / 2.));
+
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position,
+            paths: Default::default(),
+        });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position });
+        cx.run_until_parked(); // drag_over style branch renders
+        cx.simulate_event(gpui::FileDropEvent::Submit { position });
+        cx.run_until_parked();
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.update(|_, app| {
+            // An empty drop routes through open_external_paths untouched.
+            assert!(ws.read(app).tabs.is_empty());
+        });
+    }
+
+    // ── render-path variants ────────────────────────────────────────────
+
+    #[gpui::test]
+    fn image_tabs_render_fit_and_zoomed(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let pic = root.path().join("pic.png");
+        std::fs::write(&pic, TINY_PNG).unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&pic, window, cx));
+        cx.run_until_parked(); // fit-to-window branch
+        ws.update_in(cx, |ws, window, cx| ws.zoom_in(&ZoomIn, window, cx));
+        cx.run_until_parked(); // scrollable zoomed branch
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Image { zoom, .. }) = w.tabs.get(w.active) else { panic!() };
+            assert!(*zoom > 1.0);
+            assert!(w.show_outline, "outline stays enabled but renders nothing for images");
+        });
+    }
+
+    #[gpui::test]
+    fn outline_renders_for_editors_and_previews(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let doc = root.path().join("doc.md");
+        std::fs::write(
+            &doc,
+            "# one\ntext\n## two\ntext\n## three\ntext\n### four\ntext\n",
+        )
+        .unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let (w, _h) = viewport(cx);
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&doc, window, cx));
+        cx.run_until_parked(); // editor outline
+        // Click across the outline rows (right-hand panel).
+        let mut y = 44.;
+        while y < 140. {
+            click_at(cx, w - 110., y);
+            y += 8.;
+        }
+        cx.update(|_, app| {
+            assert_eq!(tab_paths(ws.read(app), app), vec![Some(doc.clone())]);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked(); // preview reader + its outline
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(preview), .. }) =
+                w.tabs.get(w.active)
+            else {
+                panic!("preview should be active")
+            };
+            assert!(preview.read(app).toc.len() >= 2);
+        });
+        // Outline clicks now target the reader (scroll-to-block arm).
+        let mut y = 44.;
+        while y < 140. {
+            click_at(cx, w - 110., y);
+            y += 8.;
+        }
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(matches!(
+                w.tabs.get(w.active),
+                Some(Tab::Editor { view: EditorView::Preview(_), .. })
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn editing_a_previewed_buffer_pins_its_tab(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(ws.read(app).preview_tab, Some(0)));
+
+        cx.simulate_input("edited ");
+        cx.run_until_parked(); // render notices the dirty preview and pins it
+        cx.update(|_, app| {
+            assert_eq!(ws.read(app).preview_tab, None, "typing pins the preview tab")
+        });
+    }
+
+    #[gpui::test]
+    fn install_banner_buttons(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let (w, _h) = viewport(cx);
+
+        let arm = |cx: &mut gpui::VisualTestContext| {
+            ws.update_in(cx, |ws, _, cx| {
+                ws.install_banner = Some("SuperMD is running from the disk image.".into());
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        arm(cx);
+
+        // Sweep the banner row right-to-left: "Not now" comes first and
+        // clears the banner; further left, "Move to Applications" fails
+        // outside a real .app bundle and rewrites the banner message.
+        let mut dismissed = false;
+        let mut move_failed = false;
+        let mut x = w - 8.;
+        while x > w - 400. && !(dismissed && move_failed) {
+            for y in [40., 46., 52.] {
+                let before = cx.update(|_, app| ws.read(app).install_banner.clone());
+                if before.is_none() {
+                    arm(cx);
+                }
+                click_at(cx, x, y);
+                let after = cx.update(|_, app| ws.read(app).install_banner.clone());
+                match &after {
+                    None => dismissed = true,
+                    Some(msg) if msg.starts_with("Couldn't move") => move_failed = true,
+                    _ => {}
+                }
+            }
+            x -= 6.;
+        }
+        assert!(dismissed, "the Not-now button cleared the banner");
+        assert!(move_failed, "the Move button reported the expected failure");
     }
 }
