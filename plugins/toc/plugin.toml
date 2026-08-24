@@ -1,0 +1,12 @@
+name = "toc"
+version = "0.1.0"
+description = "Table of contents: insert at cursor or update between <!-- toc --> markers"
+authors = ["SuperJackfruitLabs"]
+
+[[commands]]
+id = "toc.insert"
+title = "Insert Table of Contents"
+
+[[commands]]
+id = "toc.update"
+title = "Update Table of Contents"
