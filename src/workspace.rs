@@ -4759,20 +4759,23 @@ mod tests {
     //    viewers, reload ──────────────────────────────────────────────
 
     /// Load the fixture plugins into the ExtensionState global and the
-    /// contribution tables. Skips (returns false) when fixtures are
-    /// absent.
-    fn with_plugins(cx: &mut TestAppContext) -> bool {
+    /// contribution tables. The returned guard serializes table-
+    /// mutating tests; None = fixtures absent.
+    fn with_plugins(
+        cx: &mut TestAppContext,
+    ) -> Option<std::sync::MutexGuard<'static, ()>> {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
         if !dir.join("echo/plugin.wasm").exists() {
             eprintln!("SKIP: fixtures not built (scripts/build_plugins.sh --fixtures)");
-            return false;
+            return None;
         }
+        let guard = crate::extensions::table_test_guard();
         let mut host = crate::extensions::ExtensionHost::load(&dir);
         crate::extensions::refresh_tables(&mut host);
         cx.update(|cx| {
             cx.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
         });
-        true
+        Some(guard)
     }
 
     fn active_editor_text(ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> String {
@@ -4788,9 +4791,9 @@ mod tests {
     #[gpui::test]
     fn palette_opens_and_plugin_commands_apply(cx: &mut TestAppContext) {
         let _home = temp_home();
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         let (root, a, _) = workspace_fixture();
         let (ws, cx) = open_workspace(cx, root.path());
         ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
@@ -4824,9 +4827,9 @@ mod tests {
     #[gpui::test]
     fn template_command_materializes_and_opens_the_file(cx: &mut TestAppContext) {
         let _home = temp_home();
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         let (root, _, _) = workspace_fixture();
         let (ws, cx) = open_workspace(cx, root.path());
         ws.update_in(cx, |ws, window, cx| {
@@ -4857,9 +4860,9 @@ mod tests {
     #[gpui::test]
     fn export_writes_through_the_save_dialog(cx: &mut TestAppContext) {
         let _home = temp_home();
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         let (root, a, _) = workspace_fixture();
         let dest = root.path().join("exported.txt");
         let (ws, cx) = open_workspace(cx, root.path());
@@ -4883,9 +4886,9 @@ mod tests {
     #[gpui::test]
     fn consent_banner_flow_persists_grants(cx: &mut TestAppContext) {
         let _home = temp_home();
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         let (root, a, _) = workspace_fixture();
         let (ws, cx) = open_workspace(cx, root.path());
         ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
@@ -4922,9 +4925,9 @@ mod tests {
     #[gpui::test]
     fn viewer_files_open_rendered_and_toggle_to_source(cx: &mut TestAppContext) {
         let _home = temp_home();
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         let (root, _, _) = workspace_fixture();
         let prb = root.path().join("view-me.prb");
         std::fs::write(&prb, "probe body\n").unwrap();
@@ -4959,9 +4962,9 @@ mod tests {
     #[gpui::test]
     fn status_strip_renders_widget_text(cx: &mut TestAppContext) {
         let _home = temp_home();
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         let (root, a, _) = workspace_fixture();
         let (ws, cx) = open_workspace(cx, root.path());
         ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
@@ -4986,9 +4989,9 @@ mod tests {
     #[gpui::test]
     fn template_errors_surface_in_the_command_strip(cx: &mut TestAppContext) {
         let _home = temp_home();
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         // No folder open: templates need a workspace root.
         let (ws, cx) = open_arg(cx, None);
         ws.update_in(cx, |ws, window, cx| {
@@ -5016,9 +5019,9 @@ mod tests {
     #[gpui::test]
     fn reload_plugins_rebuilds_the_host(cx: &mut TestAppContext) {
         let _home = temp_home();
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         // A plugins dir under the temp HOME with just the echo fixture.
         let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
         let plugins = crate::settings::config_dir().join("plugins/echo");

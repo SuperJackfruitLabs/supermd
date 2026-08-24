@@ -1180,6 +1180,18 @@ pub fn template_context(workspace: &str) -> TemplateContext {
     }
 }
 
+/// Tests that mutate the process-global contribution tables (or the
+/// inline cache / grammar registry they cascade into) must serialize:
+/// the test runner is multi-threaded and a parallel test's
+/// refresh/cleanup would wipe state mid-assertion.
+#[cfg(test)]
+pub(crate) static TABLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn table_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    TABLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Global handle; plugin calls lock briefly on the background executor.
 pub struct ExtensionState(pub std::sync::Arc<std::sync::Mutex<ExtensionHost>>);
 
@@ -1969,6 +1981,7 @@ mod drainer_tests {
             eprintln!("SKIP: fixtures not built");
             return;
         }
+        let _tables = table_test_guard();
         let host = ExtensionHost::load(&dir);
         cx.update(|cx| {
             cx.set_global(ExtensionState(std::sync::Arc::new(std::sync::Mutex::new(host))));
@@ -2096,6 +2109,7 @@ name = "Raw"
     /// globals and parallel tests would race them.
     #[test]
     fn surface_tables_fill_from_metas() {
+        let _tables = table_test_guard();
         // paste plugins split by net capability
         let sync_meta = parse_manifest(
             Path::new("/p/tidy"),

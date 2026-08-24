@@ -2670,9 +2670,9 @@ mod tests {
     /// or the failure arm).
     #[gpui::test]
     fn plugin_fence_renders_as_a_widget(cx: &mut TestAppContext) {
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         let doc = "intro\n\n```echo-fixture\nhello widget\n```\n\ntail\n";
         let (_fx, editor, cx) = open_editor(cx, "plugin-widget.md", doc);
         assert_eq!(widget_count(&editor, cx), 1, "echo fence claimed");
@@ -2689,27 +2689,31 @@ mod tests {
         crate::extensions::set_fence_table(Vec::new());
     }
 
-    /// Load the fixture plugins into the tables + global; false = skip.
-    fn with_plugins(cx: &mut TestAppContext) -> bool {
+    /// Load the fixture plugins into the tables + global. The returned
+    /// guard serializes table-mutating tests; None = fixtures absent.
+    fn with_plugins(
+        cx: &mut TestAppContext,
+    ) -> Option<std::sync::MutexGuard<'static, ()>> {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/plugins");
         if !dir.join("probe/plugin.wasm").exists() {
             eprintln!("SKIP: fixtures not built");
-            return false;
+            return None;
         }
+        let guard = crate::extensions::table_test_guard();
         let mut host = crate::extensions::ExtensionHost::load(&dir);
         crate::extensions::refresh_tables(&mut host);
         cx.update(|cx| {
             cx.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
         });
-        true
+        Some(guard)
     }
 
     #[gpui::test]
     fn save_hooks_transform_on_flush(cx: &mut TestAppContext) {
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         // probe's on-save appends a marker when the doc says "hookme".
         let (_fx, editor, cx) = open_editor(cx, "hooked.md", "hookme");
         editor.update_in(cx, |editor, _, cx| {
@@ -2724,9 +2728,9 @@ mod tests {
 
     #[gpui::test]
     fn net_paste_plugins_enrich_after_the_paste(cx: &mut TestAppContext) {
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         let (_fx, editor, cx) = open_editor(cx, "enrich.md", "");
         cx.update(|_, app| {
             app.write_to_clipboard(ClipboardItem::new_string("enrichme".into()))
@@ -2747,9 +2751,9 @@ mod tests {
 
     #[gpui::test]
     fn status_widgets_fill_the_editor_status(cx: &mut TestAppContext) {
-        if !with_plugins(cx) {
+        let Some(_tables) = with_plugins(cx) else {
             return;
-        }
+        };
         let (_fx, editor, cx) = open_editor(cx, "status.md", "12345");
         for _ in 0..10 {
             cx.executor().advance_clock(std::time::Duration::from_millis(200));
