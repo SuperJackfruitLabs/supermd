@@ -1083,7 +1083,7 @@ fn inline_insert(key: InlineKey, value: Option<String>) {
 }
 
 /// Rebuild all contribution tables from a loaded host.
-pub fn refresh_tables(host: &ExtensionHost) {
+pub fn refresh_tables(host: &mut ExtensionHost) {
     let metas = host.plugins();
     set_fence_table(
         metas
@@ -1095,6 +1095,15 @@ pub fn refresh_tables(host: &ExtensionHost) {
     set_inline_table(compile_inline(&metas));
     set_surface_tables(&metas);
     clear_inline_cache();
+    // Grammar plugins load into the highlight layer's registry;
+    // failures join the load report like any other plugin problem.
+    let grammar_specs: Vec<(String, PathBuf, GrammarInfo)> = metas
+        .iter()
+        .flat_map(|m| m.grammars.iter().map(|g| (m.name.clone(), m.dir.clone(), g.clone())))
+        .collect();
+    for (plugin, error) in crate::highlight::load_plugin_grammars(&grammar_specs) {
+        host.failures.push((PathBuf::from(plugin), error));
+    }
 }
 
 /// Startup task: resolve queued inline misses through the host on the

@@ -162,12 +162,11 @@ fn main() {
         // Extension host: discover + compile plugins, snapshot the
         // fence-claim table for pure discovery contexts.
         {
-            let host = extensions::ExtensionHost::load(&settings::config_dir().join("plugins"));
+            let mut host = extensions::ExtensionHost::load(&settings::config_dir().join("plugins"));
+            extensions::refresh_tables(&mut host);
             for (dir, err) in host.failures() {
                 eprintln!("supermd: plugin failed: {}: {err}", dir.display());
             }
-            extensions::refresh_tables(&host);
-            let mut host = host;
             host.set_grants(startup_settings.plugin_grants.clone());
             if let Some(dir) = arg.as_ref().filter(|p| p.is_dir()) {
                 host.set_workspace_root(Some(dir.clone()));

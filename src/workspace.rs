@@ -1238,10 +1238,10 @@ impl Workspace {
         if let Some(tree) = &self.tree {
             host.set_workspace_root(Some(tree.root.clone()));
         }
+        crate::extensions::refresh_tables(&mut host);
         for (dir, err) in host.failures() {
             eprintln!("supermd: plugin failed: {}: {err}", dir.display());
         }
-        crate::extensions::refresh_tables(&host);
         let count = host.plugins().len();
         if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
             *state.0.lock().unwrap() = host;
