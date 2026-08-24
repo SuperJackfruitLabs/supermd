@@ -46,3 +46,15 @@ opt-level = 2
 # fix; drop this patch when upstream ships a compiling release.
 [patch.crates-io]
 merman-render = { path = "vendor/merman-render" }
+
+[package.metadata.deb]
+name = "supermd"
+section = "editors"
+copyright = "2026, SuperJackfruitLabs"
+extended-description = "A native, GPU-rendered Markdown editor. Hybrid WYSIWYG, live tables and mermaid diagrams, git diffs — plain CommonMark files on disk."
+assets = [
+    ["target/release/supermd", "usr/bin/", "755"],
+    ["assets/linux/supermd.desktop", "usr/share/applications/", "644"],
+    ["assets/linux/supermd-128.png", "usr/share/icons/hicolor/128x128/apps/supermd.png", "644"],
+    ["assets/linux/supermd-512.png", "usr/share/icons/hicolor/512x512/apps/supermd.png", "644"],
+]

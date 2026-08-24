@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SuperMD
+Comment=Markdown that gets out of the way
+Exec=supermd %F
+Icon=supermd
+Terminal=false
+Categories=Utility;TextEditor;Development;
+MimeType=text/markdown;text/plain;
+StartupWMClass=supermd
