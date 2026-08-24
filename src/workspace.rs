@@ -223,6 +223,8 @@ pub struct Workspace {
     /// Recents snapshot taken at launch (existing dirs only); the
     /// Open Recent menu indexes into this.
     startup_recents: Vec<PathBuf>,
+    /// Move-to-Applications offer (Some = banner visible with message).
+    install_banner: Option<SharedString>,
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
     sidebar_selected: usize,
@@ -281,6 +283,10 @@ impl Workspace {
                 .map(PathBuf::from)
                 .filter(|p| p.is_dir())
                 .collect(),
+            install_banner: std::env::current_exe()
+                .ok()
+                .filter(|exe| crate::install::needs_install(exe))
+                .map(|_| "SuperMD is running from the disk image.".into()),
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
@@ -1967,6 +1973,15 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
+            .on_drop(cx.listener(
+                |this, paths: &gpui::ExternalPaths, window, cx| {
+                    this.open_external_paths(paths.paths().to_vec(), window, cx);
+                },
+            ))
+            .drag_over::<gpui::ExternalPaths>(|style, _, _, cx| {
+                let t = theme(cx);
+                style.border_2().border_color(t.accent)
+            })
             .flex()
             .flex_row()
             .children(sidebar)
@@ -1980,6 +1995,63 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .child(titlebar)
+                    .children(self.install_banner.clone().map(|message| {
+                        div()
+                            .w_full()
+                            .flex_none()
+                            .px_3()
+                            .py(px(6.))
+                            .bg(t.panel_bg)
+                            .border_b_1()
+                            .border_color(t.border)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .text_size(px(12.))
+                            .child(div().flex_1().text_color(t.fg).child(message))
+                            .child(
+                                div()
+                                    .id("install-move")
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .bg(t.accent)
+                                    .text_color(t.bg)
+                                    .cursor_pointer()
+                                    .child("Move to Applications")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                        let result = std::env::current_exe()
+                                            .ok()
+                                            .and_then(|exe| crate::install::bundle_path(&exe))
+                                            .ok_or_else(|| "not running from an app bundle".to_string())
+                                            .and_then(|b| crate::install::move_to_applications(&b));
+                                        match result {
+                                            Ok(()) => cx.quit(),
+                                            Err(e) => {
+                                                this.install_banner =
+                                                    Some(format!("Couldn't move: {e}").into());
+                                                cx.notify();
+                                            }
+                                        }
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("install-later")
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_color(t.fg_muted)
+                                    .hover(|s| s.bg(t.hover_bg))
+                                    .child("Not now")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                        this.install_banner = None;
+                                        cx.notify();
+                                    })),
+                            )
+                    }))
                     .child(
                         div()
                             .flex_1()
