@@ -16,6 +16,7 @@ mod palette;
 mod platform;
 mod reader;
 mod search;
+mod catalog;
 mod seeding;
 mod search_ui;
 mod seti;

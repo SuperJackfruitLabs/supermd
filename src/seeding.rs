@@ -112,7 +112,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 fn manifest_version(dir: &Path) -> String {
     std::fs::read_to_string(dir.join("plugin.toml"))
         .ok()
-        .and_then(|src| src.parse::<toml::Value>().ok())
+        .and_then(|src| toml::from_str::<toml::Value>(&src).ok())
         .and_then(|v| v.get("version").and_then(|s| s.as_str()).map(str::to_string))
         .unwrap_or_else(|| "0.0.0".to_string())
 }
