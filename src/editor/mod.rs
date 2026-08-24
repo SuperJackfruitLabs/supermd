@@ -87,9 +87,25 @@ struct CachedLine {
     display: display::DisplayLine,
 }
 
+/// Read-only "Show Changes" state: the merged old+new document, its
+/// styling, and the change wash map. Lives beside the buffer — the
+/// buffer itself is never touched by diff mode.
+pub struct DiffState {
+    core: EditorCore,
+    spans: Vec<StyleSpan>,
+    line_kinds: Vec<LineKind>,
+    changes: Vec<crate::diff::Change>,
+    /// Code-mode gutter labels (new-file numbers, `-` on deleted lines).
+    gutter: Vec<String>,
+    missing: Option<crate::git::Baseline>,
+    adds: usize,
+    dels: usize,
+}
+
 pub struct Editor {
     core: EditorCore,
     provider: Provider,
+    diff: Option<DiffState>,
     spans: Vec<StyleSpan>,
     line_kinds: Vec<LineKind>,
     blocks: Vec<blocks::BlockInfo>,
@@ -149,6 +165,7 @@ impl Editor {
         let mut editor = Self {
             core,
             provider,
+            diff: None,
             spans: Vec::new(),
             line_kinds: Vec::new(),
             blocks: Vec::new(),
@@ -211,9 +228,97 @@ impl Editor {
         projection::project(&line_ranges, &self.blocks, self.core.selection.range())
     }
 
+    // ── diff mode ("Show Changes") ─────────────────────────────────────
+
+    pub fn diff_active(&self) -> bool {
+        self.diff.is_some()
+    }
+
+    /// Enter (or recompute) the read-only diff-vs-HEAD view.
+    pub fn enter_diff(&mut self, langs: &Languages, cx: &mut Context<Self>) {
+        let (doc, missing) = match crate::git::head_text(&self.path) {
+            crate::git::Baseline::Text(old) => {
+                (crate::diff::diff_doc(&old, &self.core.buffer.text()), None)
+            }
+            other => (crate::diff::DiffDoc::default(), Some(other)),
+        };
+        let (adds, dels) = crate::diff::counts(&doc);
+        let spans = match self.provider {
+            Provider::Markdown => spans::markdown_spans_highlighted(&doc.text, langs),
+            Provider::Code(lang) => spans::code_spans(&doc.text, lang, langs),
+            Provider::Plain => Vec::new(),
+        };
+        let line_kinds = spans::line_kinds(&doc.text, &spans);
+        let core = EditorCore::new(&doc.text);
+        let line_count = core.buffer.line_count();
+        let gutter = crate::diff::diff_gutter_labels(&doc);
+        self.diff = Some(DiffState {
+            core,
+            spans,
+            line_kinds,
+            changes: doc.changes,
+            gutter,
+            missing,
+            adds,
+            dels,
+        });
+        self.layout_cache.clear();
+        self.list_state.reset(line_count);
+        cx.notify();
+    }
+
+    pub fn exit_diff(&mut self, cx: &mut Context<Self>) {
+        if self.diff.take().is_some() {
+            self.layout_cache.clear();
+            self.list_state.reset(self.projection.len());
+            cx.notify();
+        }
+    }
+
+    /// Recompute the diff if it is showing (buffer reloaded from disk).
+    pub fn refresh_diff(&mut self, langs: &Languages, cx: &mut Context<Self>) {
+        if self.diff.is_some() {
+            self.enter_diff(langs, cx);
+        }
+    }
+
+    /// Buffer the view renders from: the merged diff doc in diff mode,
+    /// the real buffer otherwise.
+    fn view_buffer(&self) -> &buffer::Buffer {
+        match &self.diff {
+            Some(d) => &d.core.buffer,
+            None => &self.core.buffer,
+        }
+    }
+
+    fn view_spans(&self) -> &[StyleSpan] {
+        match &self.diff {
+            Some(d) => &d.spans,
+            None => &self.spans,
+        }
+    }
+
+    fn view_line_kinds(&self) -> &[LineKind] {
+        match &self.diff {
+            Some(d) => &d.line_kinds,
+            None => &self.line_kinds,
+        }
+    }
+
+    /// Code-mode gutter label for a line (diff-aware).
+    fn gutter_label(&self, ix: usize) -> String {
+        match &self.diff {
+            Some(d) => d.gutter.get(ix).cloned().unwrap_or_default(),
+            None => (ix + 1).to_string(),
+        }
+    }
+
     /// Recompute the projection for the current selection; reset the
     /// list only when the item structure actually changed.
     fn reproject(&mut self) {
+        if self.diff.is_some() {
+            return; // list is showing the diff doc, not the projection
+        }
         let items = self.compute_projection();
         if items != self.projection {
             self.projection = items;
@@ -243,6 +348,9 @@ impl Editor {
     }
 
     pub fn scroll_to_line(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.diff.is_some() {
+            return; // outline indices don't map to the merged diff doc
+        }
         let item = projection::item_of_line(&self.projection, ix);
         self.animate_scroll_to_item(item, cx);
     }
@@ -770,6 +878,9 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.diff.is_some() {
+            return; // diff view is read-only; merged offsets never touch the buffer
+        }
         // Checkbox toggle: a plain click on a ✓/○ glyph flips the source
         // without moving the cursor into the line.
         if !event.modifiers.shift {
@@ -920,7 +1031,7 @@ impl Editor {
         if self.is_code_mode() {
             return (t.code_size, FontWeight::NORMAL, t.mono_family.clone(), 1.55);
         }
-        match self.line_kinds.get(ix) {
+        match self.view_line_kinds().get(ix) {
             Some(LineKind::Heading(n)) => {
                 let weight = if *n <= 2 { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
                 (t.heading_size(*n), weight, t.body_family.clone(), 1.35)
@@ -954,8 +1065,8 @@ impl Editor {
 
     /// Source-space style attributes for one line, one entry per byte.
     fn line_attrs(&self, ix: usize, t: &Theme) -> (String, Vec<Attr>) {
-        let range = self.core.buffer.line_range(ix);
-        let text = self.core.buffer.line_text(ix);
+        let range = self.view_buffer().line_range(ix);
+        let text = self.view_buffer().line_text(ix);
         let (_, base_weight, family, _) = self.line_typography(ix, t);
 
         let default_attr = Attr {
@@ -968,7 +1079,7 @@ impl Editor {
             strike: false,
         };
         let mut attrs: Vec<Attr> = vec![default_attr; text.len()];
-        for span in &self.spans {
+        for span in self.view_spans() {
             let start = span.range.start.max(range.start);
             let end = span.range.end.min(range.end);
             if start >= end {
@@ -1013,6 +1124,33 @@ impl Editor {
             }
         }
 
+        // Diff washes paint over the style spans; deleted text also
+        // strikes through. (Find/IME overlays below use buffer offsets,
+        // so they are skipped in diff mode.)
+        if let Some(d) = &self.diff {
+            for c in &d.changes {
+                let start = c.range.start.max(range.start);
+                let end = c.range.end.min(range.end);
+                if start >= end {
+                    continue;
+                }
+                for a in &mut attrs[start - range.start..end - range.start] {
+                    match c.kind {
+                        crate::diff::ChangeKind::Added => {
+                            a.bg = Some(t.diff_added_bg);
+                            a.color = t.diff_added_fg;
+                        }
+                        crate::diff::ChangeKind::Deleted => {
+                            a.bg = Some(t.diff_deleted_bg);
+                            a.color = t.diff_deleted_fg;
+                            a.strike = true;
+                        }
+                    }
+                }
+            }
+            return (text, attrs);
+        }
+
         // Find matches get a background highlight; the active one stronger.
         if let Some(state) = &self.find {
             for (mi, m) in state.matches.iter().enumerate() {
@@ -1047,14 +1185,16 @@ impl Editor {
         ix: usize,
         t: &Theme,
     ) -> (SharedString, Vec<TextRun>, display::DisplayLine) {
-        let range = self.core.buffer.line_range(ix);
+        let range = self.view_buffer().line_range(ix);
         let (text, attrs) = self.line_attrs(ix, t);
-        let dl = display::display_line(
-            &text,
-            range.start,
-            &self.spans,
-            self.core.selection.range(),
-        );
+        // In diff mode nothing is "touched", so all syntax markers stay
+        // hidden — clean styled prose with the washes woven in.
+        let selection = if self.diff.is_some() {
+            usize::MAX..usize::MAX
+        } else {
+            self.core.selection.range()
+        };
+        let dl = display::display_line(&text, range.start, self.view_spans(), selection);
 
         let mut disp_attrs: Vec<Attr> = Vec::with_capacity(dl.text.len());
         for seg in &dl.segs {
@@ -1350,12 +1490,18 @@ impl gpui::Element for LineElement {
 
         let (selection, head_in_line) = {
             let editor = self.editor.read(cx);
-            let sel = editor.core.selection;
-            let head = sel.head;
-            (
-                sel.range(),
-                (head >= self.range.start && head <= self.range.end).then_some(head),
-            )
+            if editor.diff.is_some() {
+                // Read-only diff view: buffer selection offsets don't
+                // apply to the merged doc — no selection, no caret.
+                (usize::MAX..usize::MAX, None)
+            } else {
+                let sel = editor.core.selection;
+                let head = sel.head;
+                (
+                    sel.range(),
+                    (head >= self.range.start && head <= self.range.end).then_some(head),
+                )
+            }
         };
 
         // Selection quads, one per wrapped row the selection touches.
@@ -1446,7 +1592,10 @@ impl gpui::Element for LineElement {
         let (is_cursor_line, focus_handle) = {
             let editor = self.editor.read(cx);
             let cursor_line = editor.core.buffer.line_of_byte(editor.core.selection.head);
-            (cursor_line == self.line_ix, editor.focus_handle.clone())
+            (
+                cursor_line == self.line_ix && editor.diff.is_none(),
+                editor.focus_handle.clone(),
+            )
         };
         if is_cursor_line {
             window.handle_input(
@@ -1685,7 +1834,42 @@ impl Render for Editor {
             }
         };
 
-        let find_bar = self.find.as_ref().map(|state| {
+        let diffing = self.diff.is_some();
+        let diff_header = self.diff.as_ref().map(|d| {
+            div()
+                .h(px(34.))
+                .w_full()
+                .flex_none()
+                .bg(t.panel_bg)
+                .border_b_1()
+                .border_color(t.border)
+                .flex()
+                .flex_row()
+                .items_center()
+                .px_3()
+                .text_size(px(12.))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(t.fg)
+                        .child(SharedString::from(format!(
+                            "Changes vs HEAD · +{} −{}",
+                            d.adds, d.dels
+                        ))),
+                )
+                .child(div().text_color(t.fg_muted).child("esc to close"))
+        });
+        let diff_empty: Option<&'static str> = self.diff.as_ref().and_then(|d| {
+            use crate::git::Baseline;
+            match &d.missing {
+                Some(Baseline::NotInRepo) => Some("Not in a git repository."),
+                Some(Baseline::Untracked) => Some("Not tracked in git yet."),
+                Some(Baseline::Binary) => Some("No text baseline at HEAD."),
+                _ => d.changes.is_empty().then_some("No uncommitted changes."),
+            }
+        });
+
+        let find_bar = self.find.as_ref().filter(|_| !diffing).map(|state| {
             let total = state.matches.len();
             let current = if total == 0 { 0 } else { state.active + 1 };
             div()
@@ -1713,7 +1897,7 @@ impl Render for Editor {
         div()
             .size_full()
             .bg(t.bg)
-            .key_context("Editor")
+            .key_context(if diffing { "DiffView" } else { "Editor" })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::move_left))
             .on_action(cx.listener(Self::move_right))
@@ -1756,15 +1940,35 @@ impl Render for Editor {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
             .flex()
             .flex_col()
+            .children(diff_header)
             .children(find_bar)
-            .child(div().flex_1().min_h_0().relative().child(
+            .child(if let Some(msg) = diff_empty {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(13.))
+                    .text_color(t.fg_muted)
+                    .child(msg)
+                    .into_any_element()
+            } else {
+                div().flex_1().min_h_0().relative().child(
                 list(self.list_state.clone(), move |ix, _window, cx| {
                     let Some(editor_entity) = entity.upgrade() else {
                         return div().into_any_element();
                     };
                     let t = theme(cx);
-                    let item = editor_entity.read(cx).projection.get(ix).cloned();
-                    let item_count = editor_entity.read(cx).projection.len();
+                    let (item, item_count) = {
+                        let editor = editor_entity.read(cx);
+                        if editor.diff.is_some() {
+                            let n = editor.view_buffer().line_count();
+                            ((ix < n).then_some(projection::Item::Line(ix)), n)
+                        } else {
+                            (editor.projection.get(ix).cloned(), editor.projection.len())
+                        }
+                    };
                     let column = |inner: gpui::AnyElement| {
                         div()
                             .w_full()
@@ -1799,15 +2003,18 @@ impl Render for Editor {
                                 let (size_f, _, _, mult) = editor.line_typography(line_ix, &t);
                                 let (text, runs, dl) = editor.display_for_line(line_ix, &t);
                                 (
-                                    editor.core.buffer.line_range(line_ix),
+                                    editor.view_buffer().line_range(line_ix),
                                     text,
                                     runs,
                                     dl,
                                     px(size_f),
                                     px(size_f * mult),
-                                    matches!(editor.line_kinds.get(line_ix), Some(LineKind::Code)),
+                                    matches!(
+                                        editor.view_line_kinds().get(line_ix),
+                                        Some(LineKind::Code)
+                                    ),
                                     editor.is_code_mode(),
-                                    editor.core.buffer.line_count(),
+                                    editor.view_buffer().line_count(),
                                 )
                             };
                             let mouse_editor = editor_entity.clone();
@@ -1851,7 +2058,7 @@ impl Render for Editor {
                                             .line_height(relative(1.55 * t.code_size / (t.code_size - 2.)))
                                             .text_color(Hsla { a: 0.5, ..t.fg_muted })
                                             .child(SharedString::from(
-                                                (line_ix + 1).to_string(),
+                                                editor_entity.read(cx).gutter_label(line_ix),
                                             )),
                                     )
                                     .child(
@@ -1893,6 +2100,9 @@ impl Render for Editor {
                     }
                 })
                 .size_full(),
-            ).children(scrollbar))
+            )
+                .children(scrollbar)
+                .into_any_element()
+            })
     }
 }

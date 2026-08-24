@@ -81,6 +81,40 @@ fn emit_word_diff(doc: &mut DiffDoc, del: &str, ins: &str) {
     }
 }
 
+/// (added, deleted) change counts, for the diff header strip.
+pub fn counts(doc: &DiffDoc) -> (usize, usize) {
+    let added = doc.changes.iter().filter(|c| c.kind == ChangeKind::Added).count();
+    (added, doc.changes.len() - added)
+}
+
+/// Code-mode gutter labels for a merged doc: new-file line numbers,
+/// with `-` on lines that lie entirely inside a deleted change.
+pub fn diff_gutter_labels(doc: &DiffDoc) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut next = 1usize;
+    let mut pos = 0usize;
+    let bytes = doc.text.as_bytes();
+    while pos < bytes.len() {
+        let end = bytes[pos..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| pos + i + 1)
+            .unwrap_or(bytes.len());
+        let deleted = doc
+            .changes
+            .iter()
+            .any(|c| c.kind == ChangeKind::Deleted && c.range.start <= pos && end <= c.range.end);
+        if deleted {
+            labels.push("-".to_string());
+        } else {
+            labels.push(next.to_string());
+            next += 1;
+        }
+        pos = end;
+    }
+    labels
+}
+
 /// Merge adjacent same-kind changes so the map stays minimal.
 fn coalesce(changes: &mut Vec<Change>) {
     let mut out: Vec<Change> = Vec::with_capacity(changes.len());
@@ -153,6 +187,21 @@ mod tests {
         };
         assert_eq!(strip(ChangeKind::Deleted), new, "strip deleted == new for {old:?} -> {new:?}");
         assert_eq!(strip(ChangeKind::Added), old, "strip added == old for {old:?} -> {new:?}");
+    }
+
+    #[test]
+    fn diff_gutter_numbers_skip_deleted_lines() {
+        let doc = diff_doc("a\nb\nc\n", "a\nc\n"); // "b\n" deleted
+        assert_eq!(diff_gutter_labels(&doc), vec!["1", "-", "2"]);
+        let doc = diff_doc("a\nc\n", "a\nb\nc\n"); // "b\n" added
+        assert_eq!(diff_gutter_labels(&doc), vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn counts_tally_change_kinds() {
+        let d = diff_doc("a\nb\n", "a\nc\n");
+        assert_eq!(counts(&d), (1, 1));
+        assert_eq!(counts(&diff_doc("x\n", "x\n")), (0, 0));
     }
 
     #[test]

@@ -89,6 +89,8 @@ fn main() {
             KeyBinding::new("cmd-shift-o", ToggleOutline, None),
             KeyBinding::new("cmd-p", ToggleFinder, None),
             KeyBinding::new("cmd-e", TogglePreview, None),
+            KeyBinding::new("cmd-shift-d", workspace::ShowChanges, None),
+            KeyBinding::new("escape", workspace::ShowChanges, Some("DiffView")),
             KeyBinding::new("cmd-shift-f", ToggleFocusMode, None),
             KeyBinding::new("cmd-1", workspace::FocusSidebar, None),
             KeyBinding::new("cmd-/", workspace::ToggleShortcuts, None),
@@ -195,6 +197,7 @@ fn main() {
                 name: "View".into(),
                 items: vec![
                     MenuItem::action("Toggle Edit/Preview", TogglePreview),
+                    MenuItem::action("Show Changes", workspace::ShowChanges),
                     MenuItem::action("Focus Mode", ToggleFocusMode),
                     MenuItem::action("Theme…", workspace::ToggleThemePicker),
                     MenuItem::separator(),

@@ -29,6 +29,7 @@ actions!(
         ToggleOutline,
         ToggleFinder,
         TogglePreview,
+        ShowChanges,
         ToggleFocusMode,
         FocusSidebar,
         SidebarUp,
@@ -59,6 +60,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌘ P", "Go to file"),
             ("⌘ F", "Find in file"),
             ("⌘ E", "Toggle edit / preview"),
+            ("⌘ ⇧ D", "Show changes vs git HEAD"),
             ("⌘ ⇧ F", "Focus mode"),
             ("⌘ B", "Toggle sidebar"),
             ("⌘ ⇧ O", "Toggle outline"),
@@ -296,6 +298,7 @@ impl Workspace {
         if let Some(tree) = &mut self.tree {
             tree.refresh();
         }
+        let langs = languages(cx);
         for tab in &self.tabs {
             if let Tab::Editor { editor, .. } = tab {
                 let editor_path = editor.read(cx).path().to_path_buf();
@@ -308,6 +311,7 @@ impl Workspace {
                             changed,
                         ) {
                             editor.reload_from_disk(cx);
+                            editor.refresh_diff(&langs, cx);
                         } else if changed && editor.save.is_dirty() {
                             eprintln!(
                                 "supermd: {} changed on disk; keeping unsaved edits",
@@ -510,6 +514,29 @@ impl Workspace {
             let reader = cx.new(|_| Reader::from_source(title, &text, &langs));
             if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
                 *view = EditorView::Preview(reader);
+            }
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn show_changes(&mut self, _: &ShowChanges, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Tab::Editor { editor, view }) = self.tabs.get(self.active) else {
+            return;
+        };
+        let editor = editor.clone();
+        let leaving = matches!(view, EditorView::Diff);
+        if leaving {
+            editor.update(cx, |editor, cx| editor.exit_diff(cx));
+            if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
+                *view = EditorView::Edit;
+            }
+        } else {
+            editor.update(cx, |editor, cx| editor.flush(cx));
+            let langs = languages(cx);
+            editor.update(cx, |editor, cx| editor.enter_diff(&langs, cx));
+            if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
+                *view = EditorView::Diff;
             }
         }
         self.focus_active(window, cx);
@@ -1429,6 +1456,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::toggle_finder))
             .on_action(cx.listener(Self::toggle_preview))
+            .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::focus_sidebar))
             .on_action(cx.listener(Self::toggle_shortcuts))
