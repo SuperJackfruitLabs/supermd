@@ -29,7 +29,7 @@ pub struct Reader {
 }
 
 /// Language token for a file. Delegates to the central mapping.
-pub fn language_for_path(path: &Path) -> Option<&'static str> {
+pub fn language_for_path(path: &Path) -> Option<String> {
     crate::highlight::language_for_file(path)
 }
 

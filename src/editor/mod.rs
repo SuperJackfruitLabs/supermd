@@ -58,7 +58,7 @@ const PAGE_LINES: usize = 40;
 
 enum Provider {
     Markdown,
-    Code(&'static str),
+    Code(String),
     Plain,
 }
 
@@ -250,9 +250,9 @@ impl Editor {
 
     fn restyle(&mut self, langs: &Languages) {
         let text = self.core.buffer.text();
-        self.spans = match self.provider {
+        self.spans = match &self.provider {
             Provider::Markdown => spans::markdown_spans_highlighted(&text, langs),
-            Provider::Code(lang) => spans::code_spans(&text, lang, langs),
+            Provider::Code(lang) => spans::code_spans(&text, lang.as_str(), langs),
             Provider::Plain => Vec::new(),
         };
         // Plugin inline pass: cache hits become replacement spans;
@@ -314,9 +314,9 @@ impl Editor {
             other => (crate::diff::DiffDoc::default(), Some(other)),
         };
         let (adds, dels) = crate::diff::counts(&doc);
-        let spans = match self.provider {
+        let spans = match &self.provider {
             Provider::Markdown => spans::markdown_spans_highlighted(&doc.text, langs),
-            Provider::Code(lang) => spans::code_spans(&doc.text, lang, langs),
+            Provider::Code(lang) => spans::code_spans(&doc.text, lang.as_str(), langs),
             Provider::Plain => Vec::new(),
         };
         let line_kinds = spans::line_kinds(&doc.text, &spans);

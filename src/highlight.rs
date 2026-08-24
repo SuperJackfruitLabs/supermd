@@ -282,17 +282,23 @@ fn collect_spans(events: impl Iterator<Item = HighlightEvent>) -> Vec<(Range<usi
 }
 
 /// Language token (inkjet vocabulary) for a file, by exact filename
-/// first, then extension. Covers every language inkjet bundles plus the
-/// extras registry.
-pub fn language_for_file(path: &std::path::Path) -> Option<&'static str> {
+/// first, then extension (static table, then plugin grammar registry).
+pub fn language_for_file(path: &std::path::Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     match name {
-        "Dockerfile" | "dockerfile" | "Containerfile" => return Some("dockerfile"),
-        "Makefile" | "makefile" | "GNUmakefile" => return Some("make"),
-        "meson.build" => return Some("meson"),
+        "Dockerfile" | "dockerfile" | "Containerfile" => return Some("dockerfile".to_string()),
+        "Makefile" | "makefile" | "GNUmakefile" => return Some("make".to_string()),
+        "meson.build" => return Some("meson".to_string()),
         _ => {}
     }
     let ext = path.extension()?.to_str()?;
+    if let Some(known) = static_language_for_ext(ext) {
+        return Some(known.to_string());
+    }
+    plugin_grammar_for_extension(ext)
+}
+
+fn static_language_for_ext(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
         "js" | "mjs" | "cjs" => "javascript",
@@ -361,7 +367,8 @@ pub fn language_for_file(path: &std::path::Path) -> Option<&'static str> {
         "wast" => "wast",
         "mk" => "make",
         "xml" => "xml",
-        "graphql" | "gql" => "graphql",
+        // NOTE: no "graphql" here — it resolves through the plugin
+        // grammar registry (the graphql grammar ships as a plugin).
         _ => return None,
     })
 }
@@ -430,9 +437,22 @@ mod grammar_tests {
         let spans = Languages::new().highlight("rust", "fn main() { let x = 1; }");
         assert!(!spans.is_empty(), "builtin rust must still highlight");
 
-        // 4. reload with nothing clears resolution + spans
+        // 4. file resolution goes through the registry
+        let (plugin, dir, g) = graphql_spec();
+        load_plugin_grammars(&[(plugin, dir, g)]);
+        assert_eq!(
+            language_for_file(std::path::Path::new("schema.graphql")),
+            Some("graphql".to_string())
+        );
+        assert_eq!(
+            language_for_file(std::path::Path::new("q.gql")),
+            Some("graphql".to_string())
+        );
+
+        // 5. reload with nothing clears resolution + spans
         load_plugin_grammars(&[]);
         assert_eq!(plugin_grammar_for_extension("graphql"), None);
+        assert_eq!(language_for_file(std::path::Path::new("schema.graphql")), None);
         assert!(Languages::new().highlight("graphql", src).is_empty());
     }
 }
@@ -441,32 +461,32 @@ mod grammar_tests {
 mod mapping_tests {
     use std::path::Path;
 
-    fn f(p: &str) -> Option<&'static str> {
+    fn f(p: &str) -> Option<String> {
         super::language_for_file(Path::new(p))
     }
 
     #[test]
     fn maps_filenames_and_new_extensions() {
-        assert_eq!(f("Dockerfile"), Some("dockerfile"));
-        assert_eq!(f("Makefile"), Some("make"));
-        assert_eq!(f("meson.build"), Some("meson"));
-        assert_eq!(f("App.kt"), Some("kotlin"));
-        assert_eq!(f("sim.jl"), Some("julia"));
-        assert_eq!(f("core.clj"), Some("clojure"));
-        assert_eq!(f("theme.scss"), Some("scss"));
-        assert_eq!(f("main.tf"), Some("hcl"));
-        assert_eq!(f("shader.wgsl"), Some("wgsl"));
-        assert_eq!(f("view.m"), Some("objc"));
+        assert_eq!(f("Dockerfile").as_deref(), Some("dockerfile"));
+        assert_eq!(f("Makefile").as_deref(), Some("make"));
+        assert_eq!(f("meson.build").as_deref(), Some("meson"));
+        assert_eq!(f("App.kt").as_deref(), Some("kotlin"));
+        assert_eq!(f("sim.jl").as_deref(), Some("julia"));
+        assert_eq!(f("core.clj").as_deref(), Some("clojure"));
+        assert_eq!(f("theme.scss").as_deref(), Some("scss"));
+        assert_eq!(f("main.tf").as_deref(), Some("hcl"));
+        assert_eq!(f("shader.wgsl").as_deref(), Some("wgsl"));
+        assert_eq!(f("view.m").as_deref(), Some("objc"));
         assert_eq!(f("x.fs"), None); // F# vs Forth ambiguity
         assert_eq!(f("noext"), None);
     }
 
     #[test]
     fn legacy_extensions_still_map() {
-        assert_eq!(f("main.rs"), Some("rust"));
-        assert_eq!(f("app.tsx"), Some("tsx"));
-        assert_eq!(f("q.sql"), Some("sql"));
-        assert_eq!(f("conf.yaml"), Some("yaml"));
+        assert_eq!(f("main.rs").as_deref(), Some("rust"));
+        assert_eq!(f("app.tsx").as_deref(), Some("tsx"));
+        assert_eq!(f("q.sql").as_deref(), Some("sql"));
+        assert_eq!(f("conf.yaml").as_deref(), Some("yaml"));
     }
 
     #[test]
