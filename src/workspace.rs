@@ -949,6 +949,15 @@ impl Workspace {
                         title: format!("Format: {name}"),
                     });
                 }
+                for p in host.plugins() {
+                    for e in &p.exports {
+                        entries.push(crate::palette::PaletteEntry {
+                            plugin: p.name.clone(),
+                            id: format!("__export:{}", e.id),
+                            title: format!("Export: {}", e.name),
+                        });
+                    }
+                }
                 let failures = host
                     .failures()
                     .iter()
@@ -1048,6 +1057,45 @@ impl Workspace {
             .detach();
             return;
         }
+        if let Some(format) = id.strip_prefix("__export:") {
+            let format = format.to_string();
+            let plugin_bg = plugin.clone();
+            let theme =
+                crate::diagram::DiagramTheme::from_theme(&crate::theme::theme(cx));
+            let stem = editor
+                .read(cx)
+                .path()
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "export".to_string());
+            let extension = state
+                .0
+                .lock()
+                .unwrap()
+                .plugins()
+                .iter()
+                .find(|p| p.name == plugin)
+                .and_then(|p| {
+                    p.exports.iter().find(|e| e.id == format).map(|e| e.extension.clone())
+                })
+                .unwrap_or_else(|| "txt".to_string());
+            let run = cx.background_executor().spawn(async move {
+                host.lock().unwrap().export_document(&plugin_bg, &document, &format, &theme)
+            });
+            cx.spawn(async move |this, cx| {
+                let result = run.await;
+                this.update(cx, |this, cx| match result {
+                    Ok(files) => match crate::extensions::validate_export_paths(&files) {
+                        Ok(()) => this.finish_export(files, stem, extension, cx),
+                        Err(e) => this.show_command_error(e, cx),
+                    },
+                    Err(e) => this.handle_plugin_error(plugin.clone(), e, cx),
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         let plugin_bg = plugin.clone();
         let run = cx.background_executor().spawn(async move {
             host.lock().unwrap().run_command(&plugin_bg, &id, &document, selection)
@@ -1063,6 +1111,59 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// The plugin produced export bytes; the user picks where they
+    /// land — a save dialog for one file, a directory for several.
+    fn finish_export(
+        &mut self,
+        files: Vec<(String, Vec<u8>)>,
+        stem: String,
+        extension: String,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::extensions::{write_export, ExportDest};
+        if files.len() == 1 {
+            let rx = cx.prompt_for_new_path(
+                &crate::platform::home_dir(),
+                Some(&format!("{stem}.{extension}")),
+            );
+            cx.spawn(async move |this, cx| {
+                if let Ok(Ok(Some(path))) = rx.await {
+                    let result = write_export(&files, &ExportDest::File(path));
+                    this.update(cx, |this, cx| {
+                        this.show_command_error(
+                            result.err().unwrap_or_else(|| "Exported".to_string()),
+                            cx,
+                        );
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        } else {
+            let rx = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: None,
+            });
+            cx.spawn(async move |this, cx| {
+                if let Ok(Ok(Some(paths))) = rx.await {
+                    if let Some(dir) = paths.into_iter().next() {
+                        let result = write_export(&files, &ExportDest::Dir(dir));
+                        this.update(cx, |this, cx| {
+                            this.show_command_error(
+                                result.err().unwrap_or_else(|| "Exported".to_string()),
+                                cx,
+                            );
+                        })
+                        .ok();
+                    }
+                }
+            })
+            .detach();
+        }
     }
 
     /// Consent-shaped errors raise the Allow/Deny banner; everything
