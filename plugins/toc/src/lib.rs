@@ -1,6 +1,6 @@
 //! Table-of-contents plugin: pure text logic + WIT exports.
 
-wit_bindgen::generate!({ path: "../wit", world: "extension" });
+wit_bindgen::generate!({ path: "../wit-v4", world: "extension" });
 use supermd::extension::types as t;
 
 /// GitHub-style slug: lowercase, alphanumerics kept, spaces → '-'.
@@ -70,6 +70,13 @@ pub fn update_between_markers(document: &str) -> Result<String, String> {
     ))
 }
 
+/// Save-hook body: refresh the markers when present AND stale;
+/// None = leave the save untouched.
+pub fn save_hook(document: &str) -> Option<String> {
+    let updated = update_between_markers(document).ok()?;
+    (updated != document).then_some(updated)
+}
+
 struct Plugin;
 
 impl Guest for Plugin {
@@ -85,6 +92,38 @@ impl Guest for Plugin {
             }
             other => Err(format!("unknown command '{other}'")),
         }
+    }
+
+    fn render_inline(_: String, _: String) -> Result<String, String> {
+        Err("unused".into())
+    }
+
+    fn format_document(d: String) -> Result<String, String> {
+        Ok(d)
+    }
+
+    fn process_paste(_: String) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    fn export_document(_: String, _: String, _: t::Theme) -> Result<Vec<ExportFile>, String> {
+        Err("unused".into())
+    }
+
+    fn render_view(_: String, _: String) -> Result<String, String> {
+        Err("unused".into())
+    }
+
+    fn status_text(_: String) -> Result<String, String> {
+        Err("unused".into())
+    }
+
+    fn render_template(_: String, _: TemplateContext) -> Result<TemplateFile, String> {
+        Err("unused".into())
+    }
+
+    fn on_save(_path: String, document: String) -> Result<Option<String>, String> {
+        Ok(save_hook(&document))
     }
 }
 
@@ -114,5 +153,16 @@ mod tests {
     fn update_without_markers_errs_with_guidance() {
         let e = update_between_markers("# A\n").unwrap_err();
         assert!(e.contains("<!-- toc -->"), "{e}");
+    }
+
+    #[test]
+    fn save_hook_refreshes_markers_or_stays_silent() {
+        let doc = "# A\n<!-- toc -->\nstale\n<!-- /toc -->\n";
+        let out = save_hook(doc).expect("markers present → Some");
+        assert!(out.contains("- [A](#a)"), "{out}");
+        assert!(!out.contains("stale"));
+        assert_eq!(save_hook("# A\nno markers\n"), None);
+        // already fresh → None (no churn on every save)
+        assert_eq!(save_hook(&out), None);
     }
 }

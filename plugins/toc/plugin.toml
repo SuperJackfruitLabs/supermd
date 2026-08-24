@@ -2,6 +2,7 @@ name = "toc"
 version = "0.1.0"
 description = "Table of contents: insert at cursor or update between <!-- toc --> markers"
 authors = ["SuperJackfruitLabs"]
+hooks = ["save"]
 
 [[commands]]
 id = "toc.insert"

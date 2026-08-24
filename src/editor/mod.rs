@@ -147,6 +147,20 @@ pub enum EditorEvent {
 
 impl gpui::EventEmitter<EditorEvent> for Editor {}
 
+/// Run the save-hook chain: each plugin sees the previous result;
+/// Err/None leave the text unchanged for the next.
+fn chain_save_hooks(
+    text: String,
+    path: &str,
+    plugins: &[String],
+    mut call: impl FnMut(&str, &str, &str) -> Result<Option<String>, String>,
+) -> String {
+    plugins.iter().fold(text, |acc, plugin| match call(plugin, path, &acc) {
+        Ok(Some(next)) => next,
+        _ => acc,
+    })
+}
+
 /// Compute the enriched document's replacement range, or None when the
 /// document changed since the paste snapshot (the enrichment is then
 /// forfeited — recorded honest limit).
@@ -556,8 +570,34 @@ impl Editor {
         }
     }
 
+    /// Always-on pre-save transforms (hooks = ["save"]), after the
+    /// optional formatter. The flush path is synchronous on the main
+    /// thread, so the buffer cannot move between snapshot and apply —
+    /// the same guarantee the formatter relies on.
+    fn run_save_hooks(&mut self, cx: &mut Context<Self>) {
+        let plugins = crate::extensions::hook_plugins();
+        if plugins.is_empty() {
+            return;
+        }
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let snapshot = self.core.buffer.text();
+        let path = self.path.to_string_lossy().into_owned();
+        let result = chain_save_hooks(snapshot.clone(), &path, &plugins, |p, path, doc| {
+            state.0.lock().unwrap().on_save(p, path, doc)
+        });
+        if result != snapshot {
+            self.apply_command_output(
+                &crate::extensions::CommandOutput::ReplaceDocument(result),
+                cx,
+            );
+        }
+    }
+
     pub fn flush(&mut self, cx: &mut Context<Self>) {
         self.maybe_format_before_save(cx);
+        self.run_save_hooks(cx);
         if !self.save.take_flush_now() {
             return;
         }
@@ -1508,6 +1548,24 @@ fn decoration_overlay(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::chain_save_hooks;
+
+    #[test]
+    fn hooks_chain_in_order_and_skip_failures() {
+        let plugins = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let out = chain_save_hooks("x".into(), "f.md", &plugins, |p, _, doc| match p {
+            "a" => Ok(Some(format!("{doc}a"))),
+            "b" => Err("boom".into()),
+            _ => Ok(Some(format!("{doc}c"))),
+        });
+        assert_eq!(out, "xac");
+        let none = chain_save_hooks("x".into(), "f.md", &plugins, |_, _, _| Ok(None));
+        assert_eq!(none, "x");
+    }
 }
 
 #[cfg(test)]
