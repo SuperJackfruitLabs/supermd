@@ -14,6 +14,7 @@ mod settings;
 #[cfg(test)]
 mod seti_tests;
 mod theme;
+mod update;
 mod view;
 mod workspace;
 

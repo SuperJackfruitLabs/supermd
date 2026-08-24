@@ -56,6 +56,8 @@ This very table is a live widget now — click a row to edit its raw pipes.
 - [x] Click these checkboxes to toggle them — ⌘Z undoes
 - [ ] Try ⌘F to find, ⌘N for a new note, and edit a file in another app to watch it reload
 - [ ] In a git repo, hit ⌘⇧D to see what you've changed since the last commit
+- [ ] ⌘⇧F searches the whole workspace (focus mode moved to ⌃⌘F)
+- [ ] Arrow through the sidebar — files preview in one italic tab; Enter pins them
 
 ---
 

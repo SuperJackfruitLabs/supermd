@@ -19,10 +19,16 @@ Built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   render inline while you edit; touch them and they dissolve back into
   raw source. Code fences read as clean panels with tree-sitter
   highlighting.
-- **A real workspace** — folder sidebar with Seti UI file icons, tabs,
-  outline panel, fuzzy file finder (⌘P), find in file (⌘F), pretty
-  preview toggle (⌘E), image viewer tabs, light/dark following the
-  system.
+- **A real workspace** — folder sidebar with Seti UI file icons
+  (gitignore-aware: no `node_modules`/`target` noise), tabs with
+  VS Code-style preview behavior (arrow through files in the sidebar,
+  pin with Enter or a double-click), outline panel, fuzzy file finder
+  (⌘P, nucleo-scored with match highlighting), find in file (⌘F),
+  pretty preview toggle (⌘E), image viewer tabs, light/dark following
+  the system.
+- **Search in workspace** — ⌘⇧F streams ripgrep-powered results into a
+  two-pane overlay: matches grouped by file, live preview centered on
+  the hit, Enter jumps straight to the line.
 - **78 languages highlighted** via tree-sitter (inkjet + Helix
   queries, plus an extras registry), in fenced blocks and standalone
   files alike. Code files get a real code editor: monospace, full
@@ -31,12 +37,16 @@ Built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   word-level marks rendered in the editor's own typography (added words
   on a green wash, deleted words struck through in red, inline in the
   flow). Code files get line diffs with a diff-aware gutter; modified
-  files get a dot in the sidebar. Read-only — SuperMD never writes to
-  your repo.
+  files get a dot in the sidebar. Pure-Rust git (gix), read-only —
+  SuperMD never writes to your repo.
 - **Themes** — eight built-in (Jackfruit ×2, Paper, Graphite,
   Solarized ×2, Nord, Gruvbox Dark), live picker on ⌘T, custom themes
   as TOML files in `~/.supermd/themes/`. Your light and dark picks
   follow the system appearance automatically.
+- **Update aware** — a quiet launch-time check against GitHub releases
+  shows an "update available" pill in the titlebar when a newer version
+  ships; clicking opens the download page. Nothing phones home beyond
+  that one request, and failures are silent.
 - **Safe by default** — autosave with atomic writes, per-session
   backups in `~/.supermd/backups`, external-change detection that never
   silently clobbers anything, and live reload of clean buffers when

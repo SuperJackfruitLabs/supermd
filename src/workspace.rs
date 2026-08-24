@@ -200,6 +200,8 @@ pub struct Workspace {
     search: Option<(Entity<crate::search_ui::SearchOverlay>, gpui::Subscription)>,
     /// Index of the transient preview tab (at most one; italic title).
     preview_tab: Option<usize>,
+    /// Newer released version tag, when the launch check found one.
+    update_available: Option<SharedString>,
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
     sidebar_selected: usize,
@@ -250,6 +252,7 @@ impl Workspace {
             finder: None,
             search: None,
             preview_tab: None,
+            update_available: None,
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
@@ -262,6 +265,25 @@ impl Workspace {
             _watcher: None,
         };
         workspace.refresh_git_status();
+
+        // One quiet update check per launch; failures are silent.
+        cx.spawn(async move |this, cx| {
+            let tag = cx
+                .background_executor()
+                .spawn(async { crate::update::fetch_latest_tag() })
+                .await;
+            if let Some(tag) = tag {
+                if crate::update::is_newer(env!("CARGO_PKG_VERSION"), &tag) {
+                    this.update(cx, |this, cx| {
+                        this.update_available = Some(SharedString::from(tag));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+
         workspace
     }
 
@@ -1536,6 +1558,32 @@ impl Workspace {
                     .h_full()
                     .window_control_area(gpui::WindowControlArea::Drag),
             )
+            .when_some(self.update_available.clone(), |d, tag| {
+                d.child(
+                    div()
+                        .h_full()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .pr_2()
+                        .child(
+                            div()
+                                .id("update-pill")
+                                .px_2()
+                                .py(px(2.))
+                                .rounded_full()
+                                .bg(t.hover_bg)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(t.selected_bg))
+                                .text_size(px(11.))
+                                .text_color(t.accent)
+                                .child(SharedString::from(format!("{tag} available")))
+                                .on_click(|_: &ClickEvent, _, cx| {
+                                    cx.open_url(crate::update::RELEASES_URL);
+                                }),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
