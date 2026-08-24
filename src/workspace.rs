@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::editor::Editor;
+use crate::editor::EditorEvent;
 use crate::files::FileTree;
 use crate::seti::{self, SetiColor};
 use crate::theme::Theme;
@@ -237,8 +238,9 @@ pub struct Workspace {
     palette: Option<(Entity<crate::palette::Palette>, gpui::Subscription)>,
     /// Transient plugin-command error, auto-cleared.
     command_error: Option<SharedString>,
-    /// Plugin awaiting a workspace-read consent decision.
-    consent_request: Option<String>,
+    /// (plugin, capability) awaiting a consent decision; capability is
+    /// "workspace-read" or "net:<domain>".
+    consent_request: Option<(String, String)>,
     /// Index of the transient preview tab (at most one; italic title).
     preview_tab: Option<usize>,
     /// Newer released version tag, when the launch check found one.
@@ -263,6 +265,25 @@ pub struct Workspace {
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
+/// Create an editor and subscribe the workspace to its events
+/// (consent requests raised by background enrichment).
+fn make_editor(
+    path: &Path,
+    text: String,
+    langs: &crate::highlight::Languages,
+    cx: &mut Context<Workspace>,
+) -> Entity<Editor> {
+    let editor = cx.new(|cx| Editor::from_text(path, text, langs, cx));
+    cx.subscribe(&editor, |this, _editor, event, cx| match event {
+        EditorEvent::ConsentNeeded { plugin, cap } => {
+            this.consent_request = Some((plugin.clone(), cap.clone()));
+            cx.notify();
+        }
+    })
+    .detach();
+    editor
+}
+
 impl Workspace {
     pub fn new(arg: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut tree = None;
@@ -276,7 +297,7 @@ impl Workspace {
             Some(path) => match Editor::read_file(&path) {
                 Ok(text) => {
                     let langs = languages(cx);
-                    let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
+                    let editor = make_editor(&path, text, &langs, cx);
                     tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 }
                 Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
@@ -289,7 +310,7 @@ impl Workspace {
                 match Editor::read_file(&path) {
                     Ok(text) => {
                         let langs = languages(cx);
-                        let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
+                        let editor = make_editor(&path, text, &langs, cx);
                         tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                     }
                     Err(_) => {
@@ -628,7 +649,7 @@ impl Workspace {
                 Ok(text) => {
                     let langs = languages(cx);
                     let path_buf = path.to_path_buf();
-                    let editor = cx.new(|cx| Editor::from_text(&path_buf, text, &langs, cx));
+                    let editor = make_editor(&path_buf, text, &langs, cx);
                     Tab::Editor { editor, view: EditorView::Edit }
                 }
                 Err(err) => {
@@ -712,7 +733,7 @@ impl Workspace {
                 }
                 let langs = languages(cx);
                 let path = path.to_path_buf();
-                let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
+                let editor = make_editor(&path, text, &langs, cx);
                 self.tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 self.active = self.tabs.len() - 1;
                 self.focus_active(window, cx);
@@ -1170,7 +1191,10 @@ impl Workspace {
     /// else is a transient strip.
     fn handle_plugin_error(&mut self, plugin: String, error: String, cx: &mut Context<Self>) {
         if error.contains("awaiting consent") {
-            self.consent_request = Some(plugin);
+            self.consent_request = Some((plugin, "workspace-read".to_string()));
+            cx.notify();
+        } else if let Some(domain) = error.split("consent required: ").nth(1) {
+            self.consent_request = Some((plugin, format!("net:{}", domain.trim())));
             cx.notify();
         } else {
             self.show_command_error(error, cx);
@@ -1178,20 +1202,23 @@ impl Workspace {
     }
 
     fn resolve_consent(&mut self, allow: bool, cx: &mut Context<Self>) {
-        let Some(plugin) = self.consent_request.take() else {
+        let Some((plugin, cap)) = self.consent_request.take() else {
             return;
         };
         let dir = crate::settings::config_dir();
         let mut settings = crate::settings::load(&dir);
-        let grant = if allow { "workspace-read" } else { "denied:workspace-read" };
-        settings
-            .plugin_grants
-            .entry(plugin)
-            .or_default()
-            .push(grant.to_string());
+        let grant = if allow { cap.clone() } else { format!("denied:{cap}") };
+        settings.plugin_grants.entry(plugin).or_default().push(grant);
         let _ = crate::settings::save(&dir, &settings);
         if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
             state.0.lock().unwrap().set_grants(settings.plugin_grants.clone());
+        }
+        if allow && cap.starts_with("net:") {
+            // Retry the enrichment that raised the banner.
+            if let Some(Tab::Editor { editor, .. }) = self.tabs.get(self.active) {
+                editor.clone().update(cx, |editor, cx| editor.retry_enrich(cx));
+                return;
+            }
         }
         self.show_command_error(
             if allow {
@@ -2717,8 +2744,13 @@ impl Render for Workspace {
                         ),
                 )
             })
-            .when_some(self.consent_request.clone(), |root, plugin| {
+            .when_some(self.consent_request.clone(), |root, (plugin, cap)| {
                 let t = theme(cx);
+                let msg = if let Some(domain) = cap.strip_prefix("net:") {
+                    format!("Plugin \"{plugin}\" wants to access {domain}")
+                } else {
+                    format!("Plugin \"{plugin}\" wants to read files in this workspace")
+                };
                 root.child(
                     div()
                         .absolute()
@@ -2741,9 +2773,7 @@ impl Render for Workspace {
                                 .items_center()
                                 .gap_3()
                                 .text_size(px(12.))
-                                .child(div().text_color(t.fg).child(SharedString::from(format!(
-                                    "Plugin \"{plugin}\" wants to read files in this workspace"
-                                ))))
+                                .child(div().text_color(t.fg).child(SharedString::from(msg)))
                                 .child(
                                     div()
                                         .id("consent-allow")

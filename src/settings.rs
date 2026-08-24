@@ -106,6 +106,22 @@ mod tests {
     }
 
     #[test]
+    fn net_domain_grants_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        s.plugin_grants.insert(
+            "url-title".into(),
+            vec!["net:en.wikipedia.org".into(), "denied:net:evil.com".into()],
+        );
+        save(dir.path(), &s).unwrap();
+        let s2 = load(dir.path());
+        assert_eq!(
+            s2.plugin_grants["url-title"],
+            ["net:en.wikipedia.org", "denied:net:evil.com"]
+        );
+    }
+
+    #[test]
     fn note_workspace_dedupes_and_caps() {
         let mut s = Settings::default();
         assert!(s.reopen_last);

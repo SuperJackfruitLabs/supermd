@@ -127,6 +127,43 @@ pub struct Editor {
     find: Option<FindState>,
     scrollbar_dragging: bool,
     scroll_anim: Option<gpui::Task<()>>,
+    /// A paste awaiting (or retrying) net enrichment.
+    pending_enrich: Option<PendingEnrich>,
+}
+
+/// Snapshot taken right after a paste lands, so a background enricher
+/// can replace the pasted range iff the document has not moved.
+struct PendingEnrich {
+    range: Range<usize>,
+    snapshot: String,
+    pasted: String,
+}
+
+pub enum EditorEvent {
+    /// A net-capable enricher needs a per-domain grant
+    /// (cap is "net:<domain>").
+    ConsentNeeded { plugin: String, cap: String },
+}
+
+impl gpui::EventEmitter<EditorEvent> for Editor {}
+
+/// Compute the enriched document's replacement range, or None when the
+/// document changed since the paste snapshot (the enrichment is then
+/// forfeited — recorded honest limit).
+fn enrich_plan(
+    current: &str,
+    pasted: Range<usize>,
+    snapshot: &str,
+    replacement: &str,
+) -> Option<(String, Range<usize>)> {
+    if current != snapshot {
+        return None;
+    }
+    let mut out = String::with_capacity(current.len());
+    out.push_str(&current[..pasted.start]);
+    out.push_str(replacement);
+    out.push_str(&current[pasted.end..]);
+    Some((out, pasted.start..pasted.start + replacement.len()))
 }
 
 /// One backup registry per app session, shared by all editors.
@@ -189,6 +226,7 @@ impl Editor {
             find: None,
             scrollbar_dragging: false,
             scroll_anim: None,
+            pending_enrich: None,
         };
         editor.restyle(langs);
         editor
@@ -803,7 +841,86 @@ impl Editor {
                 }
             }
             self.insert_str(&out, cx);
+            // Net-capable paste plugins run asynchronously after the
+            // paste lands — a network call must never block the UI.
+            if !crate::extensions::enrich_plugins().is_empty() {
+                let head = self.core.selection.head;
+                self.pending_enrich = Some(PendingEnrich {
+                    range: head - out.len()..head,
+                    snapshot: self.core.buffer.text(),
+                    pasted: out.clone(),
+                });
+                self.start_enrich(cx);
+            }
         }
+    }
+
+    /// Run net-capable paste plugins in the background; first Some
+    /// wins. A consent-shaped failure keeps `pending_enrich` so the
+    /// workspace can retry after the grant.
+    fn start_enrich(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_enrich.as_ref() else {
+            return;
+        };
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let host = state.0.clone();
+        let text = pending.pasted.clone();
+        let task = cx.background_executor().spawn(async move {
+            let mut consent: Option<(String, String)> = None;
+            for plugin in crate::extensions::enrich_plugins() {
+                match host.lock().unwrap().process_paste(&plugin, &text) {
+                    Ok(Some(replacement)) => return Ok(Some(replacement)),
+                    Ok(None) => {}
+                    Err(e) => {
+                        if let Some(domain) = e.split("consent required: ").nth(1) {
+                            consent = Some((plugin, format!("net:{}", domain.trim())));
+                        }
+                        // other errors: enrichment is best-effort
+                    }
+                }
+            }
+            match consent {
+                Some(c) => Err(c),
+                None => Ok(None),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| match result {
+                Ok(Some(replacement)) => this.apply_enrichment(&replacement, cx),
+                Ok(None) => this.pending_enrich = None,
+                Err((plugin, cap)) => {
+                    cx.emit(EditorEvent::ConsentNeeded { plugin, cap });
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn apply_enrichment(&mut self, replacement: &str, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_enrich.take() else {
+            return;
+        };
+        let current = self.core.buffer.text();
+        if enrich_plan(&current, pending.range.clone(), &pending.snapshot, replacement)
+            .is_none()
+        {
+            return; // document moved; forfeit
+        }
+        self.core.break_undo_group();
+        self.core.selection =
+            Selection { anchor: pending.range.start, head: pending.range.end };
+        self.core.insert(replacement, Instant::now());
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    /// Called by the workspace after a net grant lands.
+    pub fn retry_enrich(&mut self, cx: &mut Context<Self>) {
+        self.start_enrich(cx);
     }
 
     fn save_now(&mut self, _: &SaveNow, _: &mut Window, cx: &mut Context<Self>) {
@@ -1391,6 +1508,21 @@ fn decoration_overlay(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod enrich_tests {
+    use super::enrich_plan;
+
+    #[test]
+    fn enrichment_applies_only_when_snapshot_matches() {
+        assert_eq!(
+            enrich_plan("abc URL def", 4..7, "abc URL def", "[T](URL)"),
+            Some(("abc [T](URL) def".to_string(), 4..12))
+        );
+        // document moved since the paste → discard
+        assert_eq!(enrich_plan("abc URL defX", 4..7, "abc URL def", "[T](URL)"), None);
+    }
 }
 
 #[cfg(test)]
