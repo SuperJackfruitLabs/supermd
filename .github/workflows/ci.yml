@@ -13,7 +13,7 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -33,7 +33,7 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -51,14 +51,16 @@ jobs:
         # Whole project, no exclusions. The residue is documented at each
         # site: OS dialogs the headless test platform leaves unimplemented,
         # network fetches, and the live window bootstrap in main's run().
+        # --fail-under-lines is the enforcement: CI fails if whole-project
+        # line coverage drops below 90%.
         run: |
-          cargo llvm-cov --json --summary-only > coverage.json
+          cargo llvm-cov --json --summary-only --fail-under-lines 90 > coverage.json
           PCT=$(jq -r '.data[0].totals.lines.percent | . * 10 | round / 10' coverage.json)
           echo "PCT=$PCT" >> "$GITHUB_ENV"
           echo "### Test coverage: ${PCT}% (lines)" >> "$GITHUB_STEP_SUMMARY"
       - name: Update coverage badge
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@v1.9.0
         with:
           auth: ${{ secrets.GIST_SECRET }}
           gistID: 9fb5226b83eda4ae8cb0568e7bc7755f
