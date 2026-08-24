@@ -1,5 +1,7 @@
 name = "word-count"
 version = "0.1.0"
+description = "Word count and reading time in the status strip"
+authors = ["SuperJackfruitLabs"]
 
 [[widgets]]
 id = "words"

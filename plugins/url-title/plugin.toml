@@ -1,4 +1,6 @@
 name = "url-title"
 version = "0.1.0"
+description = "Pasted links gain their page title (asks per-site consent)"
+authors = ["SuperJackfruitLabs"]
 paste = true
 capabilities = ["net"]

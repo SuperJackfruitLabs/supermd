@@ -1,5 +1,7 @@
 name = "csv-view"
 version = "0.1.0"
+description = "Open CSV/TSV files as rendered tables"
+authors = ["SuperJackfruitLabs"]
 
 [[viewers]]
 extensions = ["csv", "tsv"]

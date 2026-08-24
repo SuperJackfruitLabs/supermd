@@ -1,6 +1,6 @@
 # Plugins
 
-SuperMD is extensible with sandboxed WebAssembly plugins. Twelve ship with the project — Graphviz diagrams, emoji shortcodes, a CSV viewer, an HTML exporter, daily-note templates, and more — and anyone can [write their own](writing-plugins.md).
+SuperMD is extensible with sandboxed WebAssembly plugins. Eleven ship with the project — [listed below](#the-bundled-plugins) — and anyone can [write their own](writing-plugins.md).
 
 ## What plugins can add
 
@@ -15,6 +15,24 @@ SuperMD is extensible with sandboxed WebAssembly plugins. Twelve ship with the p
 - **Templates** — "New: Daily Note" creates today's journal file in your workspace.
 - **Save hooks** — the table-of-contents plugin refreshes its markers every time you save.
 - **Syntax highlighting** — new languages for fences and files (GraphQL ships this way).
+
+## The bundled plugins
+
+| Plugin | What it does |
+| ------ | ------------ |
+| **dot** | Renders ` ```dot ` and ` ```graphviz ` fences as themed diagrams (pure Rust, no Graphviz install needed) |
+| **toc** | *Insert Table of Contents* / *Update Table of Contents* palette commands, and auto-refreshes `<!-- toc -->` markers on every save |
+| **emoji** | Renders `:tada:`-style shortcodes as emoji inline (1,900+ codes); the raw text reveals when your cursor touches it |
+| **tidy** | *Format: tidy* — smart quotes and dashes, collapses extra blank lines, trims trailing whitespace; also converts pasted CSV/TSV into a Markdown table |
+| **todo-marks** | Highlights TODO, FIXME, and NOTE in prose — a manifest-only plugin with no code at all |
+| **url-title** | Paste a bare `https://` link and it becomes `[Page Title](url)` — asks consent per website, applied only if you haven't kept typing |
+| **html-export** | *Export: HTML* — your document as a single self-contained HTML file, styled with your current theme |
+| **word-count** | Word count and reading time in the editor's status corner |
+| **csv-view** | Opens `.csv` / `.tsv` files as rendered tables; **⌘ E** switches to the raw text |
+| **daily-note** | *New: Daily Note* — creates (or reopens) `journal/<today>.md` in your workspace |
+| **graphql** | Syntax highlighting for ` ```graphql ` fences and `.graphql` / `.gql` files — a [grammar plugin](grammars.md) |
+
+These live in [`plugins/`](https://github.com/SuperJackfruitLabs/supermd/tree/master/plugins) in the repo — each one doubles as a working example for the surface it uses.
 
 ## Installing a plugin
 
