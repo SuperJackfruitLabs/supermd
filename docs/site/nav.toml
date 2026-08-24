@@ -4,3 +4,28 @@
 file = "index.md"
 title = "Getting Started"
 group = "Using SuperMD"
+
+[[pages]]
+file = "editing.md"
+title = "Editing"
+group = "Using SuperMD"
+
+[[pages]]
+file = "shortcuts.md"
+title = "Keyboard Shortcuts"
+group = "Using SuperMD"
+
+[[pages]]
+file = "diagrams.md"
+title = "Diagrams"
+group = "Using SuperMD"
+
+[[pages]]
+file = "workspace.md"
+title = "Working with a Folder"
+group = "Using SuperMD"
+
+[[pages]]
+file = "themes.md"
+title = "Themes"
+group = "Using SuperMD"
