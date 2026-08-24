@@ -9,6 +9,16 @@ always.
 Built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
 [Zed](https://zed.dev).
 
+## Installing
+
+Download the DMG, drag **SuperMD** onto **Applications**, done. If you
+launch it straight from the disk image instead, SuperMD notices and
+offers to move itself. Releases are signed and notarized — no
+Gatekeeper warnings. Double-click any `.md` file to open it ("Open
+With → SuperMD" for other text), drop a folder on the window or Dock
+icon to open a workspace, and SuperMD reopens your last workspace on
+launch (File → Open Recent has the rest).
+
 ## What it does
 
 - **Hybrid WYSIWYG** — syntax markers hide when your cursor is
