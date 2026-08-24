@@ -21,13 +21,32 @@ cp plugin.toml ~/.supermd/plugins/my-plugin/
 Restart SuperMD. Fences you claimed render as live blocks; commands
 you declared appear in the command palette (⌘⇧P / Ctrl+Shift+P).
 
-## What plugins can do (Phase 1)
+## What plugins can do
 
-Pure functions only — text in, text out. No filesystem, no network,
-no processes. `render_block` receives the fence language, its source,
-and the active theme palette; return SVG. `run_command` receives the
-document and selection; return a replacement. Calls time out after
-2 seconds.
+Everything is a function call from the host — no processes, no
+background execution, no plugin-drawn pixels. Compute times out after
+2 seconds. Surfaces (declare in `plugin.toml` what you use):
+
+- `fences = ["lang"]` + `render_block` — fenced blocks → SVG widgets.
+- `[[commands]]` + `run_command` — palette commands.
+- `[[inline]]` + `render_inline` — inline pattern replacements.
+- `[[decorations]]` — regex → style token, no wasm at all.
+- `formats = true` + `format_document` — "Format: <name>" + on-save.
+- `paste = true` + `process_paste` — transform pasted text.
+- `[[exports]]` + `export_document` — return files as bytes; the HOST
+  shows the save dialog and writes. Plugins never see paths.
+
+## Capabilities
+
+Declared in the manifest, granted by the user:
+
+- *(none)* — pure compute; installs silently.
+- `capabilities = ["workspace-read"]` — the workspace root appears
+  read-only at `/workspace` after a one-time consent.
+- `capabilities = ["net"]` — enables `host_api::fetch` (https only,
+  5 s / 2 MB / 4 fetches per call). Grants nothing by itself: every
+  domain prompts its own one-time consent banner on first fetch.
+  Net-capable paste plugins run asynchronously after the paste.
 
 ## Troubleshooting
 

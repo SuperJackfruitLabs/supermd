@@ -5,11 +5,20 @@
 //! in ~/.supermd/plugins/<your-plugin>/.
 
 wit_bindgen::generate!({
-    path: "../wit-v2",
+    path: "../wit-v3",
     world: "extension",
 });
 
 use supermd::extension::types as t;
+// Net-capable plugins (manifest: capabilities = ["net"]) call the
+// host-mediated fetch — the host enforces per-domain consent:
+//   use supermd::extension::host_api;
+//   let resp = host_api::fetch(&host_api::FetchRequest {
+//       method: "GET".into(),
+//       url: "https://example.com".into(),
+//       headers: vec![],
+//       body: None,
+//   })?;
 
 struct Plugin;
 
@@ -32,6 +41,14 @@ impl Guest for Plugin {
 
     fn process_paste(_text: String) -> Result<Option<String>, String> {
         Err("this plugin has no paste processor".to_string())
+    }
+
+    fn export_document(
+        _document: String,
+        _format: String,
+        _theme: t::Theme,
+    ) -> Result<Vec<ExportFile>, String> {
+        Err("this plugin has no exporters".to_string())
     }
 }
 

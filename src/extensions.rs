@@ -1430,6 +1430,29 @@ mod host_tests {
     }
 
     #[test]
+    fn dist_plugins_all_load_and_html_export_roundtrips() {
+        let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dist/plugins");
+        if !d.join("html-export/plugin.wasm").exists() {
+            eprintln!("SKIP: dist plugins not built (scripts/build_plugins.sh)");
+            return;
+        }
+        let mut host = ExtensionHost::load(&d);
+        assert!(host.failures().is_empty(), "{:?}", host.failures());
+        let files = host
+            .export_document(
+                "html-export",
+                "# Title\n\nbody\n",
+                "html",
+                &crate::diagram::DiagramTheme::default_light(),
+            )
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(validate_export_paths(&files).is_ok());
+        let html = String::from_utf8(files[0].1.clone()).unwrap();
+        assert!(html.contains("<h1>Title</h1>"), "{html}");
+    }
+
+    #[test]
     fn unknown_plugin_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let mut host = ExtensionHost::load(dir.path());
