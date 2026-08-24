@@ -19,7 +19,7 @@ mod update;
 mod view;
 mod workspace;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -94,8 +94,34 @@ mod url_tests {
     }
 }
 
+/// Open Recent menu entries from the settings snapshot: (label, index).
+fn recent_menu_items(recents: &[String]) -> Vec<(String, usize)> {
+    recents
+        .iter()
+        .take(8)
+        .enumerate()
+        .filter(|(_, p)| Path::new(p).is_dir())
+        .map(|(i, p)| {
+            let name = Path::new(p)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.clone());
+            (name, i)
+        })
+        .collect()
+}
+
 fn main() {
-    let arg = std::env::args().nth(1).map(PathBuf::from);
+    let mut arg = std::env::args().nth(1).map(PathBuf::from);
+    let startup_settings = settings::load(&settings::config_dir());
+    // Launched bare (Dock/Finder): return to the last workspace.
+    if arg.is_none() && startup_settings.reopen_last {
+        arg = startup_settings
+            .recent_workspaces
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.is_dir());
+    }
 
     // Files/folders arriving via macOS open events (double-click, Dock
     // drop, `open -a`). Drained by the workspace's poll loop.
@@ -251,6 +277,22 @@ fn main() {
                 items: vec![
                     MenuItem::action("New File", NewFile),
                     MenuItem::action("Open…", OpenDialog),
+                    MenuItem::submenu(Menu {
+                        name: "Open Recent".into(),
+                        items: recent_menu_items(&startup_settings.recent_workspaces)
+                            .into_iter()
+                            .map(|(name, ix)| match ix {
+                                0 => MenuItem::action(name, workspace::OpenRecent0),
+                                1 => MenuItem::action(name, workspace::OpenRecent1),
+                                2 => MenuItem::action(name, workspace::OpenRecent2),
+                                3 => MenuItem::action(name, workspace::OpenRecent3),
+                                4 => MenuItem::action(name, workspace::OpenRecent4),
+                                5 => MenuItem::action(name, workspace::OpenRecent5),
+                                6 => MenuItem::action(name, workspace::OpenRecent6),
+                                _ => MenuItem::action(name, workspace::OpenRecent7),
+                            })
+                            .collect(),
+                    }),
                     MenuItem::separator(),
                     MenuItem::action("Close Tab", CloseTab),
                 ],

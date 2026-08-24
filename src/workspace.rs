@@ -47,8 +47,26 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        OpenRecent0,
+        OpenRecent1,
+        OpenRecent2,
+        OpenRecent3,
+        OpenRecent4,
+        OpenRecent5,
+        OpenRecent6,
+        OpenRecent7,
     ]
 );
+
+/// Persist a just-opened workspace root into the recents list.
+fn record_recent(root: &Path) {
+    let dir = crate::settings::config_dir();
+    let mut settings = crate::settings::load(&dir);
+    settings.note_workspace(root);
+    if let Err(err) = crate::settings::save(&dir, &settings) {
+        eprintln!("supermd: cannot save settings: {err}");
+    }
+}
 
 /// Shown by the ⌘/ dialog. Kept adjacent to the actual bindings in
 /// main.rs — update both together.
@@ -202,6 +220,9 @@ pub struct Workspace {
     preview_tab: Option<usize>,
     /// Newer released version tag, when the launch check found one.
     update_available: Option<SharedString>,
+    /// Recents snapshot taken at launch (existing dirs only); the
+    /// Open Recent menu indexes into this.
+    startup_recents: Vec<PathBuf>,
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
     sidebar_selected: usize,
@@ -222,6 +243,7 @@ impl Workspace {
 
         match arg {
             Some(path) if path.is_dir() => {
+                record_recent(&path);
                 tree = Some(FileTree::new(path));
             }
             Some(path) => match Editor::read_file(&path) {
@@ -253,6 +275,12 @@ impl Workspace {
             search: None,
             preview_tab: None,
             update_available: None,
+            startup_recents: crate::settings::load(&crate::settings::config_dir())
+                .recent_workspaces
+                .iter()
+                .map(PathBuf::from)
+                .filter(|p| p.is_dir())
+                .collect(),
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
@@ -591,6 +619,7 @@ impl Workspace {
 
     pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
+            record_recent(path);
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
@@ -797,6 +826,14 @@ impl Workspace {
         self.finder = None;
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    fn open_recent_ix(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = self.startup_recents.get(ix).cloned() {
+            if path.is_dir() {
+                self.open_path(&path, window, cx);
+            }
+        }
     }
 
     fn toggle_search(&mut self, _: &ToggleSearch, window: &mut Window, cx: &mut Context<Self>) {
@@ -1365,7 +1402,76 @@ impl Workspace {
                                             this.open_dialog(&OpenDialog, window, cx);
                                         },
                                     )),
-                            ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(t.fg_muted)
+                                    .child("…or drop a folder here"),
+                            )
+                            .children((!self.startup_recents.is_empty()).then(|| {
+                                div()
+                                    .w_full()
+                                    .mt_2()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(t.fg_muted)
+                                            .child("RECENT"),
+                                    )
+                                    .children(
+                                        self.startup_recents
+                                            .iter()
+                                            .filter(|p| p.is_dir())
+                                            .take(5)
+                                            .cloned()
+                                            .enumerate()
+                                            .map(|(i, path)| {
+                                                let name = path
+                                                    .file_name()
+                                                    .map(|n| n.to_string_lossy().into_owned())
+                                                    .unwrap_or_else(|| path.display().to_string());
+                                                let parent = path
+                                                    .parent()
+                                                    .map(|p| p.to_string_lossy().into_owned())
+                                                    .unwrap_or_default();
+                                                div()
+                                                    .id(SharedString::from(format!("recent-{i}")))
+                                                    .w_full()
+                                                    .px_2()
+                                                    .py(px(4.))
+                                                    .rounded_md()
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.bg(t.hover_bg))
+                                                    .flex()
+                                                    .flex_col()
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(t.ui_size))
+                                                            .text_color(t.fg)
+                                                            .overflow_hidden()
+                                                            .child(SharedString::from(name)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(10.))
+                                                            .text_color(t.fg_muted)
+                                                            .overflow_hidden()
+                                                            .truncate()
+                                                            .child(SharedString::from(parent)),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this, _: &ClickEvent, window, cx| {
+                                                            let path = path.clone();
+                                                            this.open_path(&path, window, cx);
+                                                        },
+                                                    ))
+                                            }),
+                                    )
+                            })),
                     )
                     .into_any_element(),
             );
@@ -1840,6 +1946,14 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::toggle_finder))
             .on_action(cx.listener(Self::toggle_search))
+            .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent_ix(0, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent_ix(1, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent2, w, cx| this.open_recent_ix(2, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent3, w, cx| this.open_recent_ix(3, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent4, w, cx| this.open_recent_ix(4, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent5, w, cx| this.open_recent_ix(5, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent6, w, cx| this.open_recent_ix(6, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent7, w, cx| this.open_recent_ix(7, w, cx)))
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::toggle_focus_mode))
