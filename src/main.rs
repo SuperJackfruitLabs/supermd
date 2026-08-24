@@ -167,6 +167,7 @@ fn main() {
                 eprintln!("supermd: plugin failed: {}: {err}", dir.display());
             }
             extensions::set_decoration_table(extensions::compile_decorations(&host.plugins()));
+            extensions::set_inline_table(extensions::compile_inline(&host.plugins()));
             extensions::set_fence_table(
                 host.plugins()
                     .iter()
@@ -180,6 +181,8 @@ fn main() {
                 editor::autosave::BackupRegistry::default_dir(),
             ),
         ))));
+
+        extensions::start_inline_drainer(cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([

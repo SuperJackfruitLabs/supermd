@@ -24,6 +24,9 @@ pub enum StyleKind {
     Rule,
     /// Tree-sitter capture index into `highlight::CAPTURE_NAMES`.
     Syntax(u8),
+    /// Plugin inline replacement: the span's source text renders as
+    /// this string when the cursor is elsewhere (reveal rule applies).
+    InlineReplace(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,9 +274,86 @@ fn line_offsets(s: &str) -> Vec<(usize, &str)> {
     out
 }
 
+
+/// Plugin inline pass: match host-compiled inline rules against the
+/// document, emitting InlineReplace spans for cache hits and a miss
+/// list for the background drainer. Skips code contexts. Pure —
+/// the cache lookup is injected.
+pub fn inline_pass(
+    text: &str,
+    spans: &[StyleSpan],
+    table: &[crate::extensions::CompiledInline],
+    lookup: &dyn Fn(&str, &str, &str) -> Option<String>,
+) -> (Vec<StyleSpan>, Vec<(String, String, String)>) {
+    let in_code = |range: &std::ops::Range<usize>| {
+        spans.iter().any(|s| {
+            matches!(
+                s.kind,
+                StyleKind::InlineCode | StyleKind::FenceContent | StyleKind::FenceDelimiter
+            ) && s.range.start < range.end
+                && range.start < s.range.end
+        })
+    };
+    let mut extra = Vec::new();
+    let mut misses = Vec::new();
+    for rule in table {
+        for m in rule.regex.find_iter(text) {
+            let range = m.start()..m.end();
+            if in_code(&range) {
+                continue;
+            }
+            match lookup(&rule.plugin, &rule.id, m.as_str()) {
+                Some(replacement) => extra.push(StyleSpan {
+                    range,
+                    kind: StyleKind::InlineReplace(replacement),
+                }),
+                None => misses.push((
+                    rule.plugin.clone(),
+                    rule.id.clone(),
+                    m.as_str().to_string(),
+                )),
+            }
+        }
+    }
+    (extra, misses)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_pass_replaces_hits_skips_code_and_misses() {
+        let text = "say :tada: not `:tada:` ok\n";
+        let spans = markdown_spans(text);
+        let table = vec![crate::extensions::CompiledInline {
+            plugin: "emoji".into(),
+            id: "e".into(),
+            regex: regex::Regex::new(r":([a-z]+):").unwrap(),
+        }];
+        let hit = |_: &str, _: &str, m: &str| (m == ":tada:").then(|| "🎉".to_string());
+        let (extra, misses) = inline_pass(text, &spans, &table, &hit);
+        assert_eq!(extra.len(), 1, "code span excluded: {extra:?}");
+        assert!(matches!(&extra[0].kind, StyleKind::InlineReplace(s) if s == "🎉"));
+        assert_eq!(extra[0].range, 4..10);
+        assert!(misses.is_empty());
+    }
+
+    #[test]
+    fn inline_pass_reports_misses() {
+        let text = ":new: here\n";
+        let spans = markdown_spans(text);
+        let table = vec![crate::extensions::CompiledInline {
+            plugin: "emoji".into(),
+            id: "e".into(),
+            regex: regex::Regex::new(r":([a-z]+):").unwrap(),
+        }];
+        let none = |_: &str, _: &str, _: &str| None;
+        let (extra, misses) = inline_pass(text, &spans, &table, &none);
+        assert!(extra.is_empty());
+        assert_eq!(misses, vec![("emoji".into(), "e".into(), ":new:".into())]);
+    }
+
 
     fn spans_of_kind(source: &str, kind_match: fn(&StyleKind) -> bool) -> Vec<Range<usize>> {
         markdown_spans(source)

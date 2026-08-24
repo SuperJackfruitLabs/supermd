@@ -50,7 +50,7 @@ pub struct DisplayLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
     Hide(Bias),
-    Replace { text: &'static str, toggle: Option<bool> },
+    Replace { text: String, toggle: Option<bool> },
 }
 
 fn revealed(span: &Range<usize>, sel: &Range<usize>) -> bool {
@@ -202,10 +202,18 @@ fn collect_directives(
                     if matches!(line.as_bytes().get(l), Some(b'-' | b'*' | b'+')) {
                         out.push((
                             span.range.clone(),
-                            Action::Replace { text: "• ", toggle: None },
+                            Action::Replace { text: "• ".to_string(), toggle: None },
                         ));
                     }
                     // Ordered markers (digits) are never transformed.
+                }
+            }
+            StyleKind::InlineReplace(replacement) => {
+                if start_on_line && end_on_line {
+                    out.push((
+                        span.range.clone(),
+                        Action::Replace { text: replacement.clone(), toggle: None },
+                    ));
                 }
             }
             StyleKind::TaskMarker(checked) => {
@@ -213,7 +221,7 @@ fn collect_directives(
                     out.push((
                         span.range.clone(),
                         Action::Replace {
-                            text: if *checked { "✓" } else { "○" },
+                            text: (if *checked { "✓" } else { "○" }).to_string(),
                             toggle: Some(*checked),
                         },
                     ));
@@ -223,7 +231,7 @@ fn collect_directives(
                 if start_on_line && end_on_line {
                     out.push((
                         span.range.clone(),
-                        Action::Replace { text: "▍", toggle: None },
+                        Action::Replace { text: "▍".to_string(), toggle: None },
                     ));
                 }
             }
@@ -333,7 +341,7 @@ pub fn display_line(
                 toggle: None,
             }),
             Action::Replace { text: replacement, toggle } => {
-                text.push_str(replacement);
+                text.push_str(&replacement);
                 segs.push(Seg {
                     src: range.clone(),
                     disp: disp_start..text.len(),

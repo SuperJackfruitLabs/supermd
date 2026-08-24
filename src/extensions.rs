@@ -441,6 +441,142 @@ pub fn decoration_table() -> &'static [CompiledDecoration] {
     DECORATION_TABLE.get().map(|v| v.as_slice()).unwrap_or(&[])
 }
 
+/// Host-compiled inline rules.
+pub struct CompiledInline {
+    pub plugin: String,
+    pub id: String,
+    pub regex: regex::Regex,
+}
+
+static INLINE_TABLE: std::sync::OnceLock<Vec<CompiledInline>> = std::sync::OnceLock::new();
+
+pub fn set_inline_table(rules: Vec<CompiledInline>) {
+    let _ = INLINE_TABLE.set(rules);
+}
+
+pub fn inline_table() -> &'static [CompiledInline] {
+    INLINE_TABLE.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
+pub fn compile_inline(metas: &[PluginMeta]) -> Vec<CompiledInline> {
+    metas
+        .iter()
+        .flat_map(|m| {
+            m.inline.iter().filter_map(|r| {
+                regex::Regex::new(&r.pattern).ok().map(|regex| CompiledInline {
+                    plugin: m.name.clone(),
+                    id: r.id.clone(),
+                    regex,
+                })
+            })
+        })
+        .collect()
+}
+
+// ── inline cache + miss queue ─────────────────────────────────────────
+
+type InlineKey = (String, String, String); // (plugin, pattern-id, matched)
+
+/// Resolved inline replacements: Some(text) = render, None = permanent
+/// failure (stay raw, don't re-ask). Plain statics: the lookup runs
+/// inside restyle, which has no cx.
+static INLINE_CACHE: std::sync::Mutex<Option<std::collections::HashMap<InlineKey, Option<String>>>> =
+    std::sync::Mutex::new(None);
+static INLINE_QUEUE: std::sync::Mutex<Vec<InlineKey>> = std::sync::Mutex::new(Vec::new());
+static INLINE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const INLINE_CACHE_CAP: usize = 4096;
+
+pub fn inline_lookup(plugin: &str, id: &str, matched: &str) -> Option<String> {
+    let guard = INLINE_CACHE.lock().unwrap();
+    guard
+        .as_ref()?
+        .get(&(plugin.to_string(), id.to_string(), matched.to_string()))?
+        .clone()
+}
+
+/// True when the key is already resolved (even as a failure).
+fn inline_resolved(key: &InlineKey) -> bool {
+    INLINE_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|m| m.contains_key(key))
+}
+
+pub fn enqueue_inline(misses: Vec<(String, String, String)>) {
+    let mut queue = INLINE_QUEUE.lock().unwrap();
+    for key in misses {
+        if !inline_resolved(&key) && !queue.contains(&key) {
+            queue.push(key);
+        }
+    }
+}
+
+pub fn inline_generation() -> u64 {
+    INLINE_GEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn clear_inline_cache() {
+    *INLINE_CACHE.lock().unwrap() = None;
+    INLINE_QUEUE.lock().unwrap().clear();
+    INLINE_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn inline_insert(key: InlineKey, value: Option<String>) {
+    let mut guard = INLINE_CACHE.lock().unwrap();
+    let map = guard.get_or_insert_with(Default::default);
+    if map.len() >= INLINE_CACHE_CAP {
+        map.clear(); // simple pressure valve; deterministic values refill fast
+    }
+    map.insert(key, value);
+    INLINE_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Startup task: resolve queued inline misses through the host on the
+/// background executor and refresh windows when the cache advances.
+pub fn start_inline_drainer(cx: &mut gpui::App) {
+    let Some(state) = cx.try_global::<ExtensionState>().map(|s| s.0.clone()) else {
+        return;
+    };
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+            let batch: Vec<InlineKey> = {
+                let mut q = INLINE_QUEUE.lock().unwrap();
+                std::mem::take(&mut *q)
+            };
+            if batch.is_empty() {
+                continue;
+            }
+            let host = state.clone();
+            let resolved = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut out = Vec::new();
+                    for key in batch {
+                        let result = host
+                            .lock()
+                            .unwrap()
+                            .render_inline(&key.0, &key.1, &key.2)
+                            .ok();
+                        out.push((key, result));
+                    }
+                    out
+                })
+                .await;
+            for (key, value) in resolved {
+                inline_insert(key, value);
+            }
+            if cx.update(|cx| cx.refresh_windows()).is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
 /// Build the decoration table from loaded plugin metas.
 pub fn compile_decorations(metas: &[PluginMeta]) -> Vec<CompiledDecoration> {
     metas

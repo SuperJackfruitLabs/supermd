@@ -111,6 +111,8 @@ pub struct Editor {
     line_kinds: Vec<LineKind>,
     blocks: Vec<blocks::BlockInfo>,
     claims: Vec<(usize, projector::Claim)>,
+    /// Inline-cache generation this editor last styled against.
+    inline_gen: u64,
     projection: Vec<projection::Item>,
     path: PathBuf,
     pub save: SavePolicy,
@@ -172,6 +174,7 @@ impl Editor {
             line_kinds: Vec::new(),
             blocks: Vec::new(),
             claims: Vec::new(),
+            inline_gen: 0,
             projection: Vec::new(),
             path: path.to_path_buf(),
             save: SavePolicy::default(),
@@ -214,6 +217,21 @@ impl Editor {
             Provider::Code(lang) => spans::code_spans(&text, lang, langs),
             Provider::Plain => Vec::new(),
         };
+        // Plugin inline pass: cache hits become replacement spans;
+        // misses go to the background drainer (never wasm here).
+        if matches!(self.provider, Provider::Markdown) {
+            let table = crate::extensions::inline_table();
+            if !table.is_empty() {
+                let lookup = |p: &str, i: &str, m: &str| crate::extensions::inline_lookup(p, i, m);
+                let (extra, misses) = spans::inline_pass(&text, &self.spans, table, &lookup);
+                if !extra.is_empty() {
+                    self.spans.extend(extra);
+                    self.spans.sort_by_key(|s| (s.range.start, s.range.end));
+                }
+                crate::extensions::enqueue_inline(misses);
+            }
+        }
+        self.inline_gen = crate::extensions::inline_generation();
         self.line_kinds = spans::line_kinds(&text, &self.spans);
         self.blocks = match self.provider {
             Provider::Markdown => blocks::blocks(&text),
@@ -1154,6 +1172,10 @@ impl Editor {
                     StyleKind::FenceDelimiter => {
                         a.color = Hsla { a: 0.55, ..t.fg_muted };
                     }
+                    StyleKind::InlineReplace(_) => {
+                        // Rendering handled by the display transform;
+                        // source text (when revealed) keeps base style.
+                    }
                     StyleKind::Syntax(capture) => {
                         if let Some(c) = Self::syntax_color(*capture, t) {
                             a.color = c;
@@ -1918,6 +1940,12 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.inline_gen != crate::extensions::inline_generation()
+            && matches!(self.provider, Provider::Markdown)
+        {
+            let langs = crate::highlight::languages(cx);
+            self.restyle(&langs);
+        }
         self.reproject();
         let entity = cx.weak_entity();
         let t = theme(cx);
