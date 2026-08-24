@@ -1,4 +1,4 @@
-wit_bindgen::generate!({ path: "../../wit", world: "extension" });
+wit_bindgen::generate!({ path: "../../wit-v2", world: "extension" });
 use supermd::extension::types as t;
 struct Plugin;
 impl Guest for Plugin {
@@ -9,6 +9,18 @@ impl Guest for Plugin {
     }
     fn run_command(id: String, _input: t::CommandInput) -> Result<t::CommandOutput, String> {
         Ok(t::CommandOutput::InsertAtCursor(format!("echo:{id}")))
+    }
+
+    fn render_inline(pattern_id: String, matched: String) -> Result<String, String> {
+        Ok(format!("[{pattern_id}:{matched}]"))
+    }
+
+    fn format_document(document: String) -> Result<String, String> {
+        Ok(document.to_uppercase())
+    }
+
+    fn process_paste(text: String) -> Result<Option<String>, String> {
+        Ok(Some(text.chars().rev().collect()))
     }
 }
 export!(Plugin);

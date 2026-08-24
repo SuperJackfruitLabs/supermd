@@ -5,7 +5,7 @@
 //! in ~/.supermd/plugins/<your-plugin>/.
 
 wit_bindgen::generate!({
-    path: "../wit",
+    path: "../wit-v2",
     world: "extension",
 });
 
@@ -20,6 +20,18 @@ impl Guest for Plugin {
 
     fn run_command(_id: String, _input: t::CommandInput) -> Result<t::CommandOutput, String> {
         Err("this plugin has no commands".to_string())
+    }
+
+    fn render_inline(_pattern_id: String, _matched: String) -> Result<String, String> {
+        Err("this plugin has no inline renderers".to_string())
+    }
+
+    fn format_document(_document: String) -> Result<String, String> {
+        Err("this plugin has no formatter".to_string())
+    }
+
+    fn process_paste(_text: String) -> Result<Option<String>, String> {
+        Err("this plugin has no paste processor".to_string())
     }
 }
 

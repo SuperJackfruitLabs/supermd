@@ -7445,6 +7445,7 @@ dependencies = [
  "notify",
  "nucleo-matcher",
  "pulldown-cmark",
+ "regex",
  "resvg 0.48.1",
  "ropey",
  "serde",
