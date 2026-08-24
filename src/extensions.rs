@@ -270,14 +270,16 @@ pub struct ExtensionState(pub std::sync::Arc<std::sync::Mutex<ExtensionHost>>);
 
 impl gpui::Global for ExtensionState {}
 
-/// Snapshot of (plugin, claimed fences) for pure discovery contexts.
-static FENCE_TABLE: std::sync::OnceLock<Vec<(String, Vec<String>)>> = std::sync::OnceLock::new();
+/// Snapshot of (plugin, version, claimed fences) for pure discovery
+/// contexts (projection runs without cx access).
+static FENCE_TABLE: std::sync::OnceLock<Vec<(String, String, Vec<String>)>> =
+    std::sync::OnceLock::new();
 
-pub fn set_fence_table(table: Vec<(String, Vec<String>)>) {
+pub fn set_fence_table(table: Vec<(String, String, Vec<String>)>) {
     let _ = FENCE_TABLE.set(table);
 }
 
-pub fn fence_table() -> &'static [(String, Vec<String>)] {
+pub fn fence_table() -> &'static [(String, String, Vec<String>)] {
     FENCE_TABLE.get().map(|v| v.as_slice()).unwrap_or(&[])
 }
 

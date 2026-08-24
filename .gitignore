@@ -4,3 +4,4 @@ plugins/*/target/
 plugins/fixtures/*/target/
 tests/fixtures/plugins/
 dist/
+.claude/

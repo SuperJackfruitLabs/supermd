@@ -158,6 +158,21 @@ fn main() {
         cx.set_global(highlight::SyntaxLanguages(Arc::new(
             highlight::Languages::new(),
         )));
+        // Extension host: discover + compile plugins, snapshot the
+        // fence-claim table for pure discovery contexts.
+        {
+            let host = extensions::ExtensionHost::load(&settings::config_dir().join("plugins"));
+            for (dir, err) in host.failures() {
+                eprintln!("supermd: plugin failed: {}: {err}", dir.display());
+            }
+            extensions::set_fence_table(
+                host.plugins()
+                    .iter()
+                    .map(|p| (p.name.clone(), p.version.clone(), p.fences.clone()))
+                    .collect(),
+            );
+            cx.set_global(extensions::ExtensionState(Arc::new(std::sync::Mutex::new(host))));
+        }
         cx.set_global(editor::SessionBackups(Arc::new(std::sync::Mutex::new(
             editor::autosave::BackupRegistry::new(
                 editor::autosave::BackupRegistry::default_dir(),
