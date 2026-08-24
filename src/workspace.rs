@@ -209,9 +209,9 @@ impl Workspace {
                 Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
             },
             None => {
-                if let Ok(cwd) = std::env::current_dir() {
-                    tree = Some(FileTree::new(cwd));
-                }
+                // No explicit target: start with an empty workspace and
+                // the welcome document. (A Finder/Dock launch has an
+                // arbitrary cwd — listing it would show the filesystem.)
                 let welcome = Reader::welcome(&languages(cx));
                 tabs.push(Tab::Reader(cx.new(|_| welcome)));
             }
@@ -410,6 +410,7 @@ impl Workspace {
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
+            self.refresh_git_status();
             cx.notify();
             return;
         }
@@ -1077,8 +1078,48 @@ impl Workspace {
             return None;
         }
         let active_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
-        let tree = self.tree.as_mut()?;
         let t = theme(cx);
+        let Some(tree) = self.tree.as_mut() else {
+            // Empty workspace: no listing, just a way to open one.
+            return Some(
+                div()
+                    .w(px(240.))
+                    .h_full()
+                    .flex_none()
+                    .bg(t.panel_bg)
+                    .border_r_1()
+                    .border_color(t.border)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .px_4()
+                    .child(
+                        div()
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg_muted)
+                            .child("No folder open"),
+                    )
+                    .child(
+                        div()
+                            .id("open-folder")
+                            .px_3()
+                            .py(px(6.))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(t.hover_bg)
+                            .hover(|s| s.bg(t.selected_bg))
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg)
+                            .child("Open Folder…")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_dialog(&OpenDialog, window, cx);
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        };
         let root_name = tree.root_name();
         let rows = tree.visible();
 
@@ -1361,7 +1402,11 @@ impl Workspace {
                                 .hover(|s| s.bg(t.hover_bg))
                                 .text_size(px(t.ui_size - 1.))
                                 .text_color(if level <= 2 { t.fg } else { t.fg_muted })
+                                // uniform_list rows can't grow — long
+                                // headings truncate instead of wrapping
+                                // over their neighbors.
                                 .overflow_hidden()
+                                .truncate()
                                 .child(text)
                                 .on_click(move |_: &ClickEvent, _window, cx| match &target {
                                     OutlineTarget::Reader(reader) => {

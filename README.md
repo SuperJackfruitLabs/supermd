@@ -52,7 +52,8 @@ Requires Rust (stable) and macOS. No full Xcode needed — Metal shaders
 compile at runtime.
 
 ```sh
-cargo run            # opens the current directory as a workspace
+cargo run            # opens an empty workspace (Open Folder… to pick one)
+cargo run -- .       # open the current directory as a workspace
 cargo run -- <path>  # open a file or folder
 cargo test
 ```
