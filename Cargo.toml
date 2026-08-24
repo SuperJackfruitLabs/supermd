@@ -23,6 +23,8 @@ grep-searcher = "0.1.17"
 grep-regex = "0.1.14"
 grep-matcher = "0.1.9"
 gix = { version = "0.87.0", default-features = false, features = ["status", "index", "revision", "sha1"] }
+merman = "=0.8.0-alpha.5"
+resvg = "0.48"
 
 [dev-dependencies]
 tempfile = "3"
@@ -37,3 +39,9 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# merman-render 0.8.0-alpha.5 fails type inference on current rustc
+# (ambiguous [u8]::as_ref at two call sites). Vendored with a 2-line
+# fix; drop this patch when upstream ships a compiling release.
+[patch.crates-io]
+merman-render = { path = "vendor/merman-render" }

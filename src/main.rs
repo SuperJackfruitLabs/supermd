@@ -1,3 +1,4 @@
+mod diagram;
 mod diff;
 mod editor;
 mod files;
