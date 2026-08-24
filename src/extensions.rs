@@ -886,12 +886,25 @@ pub fn fence_table() -> Vec<(String, String, Vec<String>)> {
 
 static FORMAT_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 static PASTE_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+static ENRICH_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 
 pub fn set_surface_tables(metas: &[PluginMeta]) {
+    let has_net = |m: &&PluginMeta| m.capabilities.iter().any(|c| c == "net");
     *FORMAT_PLUGINS.write().unwrap() =
         metas.iter().filter(|m| m.formats).map(|m| m.name.clone()).collect();
-    *PASTE_PLUGINS.write().unwrap() =
-        metas.iter().filter(|m| m.paste).map(|m| m.name.clone()).collect();
+    // Paste plugins split by capability: net-free ones run on the
+    // synchronous paste path; net-capable ones become async enrichers
+    // (a network call must never block a paste).
+    *PASTE_PLUGINS.write().unwrap() = metas
+        .iter()
+        .filter(|m| m.paste && !has_net(m))
+        .map(|m| m.name.clone())
+        .collect();
+    *ENRICH_PLUGINS.write().unwrap() = metas
+        .iter()
+        .filter(|m| m.paste && has_net(m))
+        .map(|m| m.name.clone())
+        .collect();
 }
 
 pub fn format_plugins() -> Vec<String> {
@@ -900,6 +913,10 @@ pub fn format_plugins() -> Vec<String> {
 
 pub fn paste_plugins() -> Vec<String> {
     PASTE_PLUGINS.read().unwrap().clone()
+}
+
+pub fn enrich_plugins() -> Vec<String> {
+    ENRICH_PLUGINS.read().unwrap().clone()
 }
 
 /// Apply a formatted result only if the document did not change while
@@ -1502,6 +1519,23 @@ name = "Raw"
         )
         .unwrap();
         assert_eq!(m.capabilities, ["workspace-read"]);
+    }
+
+    #[test]
+    fn paste_tables_split_by_net_capability() {
+        let sync_meta = parse_manifest(
+            Path::new("/p/tidy"),
+            "name=\"tidy-split-test\"\nversion=\"0\"\npaste=true\n",
+        )
+        .unwrap();
+        let net_meta = parse_manifest(
+            Path::new("/p/url-title"),
+            "name=\"url-split-test\"\nversion=\"0\"\npaste=true\ncapabilities=[\"net\"]\n",
+        )
+        .unwrap();
+        set_surface_tables(&[sync_meta, net_meta]);
+        assert_eq!(paste_plugins(), ["tidy-split-test"]);
+        assert_eq!(enrich_plugins(), ["url-split-test"]);
     }
 
     #[test]
