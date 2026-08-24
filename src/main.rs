@@ -338,6 +338,14 @@ fn main() {
                         traffic_light_position: Some(point(px(12.), px(10.))),
                     }),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Linux: ask for client-side decorations; we draw
+                    // our own window controls when the compositor
+                    // grants them (Decorations::Server is the fallback).
+                    window_decorations: if cfg!(target_os = "linux") {
+                        Some(gpui::WindowDecorations::Client)
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 },
                 {

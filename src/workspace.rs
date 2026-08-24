@@ -1646,7 +1646,67 @@ impl Workspace {
     }
 
     /// The custom title bar: traffic-light inset, tabs, drag regions.
-    fn render_titlebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// Min/Max/Close for platforms without native overlay controls
+    /// (Windows always; Linux when the compositor grants CSD).
+    fn render_window_controls(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if crate::platform::MACOS {
+            return None;
+        }
+        if matches!(window.window_decorations(), gpui::Decorations::Server { .. }) {
+            return None;
+        }
+        let t = theme(cx);
+        let btn = |id: &'static str,
+                   glyph: &'static str,
+                   area: gpui::WindowControlArea,
+                   danger: bool| {
+            div()
+                .id(id)
+                .w(px(44.))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .window_control_area(area)
+                .text_size(px(13.))
+                .text_color(t.fg_muted)
+                .when(!danger, |d| d.hover(|s| s.bg(t.hover_bg)))
+                .when(danger, |d| d.hover(|s| s.bg(t.diff_deleted_bg)))
+                .child(glyph)
+        };
+        Some(
+            div()
+                .h_full()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .child(
+                    btn("win-min", "–", gpui::WindowControlArea::Min, false).on_mouse_down(
+                        gpui::MouseButton::Left,
+                        |_, window, _| window.minimize_window(),
+                    ),
+                )
+                .child(
+                    btn("win-max", "□", gpui::WindowControlArea::Max, false).on_mouse_down(
+                        gpui::MouseButton::Left,
+                        |_, window, _| window.zoom_window(),
+                    ),
+                )
+                .child(
+                    btn("win-close", "✕", gpui::WindowControlArea::Close, true).on_mouse_down(
+                        gpui::MouseButton::Left,
+                        |_, window, _| window.remove_window(),
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_titlebar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let active = self.active;
         let show_tabs = !self.tabs.is_empty() && !self.focus_mode;
@@ -1726,10 +1786,10 @@ impl Workspace {
             .flex()
             .flex_row()
             .overflow_hidden()
-            .when(!self.show_sidebar, |d| {
+            .when(crate::platform::MACOS && !self.show_sidebar, |d| {
                 // With the sidebar hidden the traffic lights sit over
                 // the tab bar — inset past them; the sidebar's own drag
-                // strip covers them otherwise.
+                // strip covers them otherwise. (macOS only.)
                 d.child(
                     div()
                         .w(px(76.))
@@ -1772,6 +1832,7 @@ impl Workspace {
                         ),
                 )
             })
+            .children(self.render_window_controls(window, cx))
             .into_any_element()
     }
 
@@ -1929,7 +1990,7 @@ impl Render for Workspace {
         }
         let t = theme(cx);
         let sidebar = self.render_sidebar(cx);
-        let titlebar = self.render_titlebar(cx);
+        let titlebar = self.render_titlebar(window, cx);
         let outline = self.render_outline(cx);
         let content: AnyElement = match self.tabs.get(self.active) {
             Some(Tab::Reader(reader)) => reader.clone().into_any_element(),
