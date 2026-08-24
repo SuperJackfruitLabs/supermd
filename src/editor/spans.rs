@@ -402,12 +402,31 @@ mod tests {
             ("dart", "void main() {}\n"),
             ("d", "void main() {}\n"),
         ];
+        // Grammars whose queries fail to compile on this platform
+        // (the app degrades them to plain text — see highlight.rs).
+        #[cfg(windows)]
+        const KNOWN_BAD: &[&str] = &["julia"];
+        #[cfg(not(windows))]
+        const KNOWN_BAD: &[&str] = &[];
+
+        // Collect every failure (grammar panics included) so one CI
+        // round reveals the full per-platform blocklist instead of
+        // dying on the first bad grammar.
+        let mut failures = Vec::new();
         for (lang, src) in cases {
-            assert!(
-                !langs.highlight(lang, src).is_empty(),
-                "no spans for {lang}"
-            );
+            if KNOWN_BAD.contains(lang) {
+                continue;
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                langs.highlight(lang, src)
+            }));
+            match result {
+                Ok(spans) if !spans.is_empty() => {}
+                Ok(_) => failures.push(format!("{lang}: no spans")),
+                Err(_) => failures.push(format!("{lang}: grammar panicked")),
+            }
         }
+        assert!(failures.is_empty(), "grammar failures: {failures:?}");
     }
 
     #[test]

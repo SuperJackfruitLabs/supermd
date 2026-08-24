@@ -91,11 +91,21 @@ impl Languages {
         if matches!(language, Language::Plaintext) {
             return Vec::new();
         }
-        let mut highlighter = Highlighter::new();
-        let Ok(events) = highlighter.highlight_raw(language, &code) else {
-            return Vec::new();
-        };
-        collect_spans(events.flatten())
+        // A handful of inkjet grammars fail query compilation on some
+        // platforms (their configs are lazy statics that panic on
+        // first touch — e.g. julia under MSVC). Degrade to plain text
+        // instead of crashing the app.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut highlighter = Highlighter::new();
+            highlighter
+                .highlight_raw(language, &code)
+                .map(|events| collect_spans(events.flatten()))
+                .unwrap_or_default()
+        }));
+        result.unwrap_or_else(|_| {
+            eprintln!("supermd: grammar for '{canonical}' unavailable on this platform");
+            Vec::new()
+        })
     }
 
     /// Fill in highlight spans for every code block in the document.
