@@ -29,7 +29,7 @@ pub struct Reader {
 }
 
 /// Language token for a file. Delegates to the central mapping.
-pub fn language_for_path(path: &Path) -> Option<&'static str> {
+pub fn language_for_path(path: &Path) -> Option<String> {
     crate::highlight::language_for_file(path)
 }
 
@@ -146,8 +146,8 @@ mod tests {
 
     #[test]
     fn language_for_path_delegates_to_central_mapping() {
-        assert_eq!(language_for_path(Path::new("main.rs")), Some("rust"));
-        assert_eq!(language_for_path(Path::new("Dockerfile")), Some("dockerfile"));
+        assert_eq!(language_for_path(Path::new("main.rs")).as_deref(), Some("rust"));
+        assert_eq!(language_for_path(Path::new("Dockerfile")).as_deref(), Some("dockerfile"));
         assert_eq!(language_for_path(Path::new("noext")), None);
     }
 

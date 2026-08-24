@@ -1,0 +1,13 @@
+[package]
+name = "daily-note"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+# rlib so the pure template fn is unit-testable on the host target.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen = "0.60"

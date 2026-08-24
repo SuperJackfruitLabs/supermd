@@ -4,6 +4,7 @@
 mod diagram;
 mod diff;
 mod editor;
+mod extensions;
 mod files;
 mod finder;
 mod git;
@@ -11,6 +12,7 @@ mod highlight;
 mod input;
 mod install;
 mod markdown;
+mod palette;
 mod platform;
 mod reader;
 mod search;
@@ -143,7 +145,6 @@ fn queue_open_urls(pending: &std::sync::Mutex<Vec<PathBuf>>, urls: Vec<String>) 
 /// prove each keystroke string parses on all platforms.
 fn app_keybindings() -> Vec<KeyBinding> {
     vec![
-
             KeyBinding::new(&platform::keybinding("cmd-q"), Quit, None),
             KeyBinding::new(&platform::keybinding("cmd-o"), OpenDialog, None),
             KeyBinding::new(&platform::keybinding("cmd-n"), NewFile, None),
@@ -159,6 +160,11 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("cmd-shift-d"), workspace::ShowChanges, None),
             KeyBinding::new(&platform::keybinding("escape"), workspace::ShowChanges, Some("DiffView")),
             KeyBinding::new(&platform::keybinding("cmd-shift-f"), workspace::ToggleSearch, None),
+            KeyBinding::new(&platform::keybinding("cmd-shift-p"), workspace::TogglePalette, None),
+            KeyBinding::new(&platform::keybinding("up"), palette::PaletteUp, Some("Palette")),
+            KeyBinding::new(&platform::keybinding("down"), palette::PaletteDown, Some("Palette")),
+            KeyBinding::new(&platform::keybinding("enter"), palette::PaletteConfirm, Some("Palette")),
+            KeyBinding::new(&platform::keybinding("escape"), palette::PaletteDismiss, Some("Palette")),
             KeyBinding::new(&platform::keybinding("ctrl-cmd-f"), ToggleFocusMode, None),
             KeyBinding::new(&platform::keybinding("up"), search_ui::SearchUp, Some("Search")),
             KeyBinding::new(&platform::keybinding("down"), search_ui::SearchDown, Some("Search")),
@@ -297,6 +303,9 @@ fn app_menus(recents: &[String]) -> Vec<Menu> {
                     MenuItem::action("Toggle Outline", ToggleOutline),
                     MenuItem::separator(),
                     MenuItem::action("Go to File…", ToggleFinder),
+                    MenuItem::action("Command Palette…", workspace::TogglePalette),
+                    MenuItem::action("Open Plugins Folder", workspace::OpenPluginsFolder),
+                    MenuItem::action("Reload Plugins", workspace::ReloadPlugins),
                     MenuItem::action("Search in Workspace…", workspace::ToggleSearch),
                 ],
             },
@@ -339,11 +348,28 @@ fn main() {
         cx.set_global(highlight::SyntaxLanguages(Arc::new(
             highlight::Languages::new(),
         )));
+        // Extension host: discover + compile plugins, snapshot the
+        // contribution tables for pure discovery contexts.
+        {
+            let mut host =
+                extensions::ExtensionHost::load(&settings::config_dir().join("plugins"));
+            extensions::refresh_tables(&mut host);
+            for (dir, err) in host.failures() {
+                eprintln!("supermd: plugin failed: {}: {err}", dir.display());
+            }
+            host.set_grants(startup_settings.plugin_grants.clone());
+            if let Some(dir) = arg.as_ref().filter(|p| p.is_dir()) {
+                host.set_workspace_root(Some(dir.clone()));
+            }
+            cx.set_global(extensions::ExtensionState(Arc::new(std::sync::Mutex::new(host))));
+        }
         cx.set_global(editor::SessionBackups(Arc::new(std::sync::Mutex::new(
             editor::autosave::BackupRegistry::new(
                 editor::autosave::BackupRegistry::default_dir(),
             ),
         ))));
+
+        extensions::start_inline_drainer(cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys(app_keybindings());
@@ -522,7 +548,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 97);
+        assert_eq!(bindings.len(), 102);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));

@@ -25,6 +25,9 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig1-dev \
             libfreetype6-dev
+      - name: Build plugin fixtures (Linux exercises host tests)
+        if: runner.os == 'Linux'
+        run: bash scripts/build_plugins.sh --fixtures
       - name: Run tests
         run: cargo test
       - name: Build
@@ -47,6 +50,8 @@ jobs:
             libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig1-dev \
             libfreetype6-dev
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Build plugin fixtures (extension host tests need them)
+        run: bash scripts/build_plugins.sh --fixtures
       - name: Measure coverage
         # Whole project, no exclusions. The residue is documented at each
         # site: OS dialogs the headless test platform leaves unimplemented,

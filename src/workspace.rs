@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::editor::Editor;
+use crate::editor::EditorEvent;
 use crate::files::FileTree;
 use crate::seti::{self, SetiColor};
 use crate::theme::Theme;
@@ -29,6 +30,9 @@ actions!(
         ToggleOutline,
         ToggleFinder,
         ToggleSearch,
+        TogglePalette,
+        OpenPluginsFolder,
+        ReloadPlugins,
         TogglePreview,
         ShowChanges,
         ToggleFocusMode,
@@ -95,6 +99,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌘ E", "Toggle edit / preview"),
             ("⌘ ⇧ D", "Show changes vs git HEAD"),
             ("⌘ ⇧ F", "Search in workspace"),
+            ("⌘ ⇧ P", "Command palette (plugins)"),
             ("⌃ ⌘ F", "Focus mode"),
             ("⌘ B", "Toggle sidebar"),
             ("⌘ ⇧ O", "Toggle outline"),
@@ -230,6 +235,12 @@ pub struct Workspace {
     pre_focus_panels: (bool, bool),
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
     search: Option<(Entity<crate::search_ui::SearchOverlay>, gpui::Subscription)>,
+    palette: Option<(Entity<crate::palette::Palette>, gpui::Subscription)>,
+    /// Transient plugin-command error, auto-cleared.
+    command_error: Option<SharedString>,
+    /// (plugin, capability) awaiting a consent decision; capability is
+    /// "workspace-read" or "net:<domain>".
+    consent_request: Option<(String, String)>,
     /// Index of the transient preview tab (at most one; italic title).
     preview_tab: Option<usize>,
     /// Newer released version tag, when the launch check found one.
@@ -254,6 +265,25 @@ pub struct Workspace {
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
+/// Create an editor and subscribe the workspace to its events
+/// (consent requests raised by background enrichment).
+fn make_editor(
+    path: &Path,
+    text: String,
+    langs: &crate::highlight::Languages,
+    cx: &mut Context<Workspace>,
+) -> Entity<Editor> {
+    let editor = cx.new(|cx| Editor::from_text(path, text, langs, cx));
+    cx.subscribe(&editor, |this, _editor, event, cx| match event {
+        EditorEvent::ConsentNeeded { plugin, cap } => {
+            this.consent_request = Some((plugin.clone(), cap.clone()));
+            cx.notify();
+        }
+    })
+    .detach();
+    editor
+}
+
 impl Workspace {
     pub fn new(arg: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut tree = None;
@@ -267,7 +297,7 @@ impl Workspace {
             Some(path) => match Editor::read_file(&path) {
                 Ok(text) => {
                     let langs = languages(cx);
-                    let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
+                    let editor = make_editor(&path, text, &langs, cx);
                     tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 }
                 Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
@@ -280,7 +310,7 @@ impl Workspace {
                 match Editor::read_file(&path) {
                     Ok(text) => {
                         let langs = languages(cx);
-                        let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
+                        let editor = make_editor(&path, text, &langs, cx);
                         tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                     }
                     Err(_) => {
@@ -302,6 +332,9 @@ impl Workspace {
             pre_focus_panels: (true, true),
             finder: None,
             search: None,
+            palette: None,
+            command_error: None,
+            consent_request: None,
             preview_tab: None,
             update_available: None,
             startup_recents: crate::settings::load(&crate::settings::config_dir())
@@ -616,7 +649,7 @@ impl Workspace {
                 Ok(text) => {
                     let langs = languages(cx);
                     let path_buf = path.to_path_buf();
-                    let editor = cx.new(|cx| Editor::from_text(&path_buf, text, &langs, cx));
+                    let editor = make_editor(&path_buf, text, &langs, cx);
                     Tab::Editor { editor, view: EditorView::Edit }
                 }
                 Err(err) => {
@@ -654,6 +687,9 @@ impl Workspace {
     pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
             record_recent(path);
+            if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
+                state.0.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
+            }
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
@@ -697,9 +733,16 @@ impl Workspace {
                 }
                 let langs = languages(cx);
                 let path = path.to_path_buf();
-                let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
+                let editor = make_editor(&path, text, &langs, cx);
                 self.tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 self.active = self.tabs.len() - 1;
+                if let Some(viewer) = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .and_then(crate::extensions::viewer_for_extension)
+                {
+                    self.spawn_viewer_render(viewer, self.tabs.len() - 1, window, cx);
+                }
                 self.focus_active(window, cx);
                 cx.notify();
             }
@@ -769,6 +812,57 @@ impl Workspace {
         }
     }
 
+    /// Render a tab's file through its viewer plugin and swap the tab
+    /// to Preview when done. Failure leaves the source editor — a
+    /// broken viewer never hides a file.
+    fn spawn_viewer_render(
+        &mut self,
+        plugin: String,
+        tab_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Tab::Editor { editor, .. }) = self.tabs.get(tab_ix) else {
+            return;
+        };
+        let editor = editor.clone();
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let host = state.0.clone();
+        let filename = editor.read(cx).title().to_string();
+        let content = editor.read(cx).text();
+        let run = cx.background_executor().spawn(async move {
+            host.lock().unwrap().render_view(&plugin, &filename, &content)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = run.await;
+            if let Ok(markdown) = result {
+                this.update_in(cx, |this, window, cx| {
+                    let langs = languages(cx);
+                    let title = editor.read(cx).title();
+                    let reader = cx.new(|_| Reader::from_source(title, &markdown, &langs));
+                    // Only swap if that tab still shows this editor in
+                    // Edit view (the user may have toggled or closed).
+                    if let Some(Tab::Editor { editor: e, view }) = this.tabs.get_mut(tab_ix) {
+                        if *e == editor && matches!(view, EditorView::Edit) {
+                            *view = EditorView::Preview(reader);
+                            // The editor's focus handle just left the
+                            // tree; refocus so keybindings keep
+                            // dispatching (palette, ⌘E, …).
+                            if tab_ix == this.active {
+                                this.focus_active(window, cx);
+                            }
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     fn toggle_preview(&mut self, _: &TogglePreview, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Tab::Editor { editor, view }) = self.tabs.get(self.active) else {
             return;
@@ -781,12 +875,24 @@ impl Workspace {
             }
         } else {
             editor.update(cx, |editor, cx| editor.flush(cx));
-            let title = editor.read(cx).title();
-            let text = editor.read(cx).text();
-            let langs = languages(cx);
-            let reader = cx.new(|_| Reader::from_source(title, &text, &langs));
-            if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
-                *view = EditorView::Preview(reader);
+            // Viewer-claimed files re-render through the plugin so
+            // edits show; everything else previews its own markdown.
+            let viewer = editor
+                .read(cx)
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .and_then(crate::extensions::viewer_for_extension);
+            if let Some(plugin) = viewer {
+                self.spawn_viewer_render(plugin, self.active, window, cx);
+            } else {
+                let title = editor.read(cx).title();
+                let text = editor.read(cx).text();
+                let langs = languages(cx);
+                let reader = cx.new(|_| Reader::from_source(title, &text, &langs));
+                if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
+                    *view = EditorView::Preview(reader);
+                }
             }
         }
         self.focus_active(window, cx);
@@ -906,6 +1012,376 @@ impl Workspace {
         self.search = None;
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.dismiss_palette(window, cx);
+            return;
+        }
+        let (entries, failures) = match cx.try_global::<crate::extensions::ExtensionState>() {
+            Some(state) => {
+                let host = state.0.lock().unwrap();
+                let mut entries = host
+                    .plugins()
+                    .iter()
+                    .flat_map(|p| {
+                        p.commands.iter().map(|c| crate::palette::PaletteEntry {
+                            plugin: p.name.clone(),
+                            id: c.id.clone(),
+                            title: c.title.clone(),
+                        }).collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                for name in &crate::extensions::format_plugins() {
+                    entries.push(crate::palette::PaletteEntry {
+                        plugin: name.clone(),
+                        id: "__format".into(),
+                        title: format!("Format: {name}"),
+                    });
+                }
+                for p in host.plugins() {
+                    for e in &p.exports {
+                        entries.push(crate::palette::PaletteEntry {
+                            plugin: p.name.clone(),
+                            id: format!("__export:{}", e.id),
+                            title: format!("Export: {}", e.name),
+                        });
+                    }
+                }
+                for (plugin, id, name) in crate::extensions::template_entries() {
+                    entries.push(crate::palette::PaletteEntry {
+                        plugin,
+                        id: format!("__template:{id}"),
+                        title: format!("New: {name}"),
+                    });
+                }
+                let failures = host
+                    .failures()
+                    .iter()
+                    .map(|(dir, e)| format!("{}: {e}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+                    .collect();
+                (entries, failures)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        let palette = cx.new(|cx| crate::palette::Palette::new(entries, failures, cx));
+        let subscription = cx.subscribe_in(
+            &palette,
+            window,
+            |this, _p, event, window, cx| match event {
+                crate::palette::PaletteEvent::Run { plugin, id } => {
+                    let (plugin, id) = (plugin.clone(), id.clone());
+                    this.dismiss_palette(window, cx);
+                    this.run_plugin_command(plugin, id, window, cx);
+                }
+                crate::palette::PaletteEvent::Dismissed => this.dismiss_palette(window, cx),
+            },
+        );
+        window.focus(&palette.focus_handle(cx));
+        self.palette = Some((palette, subscription));
+        cx.notify();
+    }
+
+    fn dismiss_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn show_command_error(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.command_error = Some(msg.into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            this.update(cx, |this, cx| {
+                this.command_error = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn run_plugin_command(
+        &mut self,
+        plugin: String,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Templates need a workspace, not an editor — handled before
+        // the editable-tab guard.
+        if let Some(template_id) = id.strip_prefix("__template:") {
+            let Some(root) = self.tree.as_ref().map(|t| t.root.clone()) else {
+                self.show_command_error("Open a folder to use templates".to_string(), cx);
+                return;
+            };
+            let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+                return;
+            };
+            let host = state.0.clone();
+            let ctx_data = crate::extensions::template_context(
+                &root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            let template_id = template_id.to_string();
+            let run = cx.background_executor().spawn(async move {
+                host.lock().unwrap().render_template(&plugin, &template_id, &ctx_data)
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = run.await;
+                this.update_in(cx, |this, window, cx| match result {
+                    Ok((filename, content)) => {
+                        match crate::extensions::materialize_template(&root, &filename, &content)
+                        {
+                            Ok((path, _created)) => {
+                                if let Some(tree) = &mut this.tree {
+                                    tree.refresh();
+                                }
+                                this.open_path(&path, window, cx);
+                            }
+                            Err(e) => this.show_command_error(e, cx),
+                        }
+                    }
+                    Err(e) => this.show_command_error(e, cx),
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        let Some(Tab::Editor { editor, view: EditorView::Edit }) = self.tabs.get(self.active)
+        else {
+            self.show_command_error("Commands need an editable tab".to_string(), cx);
+            return;
+        };
+        let editor = editor.clone();
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let host = state.0.clone();
+        let (document, selection) = editor.read(cx).command_snapshot();
+        if id == "__format" {
+            let snapshot = document.clone();
+            let plugin_bg = plugin.clone();
+            let run = cx.background_executor().spawn(async move {
+                host.lock().unwrap().format_document(&plugin_bg, &document)
+            });
+            cx.spawn(async move |this, cx| {
+                let result = run.await;
+                this.update(cx, |this, cx| match result {
+                    Ok(formatted) => {
+                        let current = editor.read(cx).command_snapshot().0;
+                        match crate::extensions::apply_if_unchanged(&snapshot, &current, formatted)
+                        {
+                            Some(text) => editor.update(cx, |editor, cx| {
+                                editor.apply_command_output(
+                                    &crate::extensions::CommandOutput::ReplaceDocument(text),
+                                    cx,
+                                );
+                            }),
+                            None => this.show_command_error(
+                                "document changed while formatting; run again".into(),
+                                cx,
+                            ),
+                        }
+                    }
+                    Err(e) => this.handle_plugin_error(plugin.clone(), e, cx),
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        if let Some(format) = id.strip_prefix("__export:") {
+            let format = format.to_string();
+            let plugin_bg = plugin.clone();
+            let theme =
+                crate::diagram::DiagramTheme::from_theme(&crate::theme::theme(cx));
+            let stem = editor
+                .read(cx)
+                .path()
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "export".to_string());
+            let extension = state
+                .0
+                .lock()
+                .unwrap()
+                .plugins()
+                .iter()
+                .find(|p| p.name == plugin)
+                .and_then(|p| {
+                    p.exports.iter().find(|e| e.id == format).map(|e| e.extension.clone())
+                })
+                .unwrap_or_else(|| "txt".to_string());
+            let run = cx.background_executor().spawn(async move {
+                host.lock().unwrap().export_document(&plugin_bg, &document, &format, &theme)
+            });
+            cx.spawn(async move |this, cx| {
+                let result = run.await;
+                this.update(cx, |this, cx| match result {
+                    Ok(files) => match crate::extensions::validate_export_paths(&files) {
+                        Ok(()) => this.finish_export(files, stem, extension, cx),
+                        Err(e) => this.show_command_error(e, cx),
+                    },
+                    Err(e) => this.handle_plugin_error(plugin.clone(), e, cx),
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        let plugin_bg = plugin.clone();
+        let run = cx.background_executor().spawn(async move {
+            host.lock().unwrap().run_command(&plugin_bg, &id, &document, selection)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = run.await;
+            this.update(cx, |this, cx| match result {
+                Ok(out) => {
+                    editor.update(cx, |editor, cx| editor.apply_command_output(&out, cx));
+                }
+                Err(e) => this.handle_plugin_error(plugin.clone(), e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The plugin produced export bytes; the user picks where they
+    /// land — a save dialog for one file, a directory for several.
+    fn finish_export(
+        &mut self,
+        files: Vec<(String, Vec<u8>)>,
+        stem: String,
+        extension: String,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::extensions::{write_export, ExportDest};
+        if files.len() == 1 {
+            let rx = cx.prompt_for_new_path(
+                &crate::platform::home_dir(),
+                Some(&format!("{stem}.{extension}")),
+            );
+            cx.spawn(async move |this, cx| {
+                if let Ok(Ok(Some(path))) = rx.await {
+                    let result = write_export(&files, &ExportDest::File(path));
+                    this.update(cx, |this, cx| {
+                        this.show_command_error(
+                            result.err().unwrap_or_else(|| "Exported".to_string()),
+                            cx,
+                        );
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        } else {
+            let rx = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: None,
+            });
+            cx.spawn(async move |this, cx| {
+                if let Ok(Ok(Some(paths))) = rx.await {
+                    if let Some(dir) = paths.into_iter().next() {
+                        let result = write_export(&files, &ExportDest::Dir(dir));
+                        this.update(cx, |this, cx| {
+                            this.show_command_error(
+                                result.err().unwrap_or_else(|| "Exported".to_string()),
+                                cx,
+                            );
+                        })
+                        .ok();
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Consent-shaped errors raise the Allow/Deny banner; everything
+    /// else is a transient strip.
+    fn handle_plugin_error(&mut self, plugin: String, error: String, cx: &mut Context<Self>) {
+        if error.contains("awaiting consent") {
+            self.consent_request = Some((plugin, "workspace-read".to_string()));
+            cx.notify();
+        } else if let Some(domain) = error.split("consent required: ").nth(1) {
+            self.consent_request = Some((plugin, format!("net:{}", domain.trim())));
+            cx.notify();
+        } else {
+            self.show_command_error(error, cx);
+        }
+    }
+
+    fn resolve_consent(&mut self, allow: bool, cx: &mut Context<Self>) {
+        let Some((plugin, cap)) = self.consent_request.take() else {
+            return;
+        };
+        let dir = crate::settings::config_dir();
+        let mut settings = crate::settings::load(&dir);
+        let grant = if allow { cap.clone() } else { format!("denied:{cap}") };
+        settings.plugin_grants.entry(plugin).or_default().push(grant);
+        let _ = crate::settings::save(&dir, &settings);
+        if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
+            state.0.lock().unwrap().set_grants(settings.plugin_grants.clone());
+        }
+        if allow && cap.starts_with("net:") {
+            // Retry the enrichment that raised the banner.
+            if let Some(Tab::Editor { editor, .. }) = self.tabs.get(self.active) {
+                editor.clone().update(cx, |editor, cx| editor.retry_enrich(cx));
+                return;
+            }
+        }
+        self.show_command_error(
+            if allow {
+                "Access granted — run the command again".to_string()
+            } else {
+                "Access denied".to_string()
+            },
+            cx,
+        );
+    }
+
+    fn reload_plugins(&mut self, _: &ReloadPlugins, _window: &mut Window, cx: &mut Context<Self>) {
+        let plugins_dir = crate::settings::config_dir().join("plugins");
+        let mut host = crate::extensions::ExtensionHost::load(&plugins_dir);
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        host.set_grants(settings.plugin_grants.clone());
+        if let Some(tree) = &self.tree {
+            host.set_workspace_root(Some(tree.root.clone()));
+        }
+        crate::extensions::refresh_tables(&mut host);
+        for (dir, err) in host.failures() {
+            eprintln!("supermd: plugin failed: {}: {err}", dir.display());
+        }
+        let count = host.plugins().len();
+        if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
+            *state.0.lock().unwrap() = host;
+        }
+        if cx.try_global::<crate::diagram::DiagramCache>().is_some() {
+            cx.global_mut::<crate::diagram::DiagramCache>().clear();
+        }
+        self.show_command_error(format!("Plugins reloaded: {count}"), cx);
+        cx.refresh_windows();
+    }
+
+    fn open_plugins_folder(
+        &mut self,
+        _: &OpenPluginsFolder,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let dir = crate::settings::config_dir().join("plugins");
+        let _ = std::fs::create_dir_all(&dir);
+        crate::platform::reveal_dir(&dir);
     }
 
     // ── sidebar keyboard navigation ────────────────────────────────────
@@ -2066,6 +2542,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::toggle_finder))
             .on_action(cx.listener(Self::toggle_search))
+            .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(Self::open_plugins_folder))
+            .on_action(cx.listener(Self::reload_plugins))
             .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent_ix(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent_ix(1, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent2, w, cx| this.open_recent_ix(2, w, cx)))
@@ -2356,6 +2835,142 @@ impl Render for Workspace {
                                     cx,
                                     |t, w, c| t.toggle_shortcuts(&ToggleShortcuts, w, c),
                                 )),
+                        ),
+                )
+            })
+            .when_some(self.palette.as_ref(), |root, (palette, _)| {
+                let palette = palette.clone();
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .pt(px(110.))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.dismiss_palette(window, cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(palette),
+                        ),
+                )
+            })
+            .when_some(self.consent_request.clone(), |root, (plugin, cap)| {
+                let t = theme(cx);
+                let msg = if let Some(domain) = cap.strip_prefix("net:") {
+                    format!("Plugin \"{plugin}\" wants to access {domain}")
+                } else {
+                    format!("Plugin \"{plugin}\" wants to read files in this workspace")
+                };
+                root.child(
+                    div()
+                        .absolute()
+                        .bottom_4()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_3()
+                                .py(px(8.))
+                                .rounded_md()
+                                .bg(t.panel_bg)
+                                .border_1()
+                                .border_color(t.border)
+                                .shadow_lg()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_3()
+                                .text_size(px(12.))
+                                .child(div().text_color(t.fg).child(SharedString::from(msg)))
+                                .child(
+                                    div()
+                                        .id("consent-allow")
+                                        .px_2()
+                                        .py(px(3.))
+                                        .rounded_md()
+                                        .bg(t.accent)
+                                        .text_color(t.bg)
+                                        .cursor_pointer()
+                                        .child("Allow")
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                            this.resolve_consent(true, cx);
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("consent-deny")
+                                        .px_2()
+                                        .py(px(3.))
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_color(t.fg_muted)
+                                        .hover(|s| s.bg(t.hover_bg))
+                                        .child("Deny")
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                            this.resolve_consent(false, cx);
+                                        })),
+                                ),
+                        ),
+                )
+            })
+            .when_some(
+                // Status strip: widget-plugin text for the active editor.
+                match self.tabs.get(self.active) {
+                    Some(Tab::Editor { editor, view: EditorView::Edit })
+                        if !crate::extensions::widget_plugins().is_empty() =>
+                    {
+                        editor.read(cx).status()
+                    }
+                    _ => None,
+                },
+                |root, status| {
+                    let t = theme(cx);
+                    root.child(
+                        div()
+                            .absolute()
+                            .bottom_2()
+                            .right_4()
+                            .px_2()
+                            .py(px(3.))
+                            .rounded_md()
+                            .bg(t.panel_bg)
+                            .text_size(px(11.))
+                            .text_color(t.fg_muted)
+                            .child(status),
+                    )
+                },
+            )
+            .when_some(self.command_error.clone(), |root, msg| {
+                let t = theme(cx);
+                root.child(
+                    div()
+                        .absolute()
+                        .bottom_4()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_3()
+                                .py(px(6.))
+                                .rounded_md()
+                                .bg(t.diff_deleted_bg)
+                                .text_size(px(12.))
+                                .text_color(t.diff_deleted_fg)
+                                .child(msg),
                         ),
                 )
             })
@@ -4138,5 +4753,291 @@ mod tests {
         }
         assert!(dismissed, "the Not-now button cleared the banner");
         assert!(move_failed, "the Move button reported the expected failure");
+    }
+
+    // ── plugin shell: palette commands, templates, exports, consent,
+    //    viewers, reload ──────────────────────────────────────────────
+
+    /// Load the fixture plugins into the ExtensionState global and the
+    /// contribution tables. Skips (returns false) when fixtures are
+    /// absent.
+    fn with_plugins(cx: &mut TestAppContext) -> bool {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        if !dir.join("echo/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built (scripts/build_plugins.sh --fixtures)");
+            return false;
+        }
+        let mut host = crate::extensions::ExtensionHost::load(&dir);
+        crate::extensions::refresh_tables(&mut host);
+        cx.update(|cx| {
+            cx.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
+        });
+        true
+    }
+
+    fn active_editor_text(ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> String {
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            match w.tabs.get(w.active) {
+                Some(Tab::Editor { editor, .. }) => editor.read(app).text(),
+                _ => panic!("active tab is not an editor"),
+            }
+        })
+    }
+
+    #[gpui::test]
+    fn palette_opens_and_plugin_commands_apply(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, a, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        // The palette overlay builds its entries from the host tables.
+        cx.dispatch_action(TogglePalette);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).palette.is_some(), "palette open"));
+        cx.dispatch_action(TogglePalette);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).palette.is_none(), "palette toggled away"));
+
+        // A plain command inserts at the cursor…
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("echo".into(), "echo.run".into(), window, cx)
+        });
+        cx.run_until_parked();
+        assert!(active_editor_text(&ws, cx).contains("echo:echo.run"));
+
+        // …and the formatter path rewrites the whole document (echo's
+        // format-document uppercases).
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("echo".into(), "__format".into(), window, cx)
+        });
+        cx.run_until_parked();
+        let text = active_editor_text(&ws, cx);
+        assert!(text.contains("ECHO:ECHO.RUN"), "{text}");
+    }
+
+    #[gpui::test]
+    fn template_command_materializes_and_opens_the_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("probe".into(), "__template:note".into(), window, cx)
+        });
+        cx.run_until_parked();
+        let journal = std::fs::read_dir(root.path().join("from-template"))
+            .unwrap()
+            .flatten()
+            .next()
+            .expect("template file created");
+        assert!(journal.file_name().to_string_lossy().starts_with("note-"));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let path = w.tabs[w.active].path(app).expect("template tab open");
+            assert!(path.starts_with(root.path().join("from-template")));
+        });
+        // Running it again opens the existing file instead of erroring.
+        let before = std::fs::read_dir(root.path().join("from-template")).unwrap().count();
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("probe".into(), "__template:note".into(), window, cx)
+        });
+        cx.run_until_parked();
+        let after = std::fs::read_dir(root.path().join("from-template")).unwrap().count();
+        assert_eq!(before, after, "idempotent");
+    }
+
+    #[gpui::test]
+    fn export_writes_through_the_save_dialog(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, a, _) = workspace_fixture();
+        let dest = root.path().join("exported.txt");
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        // fetcher's "one" format returns a single file: the flow ends
+        // in prompt_for_new_path. The export runs in the background, so
+        // park first (prompt becomes pending), then answer it.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("fetcher".into(), "__export:one".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_new_path_selection({
+            let dest = dest.clone();
+            move |_| Some(dest.clone())
+        });
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "# a\n");
+    }
+
+    #[gpui::test]
+    fn consent_banner_flow_persists_grants(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, a, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        // reader declares workspace-read with no grant: the formatter
+        // path raises the consent banner instead of running.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("reader".into(), "__format".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(
+                w.consent_request,
+                Some(("reader".to_string(), "workspace-read".to_string()))
+            );
+        });
+        ws.update_in(cx, |ws, _, cx| ws.resolve_consent(true, cx));
+        cx.run_until_parked();
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        assert_eq!(settings.plugin_grants["reader"], ["workspace-read"]);
+        cx.update(|_, app| assert!(ws.read(app).consent_request.is_none()));
+
+        // A second request denied persists the refusal.
+        ws.update_in(cx, |ws, _, cx| {
+            ws.handle_plugin_error("probe".into(), "consent required: example.com".into(), cx)
+        });
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| ws.resolve_consent(false, cx));
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        assert_eq!(settings.plugin_grants["probe"], ["denied:net:example.com"]);
+    }
+
+    #[gpui::test]
+    fn viewer_files_open_rendered_and_toggle_to_source(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, _, _) = workspace_fixture();
+        let prb = root.path().join("view-me.prb");
+        std::fs::write(&prb, "probe body\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&prb, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(
+                matches!(w.tabs[w.active], Tab::Editor { view: EditorView::Preview(_), .. }),
+                "viewer file opens as a rendered preview"
+            );
+        });
+        // ⌘E to source and back to the (re-rendered) view.
+        cx.dispatch_action(TogglePreview);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(matches!(w.tabs[w.active], Tab::Editor { view: EditorView::Edit, .. }));
+        });
+        cx.dispatch_action(TogglePreview);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(matches!(
+                w.tabs[w.active],
+                Tab::Editor { view: EditorView::Preview(_), .. }
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn status_strip_renders_widget_text(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        let (root, a, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        // Let the debounced widget refresh land, then draw the strip.
+        for _ in 0..10 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(200));
+            cx.run_until_parked();
+        }
+        let status = cx.update(|_, app| {
+            let w = ws.read(app);
+            match w.tabs.get(w.active) {
+                Some(Tab::Editor { editor, .. }) => editor.read(app).status(),
+                _ => None,
+            }
+        });
+        assert!(status.is_some(), "probe's len widget filled the strip");
+        ws.update_in(cx, |_, _, cx| cx.notify());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn template_errors_surface_in_the_command_strip(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        // No folder open: templates need a workspace root.
+        let (ws, cx) = open_arg(cx, None);
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("probe".into(), "__template:note".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let msg = ws.read(app).command_error.clone().expect("error strip");
+            assert!(msg.contains("folder"), "{msg}");
+        });
+
+        // Unknown template id: the plugin's error lands in the strip.
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("probe".into(), "__template:ghost".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let msg = ws.read(app).command_error.clone().expect("error strip");
+            assert!(msg.contains("ghost") || msg.contains("unknown"), "{msg}");
+        });
+    }
+
+    #[gpui::test]
+    fn reload_plugins_rebuilds_the_host(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        if !with_plugins(cx) {
+            return;
+        }
+        // A plugins dir under the temp HOME with just the echo fixture.
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        let plugins = crate::settings::config_dir().join("plugins/echo");
+        std::fs::create_dir_all(&plugins).unwrap();
+        for f in ["plugin.toml", "plugin.wasm"] {
+            std::fs::copy(fixtures.join("echo").join(f), plugins.join(f)).unwrap();
+        }
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.reload_plugins(&ReloadPlugins, window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let state = app.global::<crate::extensions::ExtensionState>();
+            let names: Vec<String> =
+                state.0.lock().unwrap().plugins().iter().map(|p| p.name.clone()).collect();
+            assert_eq!(names, ["echo"], "reload swapped to the temp-HOME plugin set");
+        });
+        let _ = ws;
     }
 }

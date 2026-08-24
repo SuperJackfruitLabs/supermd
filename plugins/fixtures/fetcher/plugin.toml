@@ -1,0 +1,17 @@
+name = "fetcher"
+version = "0.1.0"
+formats = true
+capabilities = ["net"]
+
+[[exports]]
+id = "one"
+name = "One"
+extension = "txt"
+
+[[exports]]
+id = "many"
+name = "Many"
+
+[[exports]]
+id = "evil"
+name = "Evil"

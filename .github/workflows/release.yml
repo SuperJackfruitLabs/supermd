@@ -114,12 +114,17 @@ jobs:
         run: |
           cargo install cargo-deb --locked
           cargo deb --no-build -o dist/
+      - name: Build plugins
+        run: |
+          bash scripts/build_plugins.sh
+          (cd dist && zip -r supermd-plugins.zip plugins)
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: |
             dist/supermd-linux-*.tar.gz
             dist/*.deb
+            dist/supermd-plugins.zip
           if-no-files-found: error
 
   windows:

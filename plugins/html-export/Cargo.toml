@@ -1,0 +1,14 @@
+[package]
+name = "html-export"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+# rlib so render_html is unit-testable on the host target.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen = "0.60"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

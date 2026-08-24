@@ -1,0 +1,6 @@
+name = "tidy"
+version = "0.1.0"
+description = "Smart punctuation formatter and CSV-paste-to-table"
+authors = ["SuperJackfruitLabs"]
+formats = true
+paste = true

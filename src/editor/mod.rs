@@ -58,7 +58,7 @@ const PAGE_LINES: usize = 40;
 
 enum Provider {
     Markdown,
-    Code(&'static str),
+    Code(String),
     Plain,
 }
 
@@ -111,6 +111,8 @@ pub struct Editor {
     line_kinds: Vec<LineKind>,
     blocks: Vec<blocks::BlockInfo>,
     claims: Vec<(usize, projector::Claim)>,
+    /// Inline-cache generation this editor last styled against.
+    inline_gen: u64,
     projection: Vec<projection::Item>,
     path: PathBuf,
     pub save: SavePolicy,
@@ -125,6 +127,61 @@ pub struct Editor {
     find: Option<FindState>,
     scrollbar_dragging: bool,
     scroll_anim: Option<gpui::Task<()>>,
+    /// A paste awaiting (or retrying) net enrichment.
+    pending_enrich: Option<PendingEnrich>,
+    /// Latest widget-plugin status line ("1,234 words · 6 min read").
+    status_text: Option<SharedString>,
+    /// Debounce handle: replacing it cancels the pending refresh.
+    status_task: Option<gpui::Task<()>>,
+}
+
+/// Snapshot taken right after a paste lands, so a background enricher
+/// can replace the pasted range iff the document has not moved.
+struct PendingEnrich {
+    range: Range<usize>,
+    snapshot: String,
+    pasted: String,
+}
+
+pub enum EditorEvent {
+    /// A net-capable enricher needs a per-domain grant
+    /// (cap is "net:<domain>").
+    ConsentNeeded { plugin: String, cap: String },
+}
+
+impl gpui::EventEmitter<EditorEvent> for Editor {}
+
+/// Run the save-hook chain: each plugin sees the previous result;
+/// Err/None leave the text unchanged for the next.
+fn chain_save_hooks(
+    text: String,
+    path: &str,
+    plugins: &[String],
+    mut call: impl FnMut(&str, &str, &str) -> Result<Option<String>, String>,
+) -> String {
+    plugins.iter().fold(text, |acc, plugin| match call(plugin, path, &acc) {
+        Ok(Some(next)) => next,
+        _ => acc,
+    })
+}
+
+/// Compute the enriched document's replacement range, or None when the
+/// document changed since the paste snapshot (the enrichment is then
+/// forfeited — recorded honest limit).
+fn enrich_plan(
+    current: &str,
+    pasted: Range<usize>,
+    snapshot: &str,
+    replacement: &str,
+) -> Option<(String, Range<usize>)> {
+    if current != snapshot {
+        return None;
+    }
+    let mut out = String::with_capacity(current.len());
+    out.push_str(&current[..pasted.start]);
+    out.push_str(replacement);
+    out.push_str(&current[pasted.end..]);
+    Some((out, pasted.start..pasted.start + replacement.len()))
 }
 
 /// One backup registry per app session, shared by all editors.
@@ -172,6 +229,7 @@ impl Editor {
             line_kinds: Vec::new(),
             blocks: Vec::new(),
             claims: Vec::new(),
+            inline_gen: 0,
             projection: Vec::new(),
             path: path.to_path_buf(),
             save: SavePolicy::default(),
@@ -186,8 +244,12 @@ impl Editor {
             find: None,
             scrollbar_dragging: false,
             scroll_anim: None,
+            pending_enrich: None,
+            status_text: None,
+            status_task: None,
         };
         editor.restyle(langs);
+        editor.schedule_status(cx);
         editor
     }
 
@@ -209,11 +271,27 @@ impl Editor {
 
     fn restyle(&mut self, langs: &Languages) {
         let text = self.core.buffer.text();
-        self.spans = match self.provider {
+        self.spans = match &self.provider {
             Provider::Markdown => spans::markdown_spans_highlighted(&text, langs),
-            Provider::Code(lang) => spans::code_spans(&text, lang, langs),
+            Provider::Code(lang) => spans::code_spans(&text, lang.as_str(), langs),
             Provider::Plain => Vec::new(),
         };
+        // Plugin inline pass: cache hits become replacement spans;
+        // misses go to the background drainer (never wasm here).
+        if matches!(self.provider, Provider::Markdown) {
+            let (extra, misses) = crate::extensions::with_inline_table(|table| {
+                let lookup = |p: &str, i: &str, m: &str| crate::extensions::inline_lookup(p, i, m);
+                spans::inline_pass(&text, &self.spans, table, &lookup)
+            });
+            {
+                if !extra.is_empty() {
+                    self.spans.extend(extra);
+                    self.spans.sort_by_key(|s| (s.range.start, s.range.end));
+                }
+                crate::extensions::enqueue_inline(misses);
+            }
+        }
+        self.inline_gen = crate::extensions::inline_generation();
         self.line_kinds = spans::line_kinds(&text, &self.spans);
         self.blocks = match self.provider {
             Provider::Markdown => blocks::blocks(&text),
@@ -257,9 +335,9 @@ impl Editor {
             other => (crate::diff::DiffDoc::default(), Some(other)),
         };
         let (adds, dels) = crate::diff::counts(&doc);
-        let spans = match self.provider {
+        let spans = match &self.provider {
             Provider::Markdown => spans::markdown_spans_highlighted(&doc.text, langs),
-            Provider::Code(lang) => spans::code_spans(&doc.text, lang, langs),
+            Provider::Code(lang) => spans::code_spans(&doc.text, lang.as_str(), langs),
             Provider::Plain => Vec::new(),
         };
         let line_kinds = spans::line_kinds(&doc.text, &spans);
@@ -442,7 +520,49 @@ impl Editor {
             self.recompute_matches(&query);
         }
         self.reveal_cursor();
+        self.schedule_status(cx);
         cx.notify();
+    }
+
+    /// Latest widget status line, if any plugin produced one.
+    pub fn status(&self) -> Option<SharedString> {
+        self.status_text.clone()
+    }
+
+    /// Debounced status-widget refresh (500ms after the last edit).
+    /// Zero cost when no widget plugins are loaded.
+    pub fn schedule_status(&mut self, cx: &mut Context<Self>) {
+        if crate::extensions::widget_plugins().is_empty() {
+            return;
+        }
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let host = state.0.clone();
+        self.status_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let Ok(document) = this.update(cx, |this, _| this.core.buffer.text()) else {
+                return;
+            };
+            let text = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut host = host.lock().unwrap();
+                    let parts: Vec<String> = crate::extensions::widget_plugins()
+                        .iter()
+                        .filter_map(|p| host.status_text(p, &document).ok())
+                        .collect();
+                    parts.join(" · ")
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.status_text = (!text.is_empty()).then(|| text.into());
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Replace the buffer with the on-disk content (clean buffers only —
@@ -474,7 +594,59 @@ impl Editor {
     }
 
     /// The one save path: conflict check → backup → atomic write.
+    /// Format-on-save (opt-in): synchronous under the plugin epoch cap;
+    /// any failure saves the original unformatted text.
+    fn maybe_format_before_save(&mut self, cx: &mut Context<Self>) {
+        if !crate::settings::load(&crate::settings::config_dir()).format_on_save {
+            return;
+        }
+        let plugins = crate::extensions::format_plugins();
+        let Some(plugin) = plugins.first() else {
+            return;
+        };
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let snapshot = self.core.buffer.text();
+        let result = state.0.lock().unwrap().format_document(plugin, &snapshot);
+        if let Ok(formatted) = result {
+            if formatted != snapshot {
+                self.apply_command_output(
+                    &crate::extensions::CommandOutput::ReplaceDocument(formatted),
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// Always-on pre-save transforms (hooks = ["save"]), after the
+    /// optional formatter. The flush path is synchronous on the main
+    /// thread, so the buffer cannot move between snapshot and apply —
+    /// the same guarantee the formatter relies on.
+    fn run_save_hooks(&mut self, cx: &mut Context<Self>) {
+        let plugins = crate::extensions::hook_plugins();
+        if plugins.is_empty() {
+            return;
+        }
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let snapshot = self.core.buffer.text();
+        let path = self.path.to_string_lossy().into_owned();
+        let result = chain_save_hooks(snapshot.clone(), &path, &plugins, |p, path, doc| {
+            state.0.lock().unwrap().on_save(p, path, doc)
+        });
+        if result != snapshot {
+            self.apply_command_output(
+                &crate::extensions::CommandOutput::ReplaceDocument(result),
+                cx,
+            );
+        }
+    }
+
     pub fn flush(&mut self, cx: &mut Context<Self>) {
+        self.maybe_format_before_save(cx);
+        self.run_save_hooks(cx);
         if !self.save.take_flush_now() {
             return;
         }
@@ -531,6 +703,36 @@ impl Editor {
     fn insert_str(&mut self, text: &str, cx: &mut Context<Self>) {
         self.core.insert(text, Instant::now());
         self.after_edit(cx);
+    }
+
+    /// Apply a plugin command result as one undo group.
+    pub fn apply_command_output(
+        &mut self,
+        out: &crate::extensions::CommandOutput,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::extensions::CommandOutput as O;
+        self.core.break_undo_group();
+        match out {
+            O::ReplaceDocument(s) => {
+                self.core.selection = Selection { anchor: 0, head: self.core.buffer.text().len() };
+                self.core.insert(s, Instant::now());
+            }
+            O::ReplaceSelection(s) => {
+                self.core.insert(s, Instant::now());
+            }
+            O::InsertAtCursor(s) => {
+                self.core.set_cursor(self.core.selection.head);
+                self.core.insert(s, Instant::now());
+            }
+        }
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    /// Snapshot for building a plugin command-input.
+    pub fn command_snapshot(&self) -> (String, std::ops::Range<usize>) {
+        (self.core.buffer.text(), self.core.selection.range())
     }
 
     // ── action handlers ────────────────────────────────────────────────
@@ -711,8 +913,103 @@ impl Editor {
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.insert_str(&text, cx);
+            // Paste processors: first Some wins; errors/None pass the
+            // original through. Synchronous under the epoch deadline —
+            // paste is an explicit action.
+            let mut out = text.clone();
+            let paste_plugins = crate::extensions::paste_plugins();
+            if !paste_plugins.is_empty() {
+                if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
+                    let mut host = state.0.lock().unwrap();
+                    for plugin in &paste_plugins {
+                        if let Ok(Some(replaced)) = host.process_paste(plugin, &text) {
+                            out = replaced;
+                            break;
+                        }
+                    }
+                }
+            }
+            self.insert_str(&out, cx);
+            // Net-capable paste plugins run asynchronously after the
+            // paste lands — a network call must never block the UI.
+            if !crate::extensions::enrich_plugins().is_empty() {
+                let head = self.core.selection.head;
+                self.pending_enrich = Some(PendingEnrich {
+                    range: head - out.len()..head,
+                    snapshot: self.core.buffer.text(),
+                    pasted: out.clone(),
+                });
+                self.start_enrich(cx);
+            }
         }
+    }
+
+    /// Run net-capable paste plugins in the background; first Some
+    /// wins. A consent-shaped failure keeps `pending_enrich` so the
+    /// workspace can retry after the grant.
+    fn start_enrich(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_enrich.as_ref() else {
+            return;
+        };
+        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+            return;
+        };
+        let host = state.0.clone();
+        let text = pending.pasted.clone();
+        let task = cx.background_executor().spawn(async move {
+            let mut consent: Option<(String, String)> = None;
+            for plugin in crate::extensions::enrich_plugins() {
+                match host.lock().unwrap().process_paste(&plugin, &text) {
+                    Ok(Some(replacement)) => return Ok(Some(replacement)),
+                    Ok(None) => {}
+                    Err(e) => {
+                        if let Some(domain) = e.split("consent required: ").nth(1) {
+                            consent = Some((plugin, format!("net:{}", domain.trim())));
+                        }
+                        // other errors: enrichment is best-effort
+                    }
+                }
+            }
+            match consent {
+                Some(c) => Err(c),
+                None => Ok(None),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| match result {
+                Ok(Some(replacement)) => this.apply_enrichment(&replacement, cx),
+                Ok(None) => this.pending_enrich = None,
+                Err((plugin, cap)) => {
+                    cx.emit(EditorEvent::ConsentNeeded { plugin, cap });
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn apply_enrichment(&mut self, replacement: &str, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_enrich.take() else {
+            return;
+        };
+        let current = self.core.buffer.text();
+        if enrich_plan(&current, pending.range.clone(), &pending.snapshot, replacement)
+            .is_none()
+        {
+            return; // document moved; forfeit
+        }
+        self.core.break_undo_group();
+        self.core.selection =
+            Selection { anchor: pending.range.start, head: pending.range.end };
+        self.core.insert(replacement, Instant::now());
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    /// Called by the workspace after a net grant lands.
+    pub fn retry_enrich(&mut self, cx: &mut Context<Self>) {
+        self.start_enrich(cx);
     }
 
     fn save_now(&mut self, _: &SaveNow, _: &mut Window, cx: &mut Context<Self>) {
@@ -1079,6 +1376,7 @@ impl Editor {
 
     /// Source-space style attributes for one line, one entry per byte.
     fn line_attrs(&self, ix: usize, t: &Theme) -> (String, Vec<Attr>) {
+        // (decoration overlay applied below, after style spans)
         let range = self.view_buffer().line_range(ix);
         let text = self.view_buffer().line_text(ix);
         let (_, base_weight, family, _) = self.line_typography(ix, t);
@@ -1123,6 +1421,10 @@ impl Editor {
                     StyleKind::FenceDelimiter => {
                         a.color = Hsla { a: 0.55, ..t.fg_muted };
                     }
+                    StyleKind::InlineReplace(_) => {
+                        // Rendering handled by the display transform;
+                        // source text (when revealed) keeps base style.
+                    }
                     StyleKind::Syntax(capture) => {
                         if let Some(c) = Self::syntax_color(*capture, t) {
                             a.color = c;
@@ -1133,6 +1435,25 @@ impl Editor {
                         {
                             a.italic = true;
                         }
+                    }
+                }
+            }
+        }
+
+        // Plugin decoration overlays (prose lines only).
+        if !self.is_code_mode()
+            && !matches!(self.view_line_kinds().get(ix), Some(LineKind::Code))
+        {
+            for (deco, color, is_bg) in crate::extensions::with_decoration_table(|table| {
+                decoration_overlay(&text, &range, table, t)
+            }) {
+                let start = deco.start.max(range.start) - range.start;
+                let end = deco.end.min(range.end) - range.start;
+                for a in &mut attrs[start..end] {
+                    if is_bg {
+                        a.bg = Some(color);
+                    } else {
+                        a.color = color;
                     }
                 }
             }
@@ -1246,6 +1567,106 @@ struct Attr {
     bg: Option<Hsla>,
     underline: bool,
     strike: bool,
+}
+
+
+/// Decoration overlay for one line: absolute byte ranges + color, from
+/// host-compiled plugin decoration rules. Pure — table injected.
+fn decoration_overlay(
+    line_text: &str,
+    line_range: &Range<usize>,
+    table: &[crate::extensions::CompiledDecoration],
+    t: &Theme,
+) -> Vec<(Range<usize>, Hsla, bool)> {
+    // (range, color, is_background)
+    let mut out = Vec::new();
+    for rule in table {
+        let (color, is_bg) = match rule.style.as_str() {
+            "accent" => (t.accent, false),
+            "muted" => (t.fg_muted, false),
+            "strong" => (t.fg_strong, false),
+            "highlight" => (t.find_match_bg, true),
+            _ => continue,
+        };
+        for m in rule.regex.find_iter(line_text) {
+            out.push((
+                line_range.start + m.start()..line_range.start + m.end(),
+                color,
+                is_bg,
+            ));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::chain_save_hooks;
+
+    #[test]
+    fn hooks_chain_in_order_and_skip_failures() {
+        let plugins = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let out = chain_save_hooks("x".into(), "f.md", &plugins, |p, _, doc| match p {
+            "a" => Ok(Some(format!("{doc}a"))),
+            "b" => Err("boom".into()),
+            _ => Ok(Some(format!("{doc}c"))),
+        });
+        assert_eq!(out, "xac");
+        let none = chain_save_hooks("x".into(), "f.md", &plugins, |_, _, _| Ok(None));
+        assert_eq!(none, "x");
+    }
+}
+
+#[cfg(test)]
+mod enrich_tests {
+    use super::enrich_plan;
+
+    #[test]
+    fn enrichment_applies_only_when_snapshot_matches() {
+        assert_eq!(
+            enrich_plan("abc URL def", 4..7, "abc URL def", "[T](URL)"),
+            Some(("abc [T](URL) def".to_string(), 4..12))
+        );
+        // document moved since the paste → discard
+        assert_eq!(enrich_plan("abc URL defX", 4..7, "abc URL def", "[T](URL)"), None);
+    }
+}
+
+#[cfg(test)]
+mod decoration_tests {
+    use super::*;
+
+    #[test]
+    fn decorations_match_and_map_styles() {
+        let table = vec![crate::extensions::CompiledDecoration {
+            regex: regex::Regex::new(r"\b(TODO|FIXME)\b").unwrap(),
+            style: "accent".into(),
+        }];
+        let t = Theme::light();
+        let hits = decoration_overlay("a TODO here", &(100..111), &table, &t);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, 102..106);
+        assert_eq!(hits[0].1, t.accent);
+        assert!(!hits[0].2);
+    }
+
+    #[test]
+    fn unknown_style_skipped_and_highlight_is_bg() {
+        let table = vec![
+            crate::extensions::CompiledDecoration {
+                regex: regex::Regex::new("x").unwrap(),
+                style: "sparkle".into(),
+            },
+            crate::extensions::CompiledDecoration {
+                regex: regex::Regex::new("y").unwrap(),
+                style: "highlight".into(),
+            },
+        ];
+        let t = Theme::light();
+        let hits = decoration_overlay("xy", &(0..2), &table, &t);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].2, "highlight is a background style");
+    }
 }
 
 /// Compress per-byte attributes into TextRuns.
@@ -1798,6 +2219,12 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.inline_gen != crate::extensions::inline_generation()
+            && matches!(self.provider, Provider::Markdown)
+        {
+            let langs = crate::highlight::languages(cx);
+            self.restyle(&langs);
+        }
         self.reproject();
         let entity = cx.weak_entity();
         let t = theme(cx);
@@ -2201,6 +2628,139 @@ mod tests {
                 .filter(|item| matches!(item, projection::Item::Widget { .. }))
                 .count()
         })
+    }
+
+    /// Widgets (table, image, diagrams) render through the projector
+    /// registry: the initial frame draws each claim's widget arm, and
+    /// diagram results (ready or failed) land after the background
+    /// render settles.
+    #[gpui::test]
+    fn projector_widgets_render_in_the_window(cx: &mut TestAppContext) {
+        let doc = "intro line\n\n\
+                   | h1 | h2 |\n| --- | --- |\n| a | b |\n\n\
+                   ![pic](missing.png)\n\n\
+                   ```mermaid\nflowchart TD\n  A --> B\n```\n\n\
+                   ```mermaid\nthis is not a diagram\n```\n\n\
+                   tail\n";
+        let (_fx, editor, cx) = open_editor(cx, "widgets.md", doc);
+        // Cursor sits in the intro line: every claim is untouched.
+        assert_eq!(widget_count(&editor, cx), 4, "table, image, two diagrams");
+        // Let the diagram renders finish and redraw (ready + failed arms).
+        for _ in 0..20 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+        }
+        cx.update(|_, app| {
+            editor.update(app, |_, cx| cx.notify());
+        });
+        cx.run_until_parked();
+        assert_eq!(widget_count(&editor, cx), 4, "widgets survive the redraw");
+        // Touching a widget's range dissolves it back to source lines.
+        editor.update_in(cx, |editor, _, cx| {
+            let table_start = doc.find('|').unwrap();
+            editor.core.set_cursor(table_start);
+            editor.after_edit(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(widget_count(&editor, cx), 3, "touched table dissolves");
+    }
+
+    /// A fenced block claimed by the echo plugin renders through the
+    /// PluginBlock projector (pending spinner, then the rasterized SVG
+    /// or the failure arm).
+    #[gpui::test]
+    fn plugin_fence_renders_as_a_widget(cx: &mut TestAppContext) {
+        if !with_plugins(cx) {
+            return;
+        }
+        let doc = "intro\n\n```echo-fixture\nhello widget\n```\n\ntail\n";
+        let (_fx, editor, cx) = open_editor(cx, "plugin-widget.md", doc);
+        assert_eq!(widget_count(&editor, cx), 1, "echo fence claimed");
+        // Let the background plugin render + rasterize land, then
+        // redraw so the Ready/Failed arm executes.
+        for _ in 0..30 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+        }
+        editor.update_in(cx, |_, _, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(widget_count(&editor, cx), 1, "widget survives the redraw");
+        crate::extensions::set_surface_tables(&[]);
+        crate::extensions::set_fence_table(Vec::new());
+    }
+
+    /// Load the fixture plugins into the tables + global; false = skip.
+    fn with_plugins(cx: &mut TestAppContext) -> bool {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/plugins");
+        if !dir.join("probe/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built");
+            return false;
+        }
+        let mut host = crate::extensions::ExtensionHost::load(&dir);
+        crate::extensions::refresh_tables(&mut host);
+        cx.update(|cx| {
+            cx.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
+        });
+        true
+    }
+
+    #[gpui::test]
+    fn save_hooks_transform_on_flush(cx: &mut TestAppContext) {
+        if !with_plugins(cx) {
+            return;
+        }
+        // probe's on-save appends a marker when the doc says "hookme".
+        let (_fx, editor, cx) = open_editor(cx, "hooked.md", "hookme");
+        editor.update_in(cx, |editor, _, cx| {
+            editor.save.record_edit(Instant::now());
+            editor.flush(cx);
+        });
+        cx.run_until_parked();
+        let text = buffer_text(&editor, cx);
+        assert!(text.contains("<!-- saved -->"), "{text}");
+        crate::extensions::set_surface_tables(&[]);
+    }
+
+    #[gpui::test]
+    fn net_paste_plugins_enrich_after_the_paste(cx: &mut TestAppContext) {
+        if !with_plugins(cx) {
+            return;
+        }
+        let (_fx, editor, cx) = open_editor(cx, "enrich.md", "");
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_string("enrichme".into()))
+        });
+        cx.dispatch_action(Paste);
+        // The paste lands synchronously; the async enrich pass then
+        // replaces the pasted range (often within the first park).
+        for _ in 0..20 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+            if buffer_text(&editor, cx) == "[enriched]" {
+                break;
+            }
+        }
+        assert_eq!(buffer_text(&editor, cx), "[enriched]");
+        crate::extensions::set_surface_tables(&[]);
+    }
+
+    #[gpui::test]
+    fn status_widgets_fill_the_editor_status(cx: &mut TestAppContext) {
+        if !with_plugins(cx) {
+            return;
+        }
+        let (_fx, editor, cx) = open_editor(cx, "status.md", "12345");
+        for _ in 0..10 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(200));
+            cx.run_until_parked();
+            if cx.update(|_, app| editor.read(app).status().is_some()) {
+                break;
+            }
+        }
+        let status = cx.update(|_, app| editor.read(app).status());
+        assert_eq!(status.map(|s| s.to_string()), Some("status:5".to_string()));
+        crate::extensions::set_surface_tables(&[]);
     }
 
     #[gpui::test]

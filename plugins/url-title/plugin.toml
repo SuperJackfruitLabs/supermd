@@ -1,0 +1,4 @@
+name = "url-title"
+version = "0.1.0"
+paste = true
+capabilities = ["net"]

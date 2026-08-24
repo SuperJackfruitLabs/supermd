@@ -14,7 +14,7 @@ notify = "6"
 anyhow = "1.0.104"
 inkjet = { version = "0.11.1", features = ["all_languages"] }
 tree-sitter-xml = "0.7"
-tree-sitter = "0.23"
+tree-sitter = { version = "0.23", features = ["wasm"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
 similar = { version = "2", features = ["unicode"] }
@@ -26,6 +26,11 @@ gix = { version = "0.87.0", default-features = false, features = ["status", "ind
 merman = "=0.8.0-alpha.5"
 resvg = "0.48"
 serde_json = "1.0.151"
+wasmtime = { version = "48", default-features = false, features = ["runtime", "component-model", "cranelift", "parallel-compilation"] }
+wasmtime-wasi = "48"
+regex = "1.13.1"
+ureq = "3"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"

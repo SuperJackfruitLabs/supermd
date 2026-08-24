@@ -1,0 +1,8 @@
+name = "emoji"
+version = "0.1.0"
+description = "Emoji shortcodes rendered inline"
+authors = ["SuperJackfruitLabs"]
+
+[[inline]]
+id = "shortcode"
+pattern = ":([a-z0-9_+-]+):"

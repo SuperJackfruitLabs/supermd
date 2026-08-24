@@ -1,0 +1,54 @@
+package supermd:extension@0.2.0;
+
+interface types {
+    /// Palette entry contributed by a plugin.
+    record command-info { id: string, title: string }
+
+    /// The active theme, for renderers that produce themed output.
+    record theme {
+        background: string,
+        surface: string,
+        primary: string,
+        text: string,
+        muted: string,
+        border: string,
+        font-body: string,
+        dark: bool,
+    }
+
+    record command-input {
+        document: string,
+        selection-start: u32,
+        selection-end: u32,
+    }
+
+    variant command-output {
+        replace-document(string),
+        replace-selection(string),
+        insert-at-cursor(string),
+    }
+}
+
+world extension {
+    use types.{theme, command-input, command-output};
+
+    /// Render a claimed fenced block to SVG.
+    export render-block: func(lang: string, source: string, theme: theme)
+        -> result<string, string>;
+
+    /// Run a contributed command.
+    export run-command: func(id: string, input: command-input)
+        -> result<command-output, string>;
+
+    /// Replace one inline pattern match (cached by matched text).
+    export render-inline: func(pattern-id: string, matched: string)
+        -> result<string, string>;
+
+    /// Normalize a whole document ("Format Document" / on-save).
+    export format-document: func(document: string)
+        -> result<string, string>;
+
+    /// Transform pasted text; none = leave the paste unchanged.
+    export process-paste: func(text: string)
+        -> result<option<string>, string>;
+}

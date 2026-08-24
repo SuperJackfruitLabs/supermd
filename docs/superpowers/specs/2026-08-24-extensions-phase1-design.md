@@ -87,9 +87,11 @@ Reserved for later phases (present in the parser, rejected in Phase
 
 - `wasmtime` with the component model; `wasmtime::component::bindgen!`
   over the WIT above generates typed bindings. Version pinned at
-  implementation; no WASI imports in Phase 1 (pure world), so the
-  linker is empty — a plugin that expects WASI fails to link with a
-  readable error.
+  implementation. The wasip2 standard library requires core WASI
+  interfaces even for pure code, so the linker provides WASI with a
+  ZERO-GRANT context: no preopened directories, no env, no args, no
+  network — only stderr is inherited so plugin panics are debuggable.
+  The capability surface is empty in every way that matters.
 - Discovery: scan `~/.supermd/plugins/*/plugin.toml` at startup; each
   dir needs `plugin.toml` + `plugin.wasm`. Parse failures and link
   failures are collected (never fatal) into a load report:

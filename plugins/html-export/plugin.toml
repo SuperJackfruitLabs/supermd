@@ -1,0 +1,7 @@
+name = "html-export"
+version = "0.1.0"
+
+[[exports]]
+id = "html"
+name = "HTML"
+extension = "html"

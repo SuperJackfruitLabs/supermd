@@ -1,0 +1,7 @@
+name = "echo"
+version = "0.1.0"
+fences = ["echo-fixture"]
+
+[[commands]]
+id = "echo.run"
+title = "Fixture echo"

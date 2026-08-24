@@ -223,6 +223,11 @@ impl DiagramCache {
     pub fn len(&self) -> usize {
         self.map.len()
     }
+
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -257,6 +262,63 @@ pub fn diagram_state(source: &str, width: f32, cx: &mut gpui::App) -> DiagramSta
             Ok((png, _, _)) => {
                 DiagramState::Ready(Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)))
             }
+            Err(e) => DiagramState::Failed(e),
+        };
+        cx.update(|cx| {
+            cx.global_mut::<DiagramCache>().insert(key, state);
+            cx.refresh_windows();
+        })
+        .ok();
+    })
+    .detach();
+    DiagramState::Pending
+}
+
+/// Like `diagram_state`, but the SVG comes from a wasm plugin's
+/// render-block export instead of merman. Same cache, same states —
+/// the key folds in the plugin identity so upgrades re-render.
+pub fn plugin_diagram_state(
+    plugin: &str,
+    version: &str,
+    lang: &str,
+    source: &str,
+    width: f32,
+    cx: &mut gpui::App,
+) -> DiagramState {
+    let theme = DiagramTheme::from_theme(&crate::theme::theme(cx));
+    let key = DiagramKey {
+        source_hash: hash_str(&format!("{plugin}@{version}:{lang}\u{0}{source}")),
+        theme_fingerprint: theme.fingerprint(),
+        width_bucket: DiagramKey::bucket(width),
+    };
+    if cx.try_global::<DiagramCache>().is_none() {
+        cx.set_global(DiagramCache::default());
+    }
+    if let Some(state) = cx.global::<DiagramCache>().get(&key) {
+        return state.clone();
+    }
+    let Some(host) = cx
+        .try_global::<crate::extensions::ExtensionState>()
+        .map(|s| s.0.clone())
+    else {
+        return DiagramState::Failed("extensions not initialized".to_string());
+    };
+    cx.global_mut::<DiagramCache>().insert(key.clone(), DiagramState::Pending);
+
+    let (plugin, lang, source) = (plugin.to_string(), lang.to_string(), source.to_string());
+    let render = cx.background_executor().spawn(async move {
+        let svg = host
+            .lock()
+            .unwrap()
+            .render_block(&plugin, &lang, &source, &theme)?;
+        rasterize(&svg, 2.0)
+    });
+    cx.spawn(async move |cx| {
+        let state = match render.await {
+            Ok((png, _, _)) => DiagramState::Ready(Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                png,
+            ))),
             Err(e) => DiagramState::Failed(e),
         };
         cx.update(|cx| {

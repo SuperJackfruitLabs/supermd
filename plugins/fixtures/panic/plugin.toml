@@ -1,0 +1,7 @@
+name = "panic"
+version = "0.1.0"
+fences = ["panic-fixture"]
+
+[[commands]]
+id = "panic.run"
+title = "Fixture panic"

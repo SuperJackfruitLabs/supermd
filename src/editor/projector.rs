@@ -47,7 +47,12 @@ pub trait Projector: Send + Sync + 'static {
 
 /// Registered in priority order; earlier projectors win overlaps.
 pub fn projectors() -> &'static [&'static dyn Projector] {
-    static REGISTRY: &[&dyn Projector] = &[&TableProjector, &ImageProjector, &DiagramProjector];
+    static REGISTRY: &[&dyn Projector] = &[
+        &TableProjector,
+        &ImageProjector,
+        &DiagramProjector,
+        &PluginBlockProjector,
+    ];
     REGISTRY
 }
 
@@ -294,6 +299,159 @@ impl Projector for DiagramProjector {
     }
 }
 
+// ── plugin blocks ──────────────────────────────────────────────────────
+
+pub struct PluginBlockPayload {
+    pub plugin: String,
+    pub version: String,
+    pub lang: String,
+    pub body: String,
+}
+
+/// Pure claim computation against a (plugin, fences) table — the
+/// projector feeds it the global snapshot; tests inject their own.
+pub(crate) fn plugin_claims(
+    text: &str,
+    blocks: &[BlockInfo],
+    lines: &[Range<usize>],
+    table: &[(String, String, Vec<String>)], // (name, version, fences)
+) -> Vec<Claim> {
+    let closed = |range: &Range<usize>| {
+        blocks.iter().any(|b| {
+            matches!(&b.kind, BlockKind::Fence { close_line: Some(_), .. })
+                && b.range.start <= range.start
+                && range.end <= b.range.end + 1
+        })
+    };
+    super::spans::fence_infos(text)
+        .into_iter()
+        .filter(|f| f.fenced && closed(&f.block))
+        .filter_map(|f| {
+            let lang = f.lang.as_deref()?;
+            // First plugin claiming this lang wins.
+            let (name, version, _) = table
+                .iter()
+                .find(|(_, _, fences)| fences.iter().any(|x| x == lang))?;
+            let first = line_of_byte(lines, f.block.start);
+            let last = line_of_byte(lines, f.block.end.max(f.block.start + 1) - 1);
+            Some(Claim {
+                lines: first..last + 1,
+                bytes: f.block.clone(),
+                payload: Arc::new(PluginBlockPayload {
+                    plugin: name.clone(),
+                    version: version.clone(),
+                    lang: lang.to_string(),
+                    body: text.get(f.body.clone()).unwrap_or_default().to_string(),
+                }),
+            })
+        })
+        .collect()
+}
+
+pub struct PluginBlockProjector;
+
+impl Projector for PluginBlockProjector {
+    fn name(&self) -> &'static str {
+        "plugin-block"
+    }
+
+    fn discover(
+        &self,
+        text: &str,
+        blocks: &[BlockInfo],
+        lines: &[Range<usize>],
+    ) -> Vec<Claim> {
+        plugin_claims(text, blocks, lines, &crate::extensions::fence_table())
+    }
+
+    fn render(&self, ctx: &mut WidgetCtx<'_>) -> AnyElement {
+        use gpui::prelude::*;
+        use gpui::{div, px, SharedString};
+        let payload = ctx
+            .payload
+            .downcast_ref::<PluginBlockPayload>()
+            .expect("plugin block payload");
+        let t = ctx.theme;
+        let state = crate::diagram::plugin_diagram_state(
+            &payload.plugin,
+            &payload.version,
+            &payload.lang,
+            &payload.body,
+            664.0,
+            ctx.cx,
+        );
+        let handle = ctx.editor.clone();
+        let first_line = ctx.lines.start;
+        let dissolve = move |_: &gpui::ClickEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            handle.update(cx, |editor, cx| {
+                let start = editor.core.buffer.line_range(first_line).start;
+                editor.core.set_cursor(start);
+                editor.core.break_undo_group();
+                window.focus(&editor.focus_handle);
+                cx.notify();
+            });
+        };
+        match state {
+            crate::diagram::DiagramState::Ready(image) => div()
+                .id(("plugin-block", ctx.item_ix))
+                .my_1()
+                .w_full()
+                .flex()
+                .justify_center()
+                .cursor_pointer()
+                .on_click(dissolve)
+                .child(gpui::img(image).max_w_full().rounded_md())
+                .into_any_element(),
+            crate::diagram::DiagramState::Pending => div()
+                .my_1()
+                .w_full()
+                .min_h(px(120.))
+                .rounded_lg()
+                .bg(t.code_bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.))
+                .text_color(t.fg_muted)
+                .child(SharedString::from(format!("{}…", payload.plugin)))
+                .into_any_element(),
+            crate::diagram::DiagramState::Failed(msg) => div()
+                .id(("plugin-block-err", ctx.item_ix))
+                .my_1()
+                .w_full()
+                .flex()
+                .flex_col()
+                .cursor_pointer()
+                .on_click(dissolve)
+                .child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .rounded_t_lg()
+                        .bg(t.diff_deleted_bg)
+                        .text_size(px(11.))
+                        .text_color(t.diff_deleted_fg)
+                        .child(SharedString::from(format!(
+                            "{} error: {msg}",
+                            payload.plugin
+                        ))),
+                )
+                .child(
+                    div()
+                        .px_4()
+                        .py_3()
+                        .rounded_b_lg()
+                        .bg(t.code_bg)
+                        .font_family(t.mono_family.clone())
+                        .text_size(px(t.code_size))
+                        .text_color(t.code_fg)
+                        .child(SharedString::from(payload.body.clone())),
+                )
+                .into_any_element(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +464,25 @@ mod tests {
             start += line.len() + 1;
         }
         out
+    }
+
+    #[test]
+    fn plugin_fences_claimed_by_manifest_table() {
+        let src = "```echo-fixture\nhi\n```\n\n```rust\nfn x(){}\n```\n";
+        let lines = lines_of(src);
+        let blocks = crate::editor::blocks::blocks(src);
+        let table = vec![(
+            "echo".to_string(),
+            "0.1.0".to_string(),
+            vec!["echo-fixture".to_string()],
+        )];
+        let claims = plugin_claims(src, &blocks, &lines, &table);
+        assert_eq!(claims.len(), 1, "only the claimed fence");
+        let p = claims[0].payload.downcast_ref::<PluginBlockPayload>().unwrap();
+        assert_eq!(p.plugin, "echo");
+        assert_eq!(p.lang, "echo-fixture");
+        assert!(p.body.contains("hi"));
+        assert_eq!(claims[0].lines, 0..3); // open, body, close
     }
 
     #[test]
