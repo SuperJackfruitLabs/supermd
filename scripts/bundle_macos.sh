@@ -66,11 +66,15 @@ PLIST
 # Sign with a Developer ID identity when provided (hardened runtime,
 # notarization-ready); otherwise ad-hoc (right-click → Open on first
 # launch).
+# Entitlements: the wasm plugin runtime needs JIT under the hardened
+# runtime (see assets/entitlements.plist) — without them the notarized
+# app is SIGKILLed on the first plugin execution.
 if [ -n "${SIGN_IDENTITY:-}" ]; then
     codesign --force --deep --options runtime --timestamp \
+        --entitlements "$ROOT/assets/entitlements.plist" \
         --sign "$SIGN_IDENTITY" "$APP"
 else
-    codesign --force --deep --sign - "$APP"
+    codesign --force --deep --entitlements "$ROOT/assets/entitlements.plist" --sign - "$APP"
 fi
 
 echo "creating dmg…"

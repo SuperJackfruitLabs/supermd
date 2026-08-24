@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The plugin runtime (wasmtime) compiles WebAssembly to native
+         code at load time and executes it: allow-jit blesses MAP_JIT
+         mappings, and wasmtime additionally publishes compiled code
+         through plain mmap+mprotect, which the hardened runtime kills
+         (CODESIGNING: Invalid Page) without the second entitlement.
+         Both are required; verified against a hardened ad-hoc build
+         with plugins installed. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>
