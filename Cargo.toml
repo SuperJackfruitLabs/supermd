@@ -29,6 +29,7 @@ serde_json = "1.0.151"
 wasmtime = { version = "48", default-features = false, features = ["runtime", "component-model", "cranelift", "parallel-compilation"] }
 wasmtime-wasi = "48"
 regex = "1.13.1"
+ureq = "3"
 
 [dev-dependencies]
 tempfile = "3"

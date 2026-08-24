@@ -7,7 +7,7 @@ TARGET=wasm32-wasip2
 
 if [ "${1:-}" = "--fixtures" ]; then
     OUT="$ROOT/tests/fixtures/plugins"
-    CRATES="echo panic hang reader"
+    CRATES="echo panic hang reader fetcher"
     BASE="$ROOT/plugins/fixtures"
 else
     OUT="$ROOT/dist/plugins"
@@ -23,4 +23,16 @@ for name in $CRATES; do
     cp "$BASE/$name"/target/$TARGET/release/*.wasm "$OUT/$name/plugin.wasm"
     cp "$BASE/$name/plugin.toml" "$OUT/$name/plugin.toml"
 done
+
+# nofetch: the fetcher binary with a capability-free manifest — proves
+# net enforcement keys off the declaration, not the wasm.
+if [ "${1:-}" = "--fixtures" ]; then
+    mkdir -p "$OUT/nofetch"
+    cp "$OUT/fetcher/plugin.wasm" "$OUT/nofetch/plugin.wasm"
+    cat > "$OUT/nofetch/plugin.toml" <<'EOF'
+name = "nofetch"
+version = "0.1.0"
+formats = true
+EOF
+fi
 echo "built: $CRATES -> $OUT"
