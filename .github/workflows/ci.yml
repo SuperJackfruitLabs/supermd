@@ -25,6 +25,9 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig1-dev \
             libfreetype6-dev
+      - name: Build plugin fixtures (Linux exercises host tests)
+        if: runner.os == 'Linux'
+        run: bash scripts/build_plugins.sh --fixtures
       - name: Run tests
         run: cargo test
       - name: Build
