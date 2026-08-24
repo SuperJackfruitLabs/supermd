@@ -1,0 +1,7 @@
+name = "hang"
+version = "0.1.0"
+fences = ["hang-fixture"]
+
+[[commands]]
+id = "hang.run"
+title = "Fixture hang"

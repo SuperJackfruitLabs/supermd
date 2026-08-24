@@ -1,2 +1,6 @@
 /target
 /dist
+plugins/*/target/
+plugins/fixtures/*/target/
+tests/fixtures/plugins/
+dist/
