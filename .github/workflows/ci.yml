@@ -1,9 +1,14 @@
 name: CI
 
+# site/** and docs/** never affect the binary, so website and spec
+# changes skip app CI entirely. Root-level markdown (WELCOME.md, plugin
+# READMEs) is NOT ignored — some of it is compiled into the app.
 on:
   push:
     branches: [master]
+    paths-ignore: ['site/**', 'docs/**']
   pull_request:
+    paths-ignore: ['site/**', 'docs/**']
 
 jobs:
   test:
