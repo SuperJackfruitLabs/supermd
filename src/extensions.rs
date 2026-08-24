@@ -816,6 +816,56 @@ impl ExtensionHost {
     }
 }
 
+// ── export writing (host-owned; plugins never see paths) ─────────────
+
+/// Exporter paths must stay relative and inside the chosen directory.
+pub fn validate_export_paths(files: &[(String, Vec<u8>)]) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("exporter returned no files".to_string());
+    }
+    for (path, _) in files {
+        let p = Path::new(path);
+        let bad = p.as_os_str().is_empty()
+            || p.is_absolute()
+            || p.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            });
+        if bad {
+            return Err(format!("exporter returned an unsafe path: {path}"));
+        }
+    }
+    Ok(())
+}
+
+/// Where an export lands: the exact file the user picked (single-file
+/// exports) or a user-picked directory (multi-file exports).
+pub enum ExportDest {
+    File(PathBuf),
+    Dir(PathBuf),
+}
+
+pub fn write_export(files: &[(String, Vec<u8>)], dest: &ExportDest) -> Result<(), String> {
+    validate_export_paths(files)?;
+    match dest {
+        ExportDest::File(path) => std::fs::write(path, &files[0].1).map_err(|e| e.to_string()),
+        ExportDest::Dir(root) => {
+            for (rel, bytes) in files {
+                let target = root.join(rel);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&target, bytes).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Global handle; plugin calls lock briefly on the background executor.
 pub struct ExtensionState(pub std::sync::Arc<std::sync::Mutex<ExtensionHost>>);
 
@@ -1037,6 +1087,62 @@ pub fn compile_decorations(metas: &[PluginMeta]) -> Vec<CompiledDecoration> {
                 .map(|regex| CompiledDecoration { regex, style: d.style.clone() })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    fn f(path: &str) -> (String, Vec<u8>) {
+        (path.to_string(), b"x".to_vec())
+    }
+
+    #[test]
+    fn validate_rejects_traversal_absolute_and_empty() {
+        assert!(validate_export_paths(&[f("ok.txt")]).is_ok());
+        assert!(validate_export_paths(&[f("sub/ok.txt")]).is_ok());
+        assert!(validate_export_paths(&[f("../evil.txt")]).is_err());
+        assert!(validate_export_paths(&[f("sub/../../evil.txt")]).is_err());
+        assert!(validate_export_paths(&[f("/abs.txt")]).is_err());
+        assert!(validate_export_paths(&[]).is_err());
+    }
+
+    #[test]
+    fn write_single_file_lands_at_exact_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = ExportDest::File(dir.path().join("chosen-name.html"));
+        write_export(&[("ignored.html".into(), b"body".to_vec())], &dest).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("chosen-name.html")).unwrap(), b"body");
+    }
+
+    #[test]
+    fn write_many_creates_subdirs_under_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = ExportDest::Dir(dir.path().to_path_buf());
+        write_export(
+            &[
+                ("index.html".into(), b"i".to_vec()),
+                ("assets/style.css".into(), b"c".to_vec()),
+            ],
+            &dest,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(dir.path().join("assets/style.css")).unwrap(), b"c");
+    }
+
+    #[test]
+    fn evil_export_paths_are_rejected() {
+        let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        if !d.join("fetcher/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built");
+            return;
+        }
+        let mut host = ExtensionHost::load(&d);
+        let files = host
+            .export_document("fetcher", "d", "evil", &crate::diagram::DiagramTheme::default_light())
+            .unwrap();
+        assert!(validate_export_paths(&files).is_err());
+    }
 }
 
 #[cfg(test)]
