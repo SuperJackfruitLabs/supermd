@@ -75,8 +75,20 @@ fi
 
 echo "creating dmg…"
 DMG="$DIST/supermd-${VERSION}.dmg"
-hdiutil create -volname SuperMD -srcfolder "$APP" -ov -format UDZO \
+# Dressed DMG: display-named app, /Applications symlink, background,
+# and the committed Finder layout (.DS_Store).
+STAGING="$DIST/dmg-staging"
+rm -rf "$STAGING"
+mkdir -p "$STAGING/.background"
+ditto "$APP" "$STAGING/SuperMD.app"   # ditto preserves signatures
+ln -s /Applications "$STAGING/Applications"
+cp "$ROOT/assets/dmg/bg@2x.png" "$STAGING/.background/bg@2x.png"
+if [ -f "$ROOT/assets/dmg/DS_Store" ]; then
+    cp "$ROOT/assets/dmg/DS_Store" "$STAGING/.DS_Store"
+fi
+hdiutil create -volname SuperMD -srcfolder "$STAGING" -ov -format UDZO \
     "$DMG" > /dev/null
+rm -rf "$STAGING"
 
 # The DMG needs its own signature too — spctl assesses the image's
 # primary signature, not just the app inside it.
