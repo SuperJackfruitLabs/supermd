@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e5a63b"/>
+      <stop offset="1" stop-color="#c9821c"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#fdfbf6"/>
+  <rect x="0" y="618" width="1200" height="12" fill="url(#amber)"/>
+  <rect x="92" y="150" width="180" height="180" rx="42" fill="url(#amber)"/>
+  <path d="M146.5 273 V208 L182 249.5 L217.5 208 V273"
+        stroke="#ffffff" stroke-width="17" fill="none"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="330" y="253" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="104" font-weight="700" fill="#211f1a">Super<tspan fill="#c9821c" font-weight="800">MD</tspan></text>
+  <text x="334" y="330" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="42" fill="#33302a">Markdown that gets out of the way.</text>
+  <text x="334" y="392" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="30" fill="#918b7d">Native, GPU-rendered editor for macOS. Hybrid WYSIWYG,</text>
+  <text x="334" y="436" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="30" fill="#918b7d">live tables &amp; diagrams, git diffs — plain files, forever.</text>
+  <text x="92" y="560" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="30" font-weight="600" fill="#c9821c">supermd.app</text>
+  <text x="1108" y="560" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="28" fill="#918b7d">Free &amp; open source</text>
+</svg>
