@@ -24,6 +24,23 @@ pub struct DecorationRule {
     pub style: String,
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+struct ExportInfoFile {
+    id: String,
+    name: String,
+    #[serde(default)]
+    extension: Option<String>,
+}
+
+/// An export format a plugin offers ("Export: <name>" in the palette).
+#[derive(Clone, Debug)]
+pub struct ExportInfo {
+    pub id: String,
+    pub name: String,
+    /// Suggested filename extension for the save dialog.
+    pub extension: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct PluginMeta {
     pub name: String,
@@ -34,6 +51,7 @@ pub struct PluginMeta {
     pub decorations: Vec<DecorationRule>,
     pub formats: bool,
     pub paste: bool,
+    pub exports: Vec<ExportInfo>,
     pub capabilities: Vec<String>,
     pub dir: PathBuf,
 }
@@ -59,8 +77,10 @@ struct ManifestFile {
     formats: bool,
     #[serde(default)]
     paste: bool,
-    /// Only "workspace-read" is understood; anything else is rejected
-    /// so old builds give a clear error for newer manifests.
+    #[serde(default)]
+    exports: Vec<ExportInfoFile>,
+    /// Only "workspace-read" and "net" are understood; anything else
+    /// is rejected so old builds give a clear error for newer manifests.
     #[serde(default)]
     capabilities: Vec<String>,
 }
@@ -68,10 +88,10 @@ struct ManifestFile {
 pub fn parse_manifest(dir: &Path, toml_src: &str) -> Result<PluginMeta, String> {
     let file: ManifestFile = toml::from_str(toml_src).map_err(|e| e.to_string())?;
     for cap in &file.capabilities {
-        if cap != "workspace-read" {
+        if !matches!(cap.as_str(), "workspace-read" | "net") {
             return Err(format!(
                 "manifest declares capability `{cap}`, which this SuperMD version \
-                 does not support (known: workspace-read)"
+                 does not support (known: workspace-read, net)"
             ));
         }
     }
@@ -95,6 +115,15 @@ pub fn parse_manifest(dir: &Path, toml_src: &str) -> Result<PluginMeta, String> 
         decorations: file.decorations,
         formats: file.formats,
         paste: file.paste,
+        exports: file
+            .exports
+            .into_iter()
+            .map(|e| ExportInfo {
+                id: e.id,
+                name: e.name,
+                extension: e.extension.unwrap_or_else(|| "txt".to_string()),
+            })
+            .collect(),
         capabilities: file.capabilities,
         dir: dir.to_path_buf(),
     })
@@ -838,13 +867,45 @@ title = "About Dot"
     }
 
     #[test]
-    fn capabilities_key_is_rejected_forward_compat() {
+    fn unknown_capability_still_rejected() {
         let err = parse_manifest(
+            Path::new("/p/x"),
+            "name=\"x\"\nversion=\"0\"\ncapabilities=[\"gpu\"]\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("gpu"), "{err}");
+    }
+
+    #[test]
+    fn net_capability_is_accepted() {
+        let m = parse_manifest(
             Path::new("/p/x"),
             "name=\"x\"\nversion=\"0\"\ncapabilities=[\"net\"]\n",
         )
-        .unwrap_err();
-        assert!(err.contains("net"), "{err}");
+        .unwrap();
+        assert_eq!(m.capabilities, ["net"]);
+    }
+
+    #[test]
+    fn exports_parse_with_default_extension() {
+        let m = parse_manifest(
+            Path::new("/p/x"),
+            r#"
+name = "x"
+version = "0"
+[[exports]]
+id = "html"
+name = "HTML"
+extension = "html"
+[[exports]]
+id = "raw"
+name = "Raw"
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.exports[0].id, "html");
+        assert_eq!(m.exports[0].extension, "html");
+        assert_eq!(m.exports[1].extension, "txt");
     }
 
     #[test]
