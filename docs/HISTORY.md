@@ -18,3 +18,4 @@ The phase-by-phase build record that used to live in WELCOME.md.
 | 11 | Workspace search, ignore-aware walking, gix, preview tabs | Done |
 | 12 | Onboarding: DMG, welcome tour, recents, open events | Done |
 | 13 | Projector registry + live mermaid diagrams | Done |
+| 14 | Linux + Windows: platform layer, chrome, packaging, 3-OS CI | Done |

@@ -11,13 +11,22 @@ Built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
 
 ## Installing
 
-Download the DMG, drag **SuperMD** onto **Applications**, done. If you
+**macOS** — download the DMG, drag **SuperMD** onto **Applications**, done. If you
 launch it straight from the disk image instead, SuperMD notices and
 offers to move itself. Releases are signed and notarized — no
 Gatekeeper warnings. Double-click any `.md` file to open it ("Open
 With → SuperMD" for other text), drop a folder on the window or Dock
 icon to open a workspace, and SuperMD reopens your last workspace on
 launch (File → Open Recent has the rest).
+
+**Linux** *(new)* — install the `.deb`, or unpack the tarball and run
+`./install.sh` (installs to `~/.local`, registers the .desktop entry
+and markdown association). Wayland and X11 both supported.
+
+**Windows** *(new)* — run `SuperMD-Setup-<version>.exe` (Start Menu
+entry, optional `.md` association, uninstaller) or use the portable
+zip. Builds are not yet code-signed, so SmartScreen shows one
+"unrecognized app" prompt — More info → Run anyway.
 
 ## What it does
 
@@ -72,8 +81,14 @@ stays thin.
 
 ## Building
 
-Requires Rust (stable) and macOS. No full Xcode needed — Metal shaders
-compile at runtime.
+Requires Rust (stable). On macOS no full Xcode is needed — Metal
+shaders compile at runtime. On Linux install the build deps first:
+
+```sh
+sudo apt-get install libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig1-dev \
+  libfreetype6-dev
+```
 
 ```sh
 cargo run            # opens an empty workspace (Open Folder… to pick one)
@@ -85,8 +100,8 @@ cargo test
 ## Status
 
 Early and moving fast — built as a working editor first, a product
-second. macOS only for now (GPUI is cross-platform; other platforms
-untested).
+second. macOS is the primary platform; Linux and Windows builds are
+new — feedback and issues welcome.
 
 ## License
 
