@@ -2,6 +2,7 @@ mod diff;
 mod editor;
 mod files;
 mod finder;
+mod git;
 mod highlight;
 mod input;
 mod markdown;
