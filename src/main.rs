@@ -1,3 +1,4 @@
+mod diff;
 mod editor;
 mod files;
 mod finder;
