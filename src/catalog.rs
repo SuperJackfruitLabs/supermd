@@ -46,6 +46,264 @@ pub fn url_allowed(url: &str) -> bool {
     ALLOWED_PREFIXES.iter().any(|p| url.starts_with(p))
 }
 
+// ── download + validate + install ─────────────────────────────────────
+
+/// The only path to the network for catalog/zip fetches. Host-side and
+/// user-initiated (no plugin sandbox involved); tests inject a mock.
+pub type Fetcher = std::sync::Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync>;
+
+const FETCH_LIMIT_BYTES: u64 = 20 * 1024 * 1024;
+
+pub fn ureq_fetcher() -> Fetcher {
+    std::sync::Arc::new(|url: &str| {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build();
+        let agent: ureq::Agent = config.into();
+        let response = agent.get(url).call().map_err(|e| e.to_string())?;
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        response
+            .into_body()
+            .into_reader()
+            .take(FETCH_LIMIT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > FETCH_LIMIT_BYTES {
+            return Err("download exceeds the 20 MB limit".to_string());
+        }
+        Ok(bytes)
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// A plugin zip must contain exactly one top-level directory named
+/// `expected_name`, traversal-free entries, a parseable manifest, and
+/// the files that manifest requires.
+pub fn validate_plugin_zip(bytes: &[u8], expected_name: &str) -> Result<(), String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|e| format!("not a zip: {e}"))?;
+    let mut roots = std::collections::BTreeSet::new();
+    let mut files = std::collections::BTreeSet::new();
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        // enclosed_name is None for traversal/absolute entries.
+        let Some(path) = entry.enclosed_name() else {
+            return Err(format!("unsafe zip entry: {}", entry.name()));
+        };
+        let mut components = path.components();
+        let Some(root) = components.next() else { continue };
+        roots.insert(root.as_os_str().to_string_lossy().into_owned());
+        if !entry.is_dir() {
+            files.insert(path.to_string_lossy().into_owned());
+        }
+    }
+    if roots.len() != 1 || !roots.contains(expected_name) {
+        return Err(format!(
+            "zip must contain exactly one plugin folder named {expected_name}"
+        ));
+    }
+    let manifest_path = format!("{expected_name}/plugin.toml");
+    if !files.contains(&manifest_path) {
+        return Err("zip has no plugin.toml".to_string());
+    }
+    let mut manifest_src = String::new();
+    {
+        use std::io::Read as _;
+        archive
+            .by_name(&manifest_path)
+            .map_err(|e| e.to_string())?
+            .read_to_string(&mut manifest_src)
+            .map_err(|e| e.to_string())?;
+    }
+    let meta = crate::extensions::parse_manifest(std::path::Path::new(expected_name), &manifest_src)?;
+    if meta.name != expected_name {
+        return Err(format!(
+            "manifest name {} does not match plugin {expected_name}",
+            meta.name
+        ));
+    }
+    if crate::extensions::manifest_needs_component(&meta)
+        && !files.contains(&format!("{expected_name}/plugin.wasm"))
+    {
+        return Err("zip is missing plugin.wasm".to_string());
+    }
+    for g in &meta.grammars {
+        let (wasm, scm) = crate::extensions::grammar_paths(std::path::Path::new(expected_name), g);
+        for required in [wasm, scm] {
+            if !files.contains(&required.to_string_lossy().into_owned()) {
+                return Err(format!("zip is missing {}", required.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fetch, verify, validate, and install one catalog entry. The plugins
+/// dir is only touched after everything checks out.
+pub fn install_plugin(
+    entry: &CatalogEntry,
+    plugins_dir: &std::path::Path,
+    fetch: &Fetcher,
+) -> Result<(), String> {
+    if !url_allowed(&entry.download) {
+        return Err(format!("download URL is not from the SuperMD repo: {}", entry.download));
+    }
+    let destination = plugins_dir.join(&entry.name);
+    if destination.exists() {
+        return Err(format!("{} is already installed", entry.name));
+    }
+    let bytes = fetch(&entry.download)?;
+    if sha256_hex(&bytes) != entry.sha256 {
+        return Err("download did not match the catalog checksum".to_string());
+    }
+    validate_plugin_zip(&bytes, &entry.name)?;
+    let staging = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(&bytes)).map_err(|e| e.to_string())?;
+    archive.extract(staging.path()).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(plugins_dir).map_err(|e| e.to_string())?;
+    // Cross-device safe: try rename, fall back to a copy.
+    let staged = staging.path().join(&entry.name);
+    if std::fs::rename(&staged, &destination).is_err() {
+        copy_tree(&staged, &destination).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)?.flatten() {
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    /// Build an in-memory plugin zip: entries are (path, bytes).
+    fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            for (path, bytes) in entries {
+                writer.start_file(*path, opts).unwrap();
+                writer.write_all(bytes).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    fn good_zip() -> Vec<u8> {
+        make_zip(&[
+            ("demo/plugin.toml", b"name=\"demo\"\nversion=\"0.1.0\"\nformats=true\n"),
+            ("demo/plugin.wasm", b"\0asm-stub"),
+        ])
+    }
+
+    fn entry_for(bytes: &[u8]) -> CatalogEntry {
+        CatalogEntry {
+            name: "demo".into(),
+            description: "d".into(),
+            version: "0.1.0".into(),
+            capabilities: vec![],
+            download: "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0/plugin-demo.zip".into(),
+            sha256: sha256_hex(bytes),
+        }
+    }
+
+    fn fetcher_of(bytes: Vec<u8>) -> (Fetcher, std::sync::Arc<std::sync::Mutex<u32>>) {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let calls2 = calls.clone();
+        let f: Fetcher = std::sync::Arc::new(move |_url| {
+            *calls2.lock().unwrap() += 1;
+            Ok(bytes.clone())
+        });
+        (f, calls)
+    }
+
+    #[test]
+    fn happy_path_installs_the_plugin() {
+        let zip_bytes = good_zip();
+        let entry = entry_for(&zip_bytes);
+        let (fetch, _) = fetcher_of(zip_bytes);
+        let dir = tempfile::tempdir().unwrap();
+        install_plugin(&entry, dir.path(), &fetch).unwrap();
+        let manifest = std::fs::read_to_string(dir.path().join("demo/plugin.toml")).unwrap();
+        assert!(manifest.contains("name=\"demo\""));
+        assert!(dir.path().join("demo/plugin.wasm").exists());
+    }
+
+    #[test]
+    fn zip_validation_rejects_bad_shapes() {
+        // traversal entry
+        let z = make_zip(&[("../evil.toml", b"x")]);
+        assert!(validate_plugin_zip(&z, "demo").is_err());
+        // wrong root dir name
+        assert!(validate_plugin_zip(&good_zip(), "other").is_err());
+        // two top-level dirs
+        let z = make_zip(&[
+            ("demo/plugin.toml", b"name=\"demo\"\nversion=\"0\"\nformats=true\n"),
+            ("demo/plugin.wasm", b"w"),
+            ("extra/file", b"x"),
+        ]);
+        assert!(validate_plugin_zip(&z, "demo").is_err());
+        // manifest that does not parse
+        let z = make_zip(&[("demo/plugin.toml", b"not toml ["), ("demo/plugin.wasm", b"w")]);
+        assert!(validate_plugin_zip(&z, "demo").is_err());
+        // manifest requiring a component but no plugin.wasm in the zip
+        let z = make_zip(&[("demo/plugin.toml", b"name=\"demo\"\nversion=\"0\"\nformats=true\n")]);
+        assert!(validate_plugin_zip(&z, "demo").is_err());
+        // the good one passes
+        assert!(validate_plugin_zip(&good_zip(), "demo").is_ok());
+    }
+
+    #[test]
+    fn sha_mismatch_and_bad_urls_are_rejected() {
+        let zip_bytes = good_zip();
+        let mut entry = entry_for(&zip_bytes);
+        let dir = tempfile::tempdir().unwrap();
+        // altered bytes → sha mismatch, nothing installed
+        entry.sha256 = "0000".into();
+        let (fetch, _) = fetcher_of(zip_bytes.clone());
+        assert!(install_plugin(&entry, dir.path(), &fetch).is_err());
+        assert!(!dir.path().join("demo").exists());
+        // foreign URL → fetcher never invoked
+        let mut entry = entry_for(&zip_bytes);
+        entry.download = "https://evil.example.com/plugin-demo.zip".into();
+        let (fetch, calls) = fetcher_of(zip_bytes);
+        assert!(install_plugin(&entry, dir.path(), &fetch).is_err());
+        assert_eq!(*calls.lock().unwrap(), 0, "fetcher must not be called");
+    }
+
+    #[test]
+    fn existing_destination_is_never_touched() {
+        let zip_bytes = good_zip();
+        let entry = entry_for(&zip_bytes);
+        let (fetch, _) = fetcher_of(zip_bytes);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("demo")).unwrap();
+        std::fs::write(dir.path().join("demo/user-file"), b"mine").unwrap();
+        assert!(install_plugin(&entry, dir.path(), &fetch).is_err());
+        assert!(dir.path().join("demo/user-file").exists(), "user content preserved");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
