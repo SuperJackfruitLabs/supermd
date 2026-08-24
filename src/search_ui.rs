@@ -322,7 +322,7 @@ impl Render for SearchOverlay {
         let results = uniform_list(
             "search-results",
             rows.len(),
-            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+            cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
                 let t = theme(cx);
                 range
                     .filter_map(|row_ix| {

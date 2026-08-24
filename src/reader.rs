@@ -22,7 +22,7 @@ pub struct TocEntry {
 pub struct Reader {
     pub path: Option<PathBuf>,
     pub title: SharedString,
-    pub document: Document,
+    pub document: std::sync::Arc<Document>,
     pub toc: Vec<TocEntry>,
     pub list_state: ListState,
     scroll_anim: Option<gpui::Task<()>>,
@@ -62,6 +62,7 @@ impl Reader {
                 _ => None,
             })
             .collect();
+        let document = std::sync::Arc::new(document);
         let list_state = ListState::new(document.blocks.len(), ListAlignment::Top, px(512.));
         Self {
             path,
@@ -125,8 +126,8 @@ impl Render for Reader {
                     return div().into_any_element();
                 };
                 let t = theme(cx);
-                let reader = reader.read(cx);
-                view::list_item(&reader.document, ix, &t)
+                let document = reader.read(cx).document.clone();
+                view::list_item(&document, ix, &t, cx)
             })
             .size_full(),
         )

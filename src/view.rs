@@ -190,7 +190,11 @@ fn code_block(
     code: &str,
     spans: &[(std::ops::Range<usize>, u8)],
     t: &Theme,
+    cx: &mut gpui::App,
 ) -> AnyElement {
+    if lang == Some("mermaid") {
+        return diagram_block(code, t, cx);
+    }
     let mut container = div()
         .rounded_lg()
         .bg(t.code_bg)
@@ -223,7 +227,60 @@ fn code_block(
         .into_any_element()
 }
 
-fn quote(blocks: &[Block], t: &Theme) -> AnyElement {
+/// Mermaid fences in the reader render through the shared diagram
+/// cache: image when ready, quiet box while pending, error strip +
+/// plain code on failure.
+fn diagram_block(code: &str, t: &Theme, cx: &mut gpui::App) -> AnyElement {
+    match crate::diagram::diagram_state(code, 664.0, cx) {
+        crate::diagram::DiagramState::Ready(image) => div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(gpui::img(image).max_w_full().rounded_md())
+            .into_any_element(),
+        crate::diagram::DiagramState::Pending => div()
+            .w_full()
+            .min_h(px(120.))
+            .rounded_lg()
+            .bg(t.code_bg)
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(12.))
+            .text_color(t.fg_muted)
+            .child("diagram…")
+            .into_any_element(),
+        crate::diagram::DiagramState::Failed(msg) => div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .rounded_t_lg()
+                    .bg(t.diff_deleted_bg)
+                    .text_size(px(11.))
+                    .text_color(t.diff_deleted_fg)
+                    .child(SharedString::from(format!("diagram error: {msg}"))),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .rounded_b_lg()
+                    .bg(t.code_bg)
+                    .font_family(t.mono_family.clone())
+                    .text_size(px(t.code_size))
+                    .line_height(relative(1.55))
+                    .text_color(t.code_fg)
+                    .child(SharedString::from(code.to_string())),
+            )
+            .into_any_element(),
+    }
+}
+
+fn quote(blocks: &[Block], t: &Theme, cx: &mut gpui::App) -> AnyElement {
     div()
         .flex()
         .flex_row()
@@ -237,12 +294,12 @@ fn quote(blocks: &[Block], t: &Theme) -> AnyElement {
                 .flex_col()
                 .gap_2()
                 .text_color(t.fg_muted)
-                .children(blocks.iter().map(|b| block(b, t))),
+                .children(blocks.iter().map(|b| block(b, t, cx)).collect::<Vec<_>>()),
         )
         .into_any_element()
 }
 
-fn list(start: Option<u64>, items: &[ListItem], t: &Theme) -> AnyElement {
+fn list(start: Option<u64>, items: &[ListItem], t: &Theme, cx: &mut gpui::App) -> AnyElement {
     let rows = items.iter().enumerate().map(|(index, item)| {
         let marker: AnyElement = match (item.checked, start) {
             (Some(done), _) => div()
@@ -280,7 +337,7 @@ fn list(start: Option<u64>, items: &[ListItem], t: &Theme) -> AnyElement {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .children(item.blocks.iter().map(|b| block(b, t))),
+                    .children(item.blocks.iter().map(|b| block(b, t, cx)).collect::<Vec<_>>()),
             )
     });
 
@@ -325,20 +382,20 @@ fn rule(t: &Theme) -> AnyElement {
     div().my_2().h(px(1.)).w_full().bg(t.border).into_any_element()
 }
 
-fn block(b: &Block, t: &Theme) -> AnyElement {
+fn block(b: &Block, t: &Theme, cx: &mut gpui::App) -> AnyElement {
     match b {
         Block::Paragraph(inline) => paragraph(inline, t),
         Block::Heading { level, content } => heading(*level, content, t),
-        Block::Code { lang, code, spans } => code_block(lang.as_deref(), code, spans, t),
-        Block::Quote(blocks) => quote(blocks, t),
-        Block::List { start, items } => list(*start, items, t),
+        Block::Code { lang, code, spans } => code_block(lang.as_deref(), code, spans, t, cx),
+        Block::Quote(blocks) => quote(blocks, t, cx),
+        Block::List { start, items } => list(*start, items, t, cx),
         Block::Table { head, rows } => table(head, rows, t),
         Block::Rule => rule(t),
     }
 }
 
 /// One top-level block as a list item, constrained to the reading column.
-pub fn list_item(doc: &Document, ix: usize, t: &Theme) -> AnyElement {
+pub fn list_item(doc: &Document, ix: usize, t: &Theme, cx: &mut gpui::App) -> AnyElement {
     let Some(b) = doc.blocks.get(ix) else {
         return div().into_any_element();
     };
@@ -356,7 +413,7 @@ pub fn list_item(doc: &Document, ix: usize, t: &Theme) -> AnyElement {
                 .px(px(48.))
                 .when(first, |d| d.pt(px(40.)))
                 .pb(if last { px(96.) } else { px(12.) })
-                .child(block(b, t)),
+                .child(block(b, t, cx)),
         )
         .into_any_element()
 }

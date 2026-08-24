@@ -27,6 +27,15 @@ fn main() {
 }
 ```
 
+Even diagrams are live — this is a ` ```mermaid ` fence. Click it to
+see (and edit) the source:
+
+```mermaid
+flowchart LR
+    write[Write] --> see[See it live]
+    see --> ship[Ship plain .md]
+```
+
 ## The five shortcuts worth learning first
 
 - **⌘O** — open a file or folder
