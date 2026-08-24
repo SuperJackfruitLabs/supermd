@@ -48,6 +48,29 @@ Declared in the manifest, granted by the user:
   domain prompts its own one-time consent banner on first fetch.
   Net-capable paste plugins run asynchronously after the paste.
 
+## Grammar plugins (syntax highlighting)
+
+A grammar plugin needs NO `plugin.wasm` — just three files:
+`plugin.toml`, `grammar.wasm` (a tree-sitter parser built with
+`scripts/build_grammar_wasm.sh`, which needs tree-sitter-cli 0.23.x
+and emscripten), and `highlights.scm` (tree-sitter highlight queries,
+Helix capture names):
+
+```toml
+name = "mylang"
+version = "0.1.0"
+
+[[grammars]]
+name = "mylang"                # must match the wasm's exported
+                               # tree_sitter_<name> symbol
+extensions = ["ml1", "ml2"]    # file extensions to claim
+```
+
+Fenced ```mylang blocks and standalone `.ml1` files highlight
+immediately. Built-in languages always win name collisions. Ship
+several grammars in one plugin by setting `files = "<stem>"` on each
+entry (`<stem>.wasm` + `<stem>.scm`).
+
 ## Troubleshooting
 
 - "failed: <name>" in the palette → the manifest didn't parse or the

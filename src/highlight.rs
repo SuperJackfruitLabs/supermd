@@ -41,8 +41,9 @@ impl Languages {
             tree_sitter_xml::LANGUAGE_XML.into(),
             tree_sitter_xml::XML_HIGHLIGHT_QUERY,
         );
-        // GraphQL blocked: its crate is generated at tree-sitter ABI 15,
-        // inkjet's 0.23 runtime accepts <= 14. Revisit on inkjet bump.
+        // GraphQL ships as a grammar PLUGIN (plugins/graphql) through
+        // the wasm registry below — its native crate is ABI 15, above
+        // inkjet's 0.23 runtime.
         Self { extras }
     }
 

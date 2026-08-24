@@ -44,6 +44,18 @@ pub struct GrammarInfo {
     pub files: Option<String>,
 }
 
+/// Grammar-only plugins ship grammar.wasm + highlights.scm instead of
+/// a component; anything with a component surface needs plugin.wasm.
+fn needs_component(meta: &PluginMeta) -> bool {
+    meta.grammars.is_empty()
+        || !meta.commands.is_empty()
+        || !meta.fences.is_empty()
+        || !meta.inline.is_empty()
+        || meta.formats
+        || meta.paste
+        || !meta.exports.is_empty()
+}
+
 /// (wasm, scm) paths for a grammar declaration.
 pub fn grammar_paths(dir: &Path, g: &GrammarInfo) -> (PathBuf, PathBuf) {
     match &g.files {
@@ -180,17 +192,7 @@ pub fn discover(plugins_dir: &Path) -> (Vec<PluginMeta>, Vec<(PathBuf, String)>)
             .map_err(|e| e.to_string())
             .and_then(|src| parse_manifest(&dir, &src))
             .and_then(|meta| {
-                // Grammar-only plugins ship grammar.wasm + highlights.scm
-                // instead of a component; anything with a component
-                // surface still needs plugin.wasm.
-                let needs_component = meta.grammars.is_empty()
-                    || !meta.commands.is_empty()
-                    || !meta.fences.is_empty()
-                    || !meta.inline.is_empty()
-                    || meta.formats
-                    || meta.paste
-                    || !meta.exports.is_empty();
-                if needs_component && !dir.join("plugin.wasm").exists() {
+                if needs_component(&meta) && !dir.join("plugin.wasm").exists() {
                     return Err("plugin.wasm missing".to_string());
                 }
                 for g in &meta.grammars {
@@ -445,7 +447,8 @@ enum Bound {
 
 struct LoadedPlugin {
     meta: PluginMeta,
-    component: wasmtime::component::Component,
+    /// None for grammar-only plugins (no component surfaces).
+    component: Option<wasmtime::component::Component>,
     /// Instantiated lazily; dropped after a trap so the next call
     /// gets a fresh store.
     instance: Option<Bound>,
@@ -480,10 +483,14 @@ impl ExtensionHost {
         let (metas, mut failures) = discover(plugins_dir);
         let mut plugins = Vec::new();
         for meta in metas {
+            if !needs_component(&meta) {
+                plugins.push(LoadedPlugin { meta, component: None, instance: None });
+                continue;
+            }
             match wasmtime::component::Component::from_file(&engine, meta.dir.join("plugin.wasm"))
             {
                 Ok(component) => {
-                    plugins.push(LoadedPlugin { meta, component, instance: None })
+                    plugins.push(LoadedPlugin { meta, component: Some(component), instance: None })
                 }
                 Err(e) => failures.push((meta.dir.clone(), format!("compile: {e:#}"))),
             }
@@ -610,6 +617,9 @@ impl ExtensionHost {
         let Some(slot) = self.plugins.iter_mut().find(|p| p.meta.name == plugin) else {
             return Err(format!("no such plugin '{plugin}'"));
         };
+        let Some(component) = slot.component.clone() else {
+            return Err(format!("plugin '{plugin}' has no component (grammar-only)"));
+        };
         if slot.instance.is_none() {
             let mut linker = wasmtime::component::Linker::new(&self.engine);
             // wasip2 std needs core WASI interfaces even for pure
@@ -626,12 +636,12 @@ impl ExtensionHost {
             // Try 0.3, fall back to 0.2, then 0.1.
             let mut store = wasmtime::Store::new(&self.engine, state_v3);
             store.set_epoch_deadline(CALL_DEADLINE_TICKS);
-            match v3::Extension::instantiate(&mut store, &slot.component, &linker) {
+            match v3::Extension::instantiate(&mut store, &component, &linker) {
                 Ok(instance) => slot.instance = Some(Bound::V3(store, instance)),
                 Err(_) => {
                     let mut store = wasmtime::Store::new(&self.engine, state_v2);
                     store.set_epoch_deadline(CALL_DEADLINE_TICKS);
-                    match v2::Extension::instantiate(&mut store, &slot.component, &linker) {
+                    match v2::Extension::instantiate(&mut store, &component, &linker) {
                         Ok(instance) => slot.instance = Some(Bound::V2(store, instance)),
                         Err(_) => {
                             // v1 plugins predate capabilities: zero-grant
@@ -639,7 +649,7 @@ impl ExtensionHost {
                                 wasmtime::Store::new(&self.engine, zero_grant_state());
                             store.set_epoch_deadline(CALL_DEADLINE_TICKS);
                             let instance =
-                                Extension::instantiate(&mut store, &slot.component, &linker)
+                                Extension::instantiate(&mut store, &component, &linker)
                                     .map_err(|e| format!("link: {e:#}"))?;
                             slot.instance = Some(Bound::V1(store, instance));
                         }

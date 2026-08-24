@@ -24,6 +24,15 @@ for name in $CRATES; do
     cp "$BASE/$name/plugin.toml" "$OUT/$name/plugin.toml"
 done
 
+# Grammar plugins ship committed artifacts — plain copy, no build.
+if [ "${1:-}" != "--fixtures" ]; then
+    for name in graphql; do
+        mkdir -p "$OUT/$name"
+        cp "$ROOT/plugins/$name/plugin.toml" "$ROOT/plugins/$name/grammar.wasm" \
+           "$ROOT/plugins/$name/highlights.scm" "$OUT/$name/"
+    done
+fi
+
 # nofetch: the fetcher binary with a capability-free manifest — proves
 # net enforcement keys off the declaration, not the wasm.
 if [ "${1:-}" = "--fixtures" ]; then
