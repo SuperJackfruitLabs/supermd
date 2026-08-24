@@ -96,13 +96,23 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+/// How an editor tab presents its buffer.
+pub enum EditorView {
+    /// The editable styled-source view.
+    Edit,
+    /// ⌘E pretty preview (rendered read-only Reader).
+    Preview(Entity<Reader>),
+    /// ⌘⇧D read-only diff vs git HEAD.
+    Diff,
+}
+
 pub enum Tab {
     /// Read-only document (Welcome, and anything not editable).
     Reader(Entity<Reader>),
-    /// Editable file; `preview` present while ⌘E preview mode is on.
+    /// Editable file, presented per `view`.
     Editor {
         editor: Entity<Editor>,
-        preview: Option<Entity<Reader>>,
+        view: EditorView,
     },
     /// Read-only image viewer. `zoom` is relative to fit (1.0 = fit).
     Image { path: PathBuf, title: SharedString, zoom: f32 },
@@ -190,7 +200,7 @@ impl Workspace {
                 Ok(text) => {
                     let langs = languages(cx);
                     let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
-                    tabs.push(Tab::Editor { editor, preview: None });
+                    tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 }
                 Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
             },
@@ -338,7 +348,7 @@ impl Workspace {
 
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.tabs.get(self.active) {
-            Some(Tab::Editor { editor, preview: None }) => {
+            Some(Tab::Editor { editor, view: EditorView::Edit }) => {
                 window.focus(&editor.focus_handle(cx))
             }
             _ => window.focus(&self.focus_handle),
@@ -411,7 +421,7 @@ impl Workspace {
                 let langs = languages(cx);
                 let path = path.to_path_buf();
                 let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
-                self.tabs.push(Tab::Editor { editor, preview: None });
+                self.tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 self.active = self.tabs.len() - 1;
                 self.focus_active(window, cx);
                 cx.notify();
@@ -483,14 +493,14 @@ impl Workspace {
     }
 
     fn toggle_preview(&mut self, _: &TogglePreview, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Tab::Editor { editor, preview }) = self.tabs.get(self.active) else {
+        let Some(Tab::Editor { editor, view }) = self.tabs.get(self.active) else {
             return;
         };
         let editor = editor.clone();
-        let showing = preview.is_some();
+        let showing = matches!(view, EditorView::Preview(_));
         if showing {
-            if let Some(Tab::Editor { preview, .. }) = self.tabs.get_mut(self.active) {
-                *preview = None;
+            if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
+                *view = EditorView::Edit;
             }
         } else {
             editor.update(cx, |editor, cx| editor.flush(cx));
@@ -498,8 +508,8 @@ impl Workspace {
             let text = editor.read(cx).text();
             let langs = languages(cx);
             let reader = cx.new(|_| Reader::from_source(title, &text, &langs));
-            if let Some(Tab::Editor { preview, .. }) = self.tabs.get_mut(self.active) {
-                *preview = Some(reader);
+            if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
+                *view = EditorView::Preview(reader);
             }
         }
         self.focus_active(window, cx);
@@ -1142,7 +1152,7 @@ impl Workspace {
 
         let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
             let title = tab.title(cx);
-            let is_preview = matches!(tab, Tab::Editor { preview: Some(_), .. });
+            let is_preview = matches!(tab, Tab::Editor { view: EditorView::Preview(_), .. });
             let is_active = ix == active;
             let (icon, color) = seti::icon_for(&title);
             let tint = seti_tint(color, &t);
@@ -1244,7 +1254,7 @@ impl Workspace {
                         .collect(),
                     OutlineTarget::Reader(reader.clone()),
                 ),
-                Tab::Editor { preview: Some(preview), .. } => (
+                Tab::Editor { view: EditorView::Preview(preview), .. } => (
                     preview
                         .read(cx)
                         .toc
@@ -1253,7 +1263,7 @@ impl Workspace {
                         .collect(),
                     OutlineTarget::Reader(preview.clone()),
                 ),
-                Tab::Editor { editor, preview: None } => (
+                Tab::Editor { editor, .. } => (
                     editor
                         .read(cx)
                         .heading_lines()
@@ -1373,10 +1383,10 @@ impl Render for Workspace {
         let outline = self.render_outline(cx);
         let content: AnyElement = match self.tabs.get(self.active) {
             Some(Tab::Reader(reader)) => reader.clone().into_any_element(),
-            Some(Tab::Editor { preview: Some(preview), .. }) => {
+            Some(Tab::Editor { view: EditorView::Preview(preview), .. }) => {
                 preview.clone().into_any_element()
             }
-            Some(Tab::Editor { editor, preview: None }) => editor.clone().into_any_element(),
+            Some(Tab::Editor { editor, .. }) => editor.clone().into_any_element(),
             Some(Tab::Image { path, zoom, .. }) => {
                 let zoom = *zoom;
                 if zoom <= 1.0 + f32::EPSILON && zoom >= 1.0 - f32::EPSILON {

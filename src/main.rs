@@ -24,7 +24,7 @@ use gpui::{
     SystemMenuType, TitlebarOptions, WindowBounds, WindowOptions,
 };
 
-use theme::{apply_system_appearance, ActiveTheme, Theme};
+use theme::{apply_system_appearance, ActiveTheme};
 use workspace::{
     CloseTab, NewFile, NextTab, OpenDialog, PrevTab, ToggleFinder, ToggleFocusMode, ToggleOutline,
     TogglePreview, ToggleSidebar, Workspace,
