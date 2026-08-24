@@ -1,15 +1,88 @@
 # SuperMD
 
-**[supermd.app](https://supermd.app)** · [Download](https://github.com/SuperJackfruitLabs/supermd/releases/latest)
+[![CI](https://github.com/SuperJackfruitLabs/supermd/actions/workflows/ci.yml/badge.svg)](https://github.com/SuperJackfruitLabs/supermd/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/SuperJackfruitLabs/supermd)](https://github.com/SuperJackfruitLabs/supermd/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/SuperJackfruitLabs/supermd/total)](https://github.com/SuperJackfruitLabs/supermd/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
-A native, GPU-rendered Markdown editor for macOS — the writing feel of
-Bear/Lettera on the engine philosophy of Zed. Plain CommonMark on disk,
-always.
+**Markdown that gets out of the way.** A native, GPU-rendered Markdown
+editor — the writing feel of Bear/Lettera on the engine philosophy of
+Zed. Plain CommonMark on disk, always.
 
-Built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
-[Zed](https://zed.dev).
+**[supermd.app](https://supermd.app)** ·
+**[Download](https://github.com/SuperJackfruitLabs/supermd/releases/latest)** ·
+built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
+[Zed](https://zed.dev)
+
+![SuperMD editing a workspace — hybrid WYSIWYG text, a live table, and syntax-highlighted code, with sidebar and outline panels](docs/assets/screenshot.png)
+
+## Highlights
+
+- **Hybrid WYSIWYG** — syntax markers hide when your cursor is
+  elsewhere and reveal in place when you touch them: `**bold**`,
+  headings, lists (`•`), quotes, links, task checkboxes (click to
+  toggle).
+- **Live blocks** — tables render as real tables and whole-line images
+  render inline while you edit; touch them and they dissolve back into
+  raw source. Code fences read as clean panels with tree-sitter
+  highlighting.
+- **Live diagrams** — ` ```mermaid ` fences render as native,
+  theme-matched diagrams (merman — pure Rust, no browser). Click one
+  to edit its source; click away and it's a picture again. All 35
+  mermaid diagram families.
+- **A real workspace** — folder sidebar with Seti UI file icons
+  (gitignore-aware: no `node_modules`/`target` noise), tabs with
+  VS Code-style preview behavior (arrow through files in the sidebar,
+  pin with Enter or a double-click), outline panel, fuzzy file finder
+  (nucleo-scored with match highlighting), find in file, pretty
+  preview toggle, image viewer tabs, light/dark following the system.
+- **Search in workspace** — ⌘⇧F streams ripgrep-powered results into a
+  two-pane overlay: matches grouped by file, live preview centered on
+  the hit, Enter jumps straight to the line.
+- **78 languages highlighted** via tree-sitter (inkjet + Helix
+  queries, plus an extras registry), in fenced blocks and standalone
+  files alike. Code files get a real code editor: monospace, full
+  width, line-number gutter, auto-indent.
+- **Show Changes** — diff the open file against git HEAD, with
+  word-level marks rendered in the editor's own typography (added words
+  on a green wash, deleted words struck through in red, inline in the
+  flow). Code files get line diffs with a diff-aware gutter; modified
+  files get a dot in the sidebar. Pure-Rust git (gix), read-only —
+  SuperMD never writes to your repo.
+- **Themes** — eight built-in (Jackfruit ×2, Paper, Graphite,
+  Solarized ×2, Nord, Gruvbox Dark), live picker, custom themes as
+  TOML files in `~/.supermd/themes/`. Your light and dark picks follow
+  the system appearance automatically.
+- **Update aware** — a quiet launch-time check against GitHub releases
+  shows an "update available" pill in the titlebar when a newer version
+  ships; clicking opens the download page. Nothing phones home beyond
+  that one request, and failures are silent.
+- **Safe by default** — autosave with atomic writes, per-session
+  backups in `~/.supermd/backups`, external-change detection that never
+  silently clobbers anything, and live reload of clean buffers when
+  files change on disk.
+
+The editing core (buffer, selection, undo, styling spans, display
+transform, projection) is pure Rust under a test suite; the GPU shell
+stays thin.
+
+### The five shortcuts worth learning first
+
+| Shortcut | Does |
+| -------- | ---- |
+| ⌘O | open a file or folder |
+| ⌘P | jump to any file by fuzzy name |
+| ⌘⇧F | search inside every file in the workspace |
+| ⌘⇧D | see what you've changed since your last git commit |
+| ⌘T | pick a theme |
+
+Everything else lives in ⌘/. On Linux and Windows, read ⌘ as Ctrl.
 
 ## Installing
+
+Grab the build for your platform from the
+[latest release](https://github.com/SuperJackfruitLabs/supermd/releases/latest):
 
 **macOS** — download the DMG, drag **SuperMD** onto **Applications**, done. If you
 launch it straight from the disk image instead, SuperMD notices and
@@ -28,58 +101,7 @@ entry, optional `.md` association, uninstaller) or use the portable
 zip. Builds are not yet code-signed, so SmartScreen shows one
 "unrecognized app" prompt — More info → Run anyway.
 
-## What it does
-
-- **Hybrid WYSIWYG** — syntax markers hide when your cursor is
-  elsewhere and reveal in place when you touch them: `**bold**`,
-  headings, lists (`•`), quotes, links, task checkboxes (click to
-  toggle).
-- **Live blocks** — tables render as real tables and whole-line images
-  render inline while you edit; touch them and they dissolve back into
-  raw source. Code fences read as clean panels with tree-sitter
-  highlighting.
-- **A real workspace** — folder sidebar with Seti UI file icons
-  (gitignore-aware: no `node_modules`/`target` noise), tabs with
-  VS Code-style preview behavior (arrow through files in the sidebar,
-  pin with Enter or a double-click), outline panel, fuzzy file finder
-  (⌘P, nucleo-scored with match highlighting), find in file (⌘F),
-  pretty preview toggle (⌘E), image viewer tabs, light/dark following
-  the system.
-- **Search in workspace** — ⌘⇧F streams ripgrep-powered results into a
-  two-pane overlay: matches grouped by file, live preview centered on
-  the hit, Enter jumps straight to the line.
-- **78 languages highlighted** via tree-sitter (inkjet + Helix
-  queries, plus an extras registry), in fenced blocks and standalone
-  files alike. Code files get a real code editor: monospace, full
-  width, line-number gutter, auto-indent.
-- **Live diagrams** — ` ```mermaid ` fences render as native,
-  theme-matched diagrams (merman — pure Rust, no browser). Click one
-  to edit its source; click away and it's a picture again. All 35
-  mermaid diagram families.
-- **Show Changes** — ⌘⇧D diffs the open file against git HEAD, with
-  word-level marks rendered in the editor's own typography (added words
-  on a green wash, deleted words struck through in red, inline in the
-  flow). Code files get line diffs with a diff-aware gutter; modified
-  files get a dot in the sidebar. Pure-Rust git (gix), read-only —
-  SuperMD never writes to your repo.
-- **Themes** — eight built-in (Jackfruit ×2, Paper, Graphite,
-  Solarized ×2, Nord, Gruvbox Dark), live picker on ⌘T, custom themes
-  as TOML files in `~/.supermd/themes/`. Your light and dark picks
-  follow the system appearance automatically.
-- **Update aware** — a quiet launch-time check against GitHub releases
-  shows an "update available" pill in the titlebar when a newer version
-  ships; clicking opens the download page. Nothing phones home beyond
-  that one request, and failures are silent.
-- **Safe by default** — autosave with atomic writes, per-session
-  backups in `~/.supermd/backups`, external-change detection that never
-  silently clobbers anything, and live reload of clean buffers when
-  files change on disk.
-
-The editing core (buffer, selection, undo, styling spans, display
-transform, projection) is pure Rust under a test suite; the GPU shell
-stays thin.
-
-## Building
+## Building from source
 
 Requires Rust (stable). On macOS no full Xcode is needed — Metal
 shaders compile at runtime. On Linux install the build deps first:
@@ -101,7 +123,8 @@ cargo test
 
 Early and moving fast — built as a working editor first, a product
 second. macOS is the primary platform; Linux and Windows builds are
-new — feedback and issues welcome.
+new — [feedback and issues](https://github.com/SuperJackfruitLabs/supermd/issues)
+welcome.
 
 ## License
 
