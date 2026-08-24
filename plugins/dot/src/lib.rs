@@ -27,6 +27,10 @@ pub fn themed(svg: &str, theme: &t::Theme) -> String {
             "<svg ",
             &format!("<svg style=\"background-color:{}\" ", theme.background),
         )
+        // Labels use an undefined CSS class and fall back to black;
+        // stamp the theme text color on every text element instead.
+        .replace("<text ", &format!("<text fill=\"{}\" ", theme.text))
+        .replace("<text>", &format!("<text fill=\"{}\">", theme.text))
 }
 
 struct Plugin;
@@ -75,6 +79,15 @@ mod tests {
         assert!(svg.contains("#211f1a"));
         assert!(!svg.contains("#ffffffff"), "white fills must be themed");
         assert!(!svg.contains("stroke=\"#000000ff\""), "black strokes must be themed");
+        // every text element (not textPath) carries the theme text fill
+        for (i, _) in svg.match_indices("<text").collect::<Vec<_>>() {
+            let next = svg.as_bytes()[i + 5];
+            if next != b' ' && next != b'>' {
+                continue; // <textPath>
+            }
+            assert!(svg[i..i + 40].contains("fill=\"#d9d4c8\""), "unthemed text at {i}");
+        }
     }
 }
+
 
