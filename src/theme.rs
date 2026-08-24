@@ -94,8 +94,8 @@ impl Theme {
                 attribute: rgb(0x986801).into(),
             },
 
-            body_family: ".SystemUIFont".into(),
-            mono_family: "Menlo".into(),
+            body_family: crate::platform::body_font().into(),
+            mono_family: crate::platform::mono_font().into(),
 
             body_size: 16.0,
             body_line_height: 1.65,
@@ -142,8 +142,8 @@ impl Theme {
                 attribute: rgb(0xd19a66).into(),
             },
 
-            body_family: ".SystemUIFont".into(),
-            mono_family: "Menlo".into(),
+            body_family: crate::platform::body_font().into(),
+            mono_family: crate::platform::mono_font().into(),
 
             body_size: 16.0,
             body_line_height: 1.65,

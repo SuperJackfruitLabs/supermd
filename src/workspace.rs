@@ -1285,7 +1285,9 @@ impl Workspace {
                                 .py(px(2.))
                                 .bg(t.code_bg)
                                 .rounded_md()
-                                .child(SharedString::from(*keys)),
+                                .child(SharedString::from(crate::platform::shortcut_glyphs(
+                                    keys,
+                                ))),
                         )
                         .child(
                             div()

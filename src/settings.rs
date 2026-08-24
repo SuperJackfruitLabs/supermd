@@ -35,12 +35,9 @@ impl Settings {
     }
 }
 
-/// ~/.supermd (shared with the backups directory's parent).
+/// ~/.supermd on every OS (HOME, else USERPROFILE on Windows).
 pub fn config_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".supermd")
+    crate::platform::home_dir().join(".supermd")
 }
 
 pub fn themes_dir() -> PathBuf {

@@ -3,13 +3,19 @@
 
 use std::path::{Path, PathBuf};
 
-/// True when the app should offer to move itself to /Applications:
-/// running from a mounted disk image or a translocated copy.
-pub fn needs_install(exe: &Path) -> bool {
+/// Platform-independent core (kept testable on every OS).
+fn detect(exe: &Path) -> bool {
     exe.starts_with("/Volumes")
         || exe
             .components()
             .any(|c| c.as_os_str() == "AppTranslocation")
+}
+
+/// True when the app should offer to move itself to /Applications:
+/// running from a mounted disk image or a translocated copy.
+/// Always false off macOS.
+pub fn needs_install(exe: &Path) -> bool {
+    crate::platform::MACOS && detect(exe)
 }
 
 /// Nearest `.app` ancestor of the running executable.
@@ -21,6 +27,14 @@ pub fn bundle_path(exe: &Path) -> Option<PathBuf> {
 
 /// Copy the bundle to /Applications and launch the copy. The caller
 /// quits on Ok. Never touches the running copy.
+#[cfg(not(target_os = "macos"))]
+pub fn move_to_applications(_bundle: &Path) -> Result<(), String> {
+    Err("unsupported on this platform".to_string())
+}
+
+/// Copy the bundle to /Applications and launch the copy. The caller
+/// quits on Ok. Never touches the running copy.
+#[cfg(target_os = "macos")]
 pub fn move_to_applications(bundle: &Path) -> Result<(), String> {
     let dest = Path::new("/Applications/SuperMD.app");
     let run = |cmd: &str, args: &[&str]| -> Result<(), String> {
@@ -44,16 +58,16 @@ mod tests {
 
     #[test]
     fn detects_dmg_and_translocated_paths() {
-        assert!(needs_install(Path::new(
+        assert!(detect(Path::new(
             "/Volumes/SuperMD/SuperMD.app/Contents/MacOS/supermd"
         )));
-        assert!(needs_install(Path::new(
+        assert!(detect(Path::new(
             "/private/var/folders/x/AppTranslocation/9F41/d/SuperMD.app/Contents/MacOS/supermd"
         )));
-        assert!(!needs_install(Path::new(
+        assert!(!detect(Path::new(
             "/Applications/SuperMD.app/Contents/MacOS/supermd"
         )));
-        assert!(!needs_install(Path::new(
+        assert!(!detect(Path::new(
             "/Users/u/Projects/supermd/target/release/supermd"
         )));
     }
