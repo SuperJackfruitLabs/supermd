@@ -446,6 +446,55 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Open paths handed to us from outside (Finder open events, drops):
+    /// folders become the workspace root, files become permanent tabs.
+    pub fn open_external_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (dirs, files): (Vec<_>, Vec<_>) = paths
+            .into_iter()
+            .filter(|p| p.exists())
+            .partition(|p| p.is_dir());
+        for dir in dirs {
+            self.open_path(&dir, window, cx);
+        }
+        for file in files {
+            self.open_path(&file, window, cx);
+        }
+    }
+
+    /// Poll the shared open-event queue (fed by `on_open_urls`).
+    pub fn watch_external_opens(
+        &mut self,
+        pending: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(300))
+                    .await;
+                let paths: Vec<PathBuf> = std::mem::take(&mut *pending.lock().unwrap());
+                if paths.is_empty() {
+                    continue;
+                }
+                let live = this
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.open_external_paths(paths, window, cx);
+                    })
+                    .is_ok();
+                if !live {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn close_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.tabs.len() {
             return;

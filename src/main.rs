@@ -57,10 +57,63 @@ impl gpui::AssetSource for Assets {
     }
 }
 
+/// `file://` URL → filesystem path (host part tolerated, %XX decoded).
+fn file_url_to_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let raw = &rest[rest.find('/')?..];
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    Some(PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
+}
+
+#[cfg(test)]
+mod url_tests {
+    #[test]
+    fn file_urls_decode_to_paths() {
+        assert_eq!(
+            super::file_url_to_path("file:///Users/u/My%20Notes"),
+            Some(std::path::PathBuf::from("/Users/u/My Notes"))
+        );
+        assert_eq!(
+            super::file_url_to_path("file://localhost/tmp/a.md"),
+            Some(std::path::PathBuf::from("/tmp/a.md"))
+        );
+        assert_eq!(super::file_url_to_path("https://example.com"), None);
+    }
+}
+
 fn main() {
     let arg = std::env::args().nth(1).map(PathBuf::from);
 
-    Application::new().with_assets(Assets).run(move |cx: &mut App| {
+    // Files/folders arriving via macOS open events (double-click, Dock
+    // drop, `open -a`). Drained by the workspace's poll loop.
+    let pending_opens: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+
+    let app = Application::new().with_assets(Assets);
+    app.on_open_urls({
+        let pending = pending_opens.clone();
+        move |urls| {
+            let mut lock = pending.lock().unwrap();
+            for url in urls {
+                if let Some(path) = file_url_to_path(&url) {
+                    lock.push(path);
+                }
+            }
+        }
+    });
+    app.run(move |cx: &mut App| {
         let mut themes = theme::builtin_themes();
         themes.extend(theme::load_custom_themes(&settings::themes_dir()));
         let theme_state = theme::ThemeState {
@@ -267,6 +320,7 @@ fn main() {
 
         window
             .update(cx, |workspace, window, cx| {
+                workspace.watch_external_opens(pending_opens.clone(), window, cx);
                 apply_system_appearance(window.appearance(), cx);
                 window
                     .observe_window_appearance(|window, cx| {

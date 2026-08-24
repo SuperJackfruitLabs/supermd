@@ -31,6 +31,32 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>supermd</string>
     <key>CFBundleIconFile</key><string>icon</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleTypeName</key><string>Markdown Document</string>
+        <key>CFBundleTypeRole</key><string>Editor</string>
+        <key>LSHandlerRank</key><string>Owner</string>
+        <key>LSItemContentTypes</key>
+        <array><string>net.daringfireball.markdown</string></array>
+        <key>CFBundleTypeExtensions</key>
+        <array><string>md</string><string>markdown</string><string>mdown</string><string>mdx</string></array>
+      </dict>
+      <dict>
+        <key>CFBundleTypeName</key><string>Text Document</string>
+        <key>CFBundleTypeRole</key><string>Editor</string>
+        <key>LSHandlerRank</key><string>Alternate</string>
+        <key>LSItemContentTypes</key>
+        <array><string>public.plain-text</string><string>public.source-code</string></array>
+      </dict>
+      <dict>
+        <key>CFBundleTypeName</key><string>Folder</string>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+        <key>LSHandlerRank</key><string>Alternate</string>
+        <key>LSItemContentTypes</key>
+        <array><string>public.folder</string></array>
+      </dict>
+    </array>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
 </dict>
