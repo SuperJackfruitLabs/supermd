@@ -239,6 +239,8 @@ pub struct Workspace {
     startup_recents: Vec<PathBuf>,
     /// Move-to-Applications offer (Some = banner visible with message).
     install_banner: Option<SharedString>,
+    /// ☰ popover on platforms without a global menu bar.
+    app_menu_open: bool,
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
     sidebar_selected: usize,
@@ -308,6 +310,7 @@ impl Workspace {
                 .map(PathBuf::from)
                 .filter(|p| p.is_dir())
                 .collect(),
+            app_menu_open: false,
             install_banner: std::env::current_exe()
                 .ok()
                 .filter(|exe| crate::install::needs_install(exe))
@@ -1798,6 +1801,29 @@ impl Workspace {
                         .window_control_area(gpui::WindowControlArea::Drag),
                 )
             })
+            .when(!crate::platform::MACOS, |d| {
+                // No global menu bar off macOS — the ☰ popover carries
+                // the same actions.
+                d.child(
+                    div()
+                        .id("app-menu-btn")
+                        .w(px(40.))
+                        .h_full()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_size(px(14.))
+                        .text_color(t.fg_muted)
+                        .hover(|s| s.bg(t.hover_bg))
+                        .child("☰")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.app_menu_open = !this.app_menu_open;
+                            cx.notify();
+                        })),
+                )
+            })
             .when(show_tabs, |d| d.children(tabs))
             .child(
                 // Remaining space drags the window.
@@ -2184,6 +2210,152 @@ impl Render for Workspace {
                                     cx.stop_propagation();
                                 })
                                 .child(finder),
+                        ),
+                )
+            })
+            .when(self.app_menu_open && !crate::platform::MACOS, |root| {
+                let t = theme(cx);
+                let item = |id: &'static str,
+                            label: &'static str,
+                            shortcut: &'static str,
+                            cx: &mut Context<Self>,
+                            action: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+                    div()
+                        .id(id)
+                        .w_full()
+                        .px_3()
+                        .py(px(5.))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.hover_bg))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(t.ui_size))
+                                .text_color(t.fg)
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(t.fg_muted)
+                                .child(SharedString::from(crate::platform::shortcut_glyphs(
+                                    shortcut,
+                                ))),
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.app_menu_open = false;
+                            action(this, window, cx);
+                        }))
+                };
+                let recents: Vec<AnyElement> = self
+                    .startup_recents
+                    .iter()
+                    .filter(|p| p.is_dir())
+                    .take(5)
+                    .cloned()
+                    .enumerate()
+                    .map(|(i, path)| {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        div()
+                            .id(SharedString::from(format!("menu-recent-{i}")))
+                            .w_full()
+                            .px_3()
+                            .py(px(5.))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.hover_bg))
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg)
+                            .child(SharedString::from(name))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.app_menu_open = false;
+                                let path = path.clone();
+                                this.open_path(&path, window, cx);
+                            }))
+                            .into_any_element()
+                    })
+                    .collect();
+                let divider = || div().h(px(1.)).w_full().my_1().bg(t.border);
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, _w, cx| {
+                                this.app_menu_open = false;
+                                cx.notify();
+                            }),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(40.))
+                                .left(px(8.))
+                                .w(px(280.))
+                                .bg(t.panel_bg)
+                                .border_1()
+                                .border_color(t.border)
+                                .rounded_lg()
+                                .shadow_lg()
+                                .p_1()
+                                .flex()
+                                .flex_col()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(item("m-new", "New File", "⌘ N", cx, |t, w, c| {
+                                    t.new_file(&NewFile, w, c)
+                                }))
+                                .child(item("m-open", "Open…", "⌘ O", cx, |t, w, c| {
+                                    t.open_dialog(&OpenDialog, w, c)
+                                }))
+                                .children((!recents.is_empty()).then(divider))
+                                .children(recents)
+                                .child(divider())
+                                .child(item("m-find", "Go to File", "⌘ P", cx, |t, w, c| {
+                                    t.toggle_finder(&ToggleFinder, w, c)
+                                }))
+                                .child(item(
+                                    "m-search",
+                                    "Search in Workspace",
+                                    "⌘ ⇧ F",
+                                    cx,
+                                    |t, w, c| t.toggle_search(&ToggleSearch, w, c),
+                                ))
+                                .child(item(
+                                    "m-diff",
+                                    "Show Changes",
+                                    "⌘ ⇧ D",
+                                    cx,
+                                    |t, w, c| t.show_changes(&ShowChanges, w, c),
+                                ))
+                                .child(item(
+                                    "m-preview",
+                                    "Toggle Preview",
+                                    "⌘ E",
+                                    cx,
+                                    |t, w, c| t.toggle_preview(&TogglePreview, w, c),
+                                ))
+                                .child(divider())
+                                .child(item("m-theme", "Theme…", "⌘ T", cx, |t, w, c| {
+                                    t.toggle_theme_picker(&ToggleThemePicker, w, c)
+                                }))
+                                .child(item(
+                                    "m-shortcuts",
+                                    "Shortcuts",
+                                    "⌘ /",
+                                    cx,
+                                    |t, w, c| t.toggle_shortcuts(&ToggleShortcuts, w, c),
+                                )),
                         ),
                 )
             })
