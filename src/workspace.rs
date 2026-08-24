@@ -1091,31 +1091,47 @@ impl Workspace {
                     .border_color(t.border)
                     .flex()
                     .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .px_4()
                     .child(
+                        // Traffic lights live over the sidebar's top strip.
                         div()
-                            .text_size(px(t.ui_size))
-                            .text_color(t.fg_muted)
-                            .child("No folder open"),
+                            .h(px(34.))
+                            .w_full()
+                            .flex_none()
+                            .window_control_area(gpui::WindowControlArea::Drag),
                     )
                     .child(
                         div()
-                            .id("open-folder")
-                            .px_3()
-                            .py(px(6.))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(t.hover_bg)
-                            .hover(|s| s.bg(t.selected_bg))
-                            .text_size(px(t.ui_size))
-                            .text_color(t.fg)
-                            .child("Open Folder…")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_dialog(&OpenDialog, window, cx);
-                            })),
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_3()
+                            .px_4()
+                            .child(
+                                div()
+                                    .text_size(px(t.ui_size))
+                                    .text_color(t.fg_muted)
+                                    .child("No folder open"),
+                            )
+                            .child(
+                                div()
+                                    .id("open-folder")
+                                    .px_3()
+                                    .py(px(6.))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(t.hover_bg)
+                                    .hover(|s| s.bg(t.selected_bg))
+                                    .text_size(px(t.ui_size))
+                                    .text_color(t.fg)
+                                    .child("Open Folder…")
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, window, cx| {
+                                            this.open_dialog(&OpenDialog, window, cx);
+                                        },
+                                    )),
+                            ),
                     )
                     .into_any_element(),
             );
@@ -1223,9 +1239,17 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .child(
+                    // Traffic lights live over the sidebar's top strip.
+                    div()
+                        .h(px(34.))
+                        .w_full()
+                        .flex_none()
+                        .window_control_area(gpui::WindowControlArea::Drag),
+                )
+                .child(
                     div()
                         .px_3()
-                        .pt(px(14.))
+                        .pt(px(4.))
                         .pb(px(6.))
                         .text_size(px(11.))
                         .text_color(t.fg_muted)
@@ -1320,14 +1344,18 @@ impl Workspace {
             .flex()
             .flex_row()
             .overflow_hidden()
-            .child(
-                // Traffic-light inset; draggable.
-                div()
-                    .w(px(76.))
-                    .h_full()
-                    .flex_none()
-                    .window_control_area(gpui::WindowControlArea::Drag),
-            )
+            .when(!self.show_sidebar, |d| {
+                // With the sidebar hidden the traffic lights sit over
+                // the tab bar — inset past them; the sidebar's own drag
+                // strip covers them otherwise.
+                d.child(
+                    div()
+                        .w(px(76.))
+                        .h_full()
+                        .flex_none()
+                        .window_control_area(gpui::WindowControlArea::Drag),
+                )
+            })
             .when(show_tabs, |d| d.children(tabs))
             .child(
                 // Remaining space drags the window.
@@ -1548,26 +1576,36 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
             .flex()
-            .flex_col()
-            .child(titlebar)
+            .flex_row()
+            .children(sidebar)
             .child(
+                // Tabs sit above the document area only — the sidebar
+                // runs the full window height beside them.
                 div()
                     .flex_1()
-                    .min_h_0()
-                    .w_full()
+                    .h_full()
+                    .min_w_0()
                     .flex()
-                    .flex_row()
-                    .children(sidebar)
+                    .flex_col()
+                    .child(titlebar)
                     .child(
                         div()
                             .flex_1()
-                            .h_full()
-                            .min_w_0()
+                            .min_h_0()
+                            .w_full()
                             .flex()
-                            .flex_col()
-                            .child(div().flex_1().min_h_0().child(content)),
-                    )
-                    .children(outline),
+                            .flex_row()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h_full()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().flex_1().min_h_0().child(content)),
+                            )
+                            .children(outline),
+                    ),
             )
             .children(self.render_shortcuts(cx))
             .children(self.render_theme_picker(cx))
