@@ -26,6 +26,8 @@ pub struct Finder {
     files: Vec<(String, PathBuf)>,
     /// Indices into `files`, best match first.
     matches: Vec<usize>,
+    /// Per entry of `matches`: matched char indices in the display path.
+    match_indices: Vec<Vec<u32>>,
     selected: usize,
     last_query: String,
     preview: Option<(usize, PreviewContent)>,
@@ -37,6 +39,57 @@ enum PreviewContent {
     Text(SharedString),
     Image(PathBuf),
     Unreadable,
+}
+
+/// Score candidates against `query` with nucleo: returns candidate
+/// indices best-first plus, per result, the matched char indices in the
+/// candidate string (for highlight styling).
+pub(crate) fn score_candidates(query: &str, rels: &[String]) -> (Vec<usize>, Vec<Vec<u32>>) {
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut buf = Vec::new();
+    let mut scored: Vec<(u32, usize, Vec<u32>)> = rels
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, rel)| {
+            let mut indices = Vec::new();
+            pattern
+                .indices(Utf32Str::new(rel, &mut buf), &mut matcher, &mut indices)
+                .map(|score| {
+                    indices.sort_unstable();
+                    indices.dedup();
+                    (score, ix, indices)
+                })
+        })
+        .collect();
+    // Ties (same score) go to the shorter path — "notes.md" should beat
+    // "some/deep/path/notes.md".
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(rels[a.1].len().cmp(&rels[b.1].len())));
+    scored.truncate(MAX_RESULTS);
+    scored.into_iter().map(|(_, ix, ind)| (ix, ind)).unzip()
+}
+
+/// Byte ranges (coalesced) inside a segment of the display path for
+/// matched chars. `seg` starts at char offset `seg_char_off` of the
+/// string the indices refer to.
+fn segment_highlight_ranges(seg: &str, seg_char_off: usize, indices: &[u32]) -> Vec<std::ops::Range<usize>> {
+    let starts: Vec<usize> = seg.char_indices().map(|(b, _)| b).collect();
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for &i in indices {
+        let Some(local) = (i as usize).checked_sub(seg_char_off) else {
+            continue;
+        };
+        if local >= starts.len() {
+            continue;
+        }
+        let b = starts[local];
+        let e = starts.get(local + 1).copied().unwrap_or(seg.len());
+        match ranges.last_mut() {
+            Some(last) if last.end == b => last.end = e,
+            _ => ranges.push(b..e),
+        }
+    }
+    ranges
 }
 
 fn load_preview(path: &std::path::Path) -> PreviewContent {
@@ -75,6 +128,7 @@ impl Finder {
             input,
             files,
             matches: Vec::new(),
+            match_indices: Vec::new(),
             selected: 0,
             last_query: String::new(),
             preview: None,
@@ -105,24 +159,13 @@ impl Finder {
     fn rescore(&mut self, query: &str) {
         if query.is_empty() {
             self.matches = (0..self.files.len().min(MAX_RESULTS)).collect();
+            self.match_indices = vec![Vec::new(); self.matches.len()];
             return;
         }
-        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-        let mut buf = Vec::new();
-        let mut scored: Vec<(u32, usize)> = self
-            .files
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, (rel, _))| {
-                pattern
-                    .score(Utf32Str::new(rel, &mut buf), &mut matcher)
-                    .map(|score| (score, ix))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        scored.truncate(MAX_RESULTS);
-        self.matches = scored.into_iter().map(|(_, ix)| ix).collect();
+        let rels: Vec<String> = self.files.iter().map(|(rel, _)| rel.clone()).collect();
+        let (matches, match_indices) = score_candidates(query, &rels);
+        self.matches = matches;
+        self.match_indices = match_indices;
     }
 
     fn up(&mut self, _: &FinderUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -251,6 +294,26 @@ impl Render for Finder {
                             None => ("", rel.as_str()),
                         };
                         let is_selected = ix == selected;
+                        let indices: &[u32] =
+                            this.match_indices.get(ix).map(|v| v.as_slice()).unwrap_or(&[]);
+                        let name_char_off = rel[..rel.len() - name.len()].chars().count();
+                        let hl = |seg: &str, off: usize| {
+                            segment_highlight_ranges(seg, off, indices)
+                                .into_iter()
+                                .map(|r| {
+                                    (
+                                        r,
+                                        gpui::HighlightStyle {
+                                            color: Some(t.accent),
+                                            font_weight: Some(gpui::FontWeight::SEMIBOLD),
+                                            ..Default::default()
+                                        },
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        let name_hl = hl(name, name_char_off);
+                        let dir_hl = hl(dir, 0);
                         div()
                             .id(ix)
                             .w_full()
@@ -264,10 +327,10 @@ impl Render for Finder {
                             .when(is_selected, |d| d.bg(t.selected_bg))
                             .when(!is_selected, |d| d.hover(|s| s.bg(t.hover_bg)))
                             .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(t.fg_strong)
-                                    .child(SharedString::from(name.to_string())),
+                                div().text_size(px(13.)).text_color(t.fg_strong).child(
+                                    gpui::StyledText::new(name.to_string())
+                                        .with_highlights(name_hl),
+                                ),
                             )
                             .when(!dir.is_empty(), |d| {
                                 d.child(
@@ -275,7 +338,10 @@ impl Render for Finder {
                                         .text_size(px(11.))
                                         .text_color(t.fg_muted)
                                         .overflow_hidden()
-                                        .child(SharedString::from(dir.to_string())),
+                                        .child(
+                                            gpui::StyledText::new(dir.to_string())
+                                                .with_highlights(dir_hl),
+                                        ),
                                 )
                             })
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
@@ -326,5 +392,44 @@ impl Render for Finder {
                     .child(div().flex_1().min_h_0().child(results)),
             )
             .child(div().flex_1().min_w_0().h_full().child(preview_pane))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_indices_returned_for_highlighting() {
+        let rels = vec!["readme.md".to_string(), "zzz.txt".to_string()];
+        let (order, indices) = score_candidates("rm", &rels);
+        assert_eq!(order, vec![0]);
+        assert!(!indices[0].is_empty());
+        for &i in &indices[0] {
+            assert!("readme.md".chars().nth(i as usize).is_some());
+        }
+    }
+
+    #[test]
+    fn segment_ranges_map_chars_to_bytes_and_coalesce() {
+        // indices 0,1 within "réadme" → bytes 0..1 and 1..3 coalesced
+        let r = segment_highlight_ranges("réadme", 0, &[0, 1]);
+        assert_eq!(r, vec![0..3]);
+        // segment offset: index 5 with offset 4 → second char
+        let r = segment_highlight_ranges("ab", 4, &[5]);
+        assert_eq!(r, vec![1..2]);
+        // out-of-segment indices dropped
+        assert!(segment_highlight_ranges("ab", 4, &[0, 9]).is_empty());
+    }
+
+    #[test]
+    fn ranking_prefers_tighter_matches() {
+        let rels = vec![
+            "some/deep/path/notes.md".to_string(),
+            "notes.md".to_string(),
+        ];
+        let (order, _) = score_candidates("notes", &rels);
+        assert_eq!(order[0], 1, "shorter exact-name match ranks first");
+        assert_eq!(order.len(), 2);
     }
 }
