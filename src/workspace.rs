@@ -140,6 +140,23 @@ impl Tab {
     }
 }
 
+/// Where a preview-open lands: activate an existing permanent tab,
+/// reuse the current preview slot, or push a fresh tab.
+#[derive(PartialEq, Eq, Debug)]
+pub(crate) enum PreviewPlan {
+    ActivateExisting(usize),
+    ReplacePreview(usize),
+    PushNew,
+}
+
+pub(crate) fn preview_plan(preview: Option<usize>, existing_ix: Option<usize>) -> PreviewPlan {
+    match (existing_ix, preview) {
+        (Some(ix), _) => PreviewPlan::ActivateExisting(ix),
+        (None, Some(slot)) => PreviewPlan::ReplacePreview(slot),
+        (None, None) => PreviewPlan::PushNew,
+    }
+}
+
 /// Seti's 12 palette variables mapped onto our theme so icons read well
 /// in both appearances.
 pub(crate) fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
@@ -181,6 +198,8 @@ pub struct Workspace {
     pre_focus_panels: (bool, bool),
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
     search: Option<(Entity<crate::search_ui::SearchOverlay>, gpui::Subscription)>,
+    /// Index of the transient preview tab (at most one; italic title).
+    preview_tab: Option<usize>,
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
     sidebar_selected: usize,
@@ -230,6 +249,7 @@ impl Workspace {
             pre_focus_panels: (true, true),
             finder: None,
             search: None,
+            preview_tab: None,
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
@@ -410,10 +430,91 @@ impl Workspace {
         }
         self.flush_tab(ix, cx);
         self.tabs.remove(ix);
+        match self.preview_tab {
+            Some(p) if p == ix => self.preview_tab = None,
+            Some(p) if p > ix => self.preview_tab = Some(p - 1),
+            _ => {}
+        }
         if self.active >= ix && self.active > 0 {
             self.active -= 1;
         }
         self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Open a file transiently: reuse the single preview-tab slot,
+    /// activating an existing permanent tab instead when one has the
+    /// path. `focus: false` keeps focus where it is (sidebar browsing).
+    fn open_path_preview(
+        &mut self,
+        path: &Path,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if path.is_dir() {
+            return;
+        }
+        let existing = self
+            .tabs
+            .iter()
+            .position(|tab| tab.path(cx).as_deref() == Some(path));
+        let plan = preview_plan(self.preview_tab, existing);
+        if let PreviewPlan::ActivateExisting(ix) = plan {
+            if ix != self.active {
+                self.flush_tab(self.active, cx);
+                self.active = ix;
+            }
+            if focus {
+                self.focus_active(window, cx);
+            }
+            cx.notify();
+            return;
+        }
+        let tab = if crate::files::is_image_path(path) {
+            let title: SharedString = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+                .into();
+            Tab::Image { path: path.to_path_buf(), title, zoom: 1.0 }
+        } else {
+            match Editor::read_file(path) {
+                Ok(text) => {
+                    let langs = languages(cx);
+                    let path_buf = path.to_path_buf();
+                    let editor = cx.new(|cx| Editor::from_text(&path_buf, text, &langs, cx));
+                    Tab::Editor { editor, view: EditorView::Edit }
+                }
+                Err(err) => {
+                    eprintln!("supermd: cannot open {}: {err}", path.display());
+                    return;
+                }
+            }
+        };
+        match plan {
+            PreviewPlan::ReplacePreview(slot) => {
+                self.flush_tab(slot, cx);
+                if self.active != slot {
+                    self.flush_tab(self.active, cx);
+                }
+                self.tabs[slot] = tab;
+                self.active = slot;
+            }
+            PreviewPlan::PushNew => {
+                self.flush_tab(self.active, cx);
+                self.tabs.push(tab);
+                self.active = self.tabs.len() - 1;
+                self.preview_tab = Some(self.active);
+            }
+            PreviewPlan::ActivateExisting(_) => unreachable!(),
+        }
+        if let Some(tree) = &mut self.tree {
+            tree.expand_to(path);
+        }
+        if focus {
+            self.focus_active(window, cx);
+        }
         cx.notify();
     }
 
@@ -431,6 +532,10 @@ impl Workspace {
             .iter()
             .position(|tab| tab.path(cx).as_deref() == Some(path))
         {
+            // A deliberate open pins the tab it lands on.
+            if self.preview_tab == Some(ix) {
+                self.preview_tab = None;
+            }
             self.set_active(ix, window, cx);
             return;
         }
@@ -676,25 +781,33 @@ impl Workspace {
         cx.notify();
     }
 
-    fn sidebar_move(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let count = self.sidebar_rows().len();
-        if count == 0 {
+    fn sidebar_move(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.sidebar_rows();
+        if rows.is_empty() {
             return;
         }
-        let target = (self.sidebar_selected as isize + delta).clamp(0, count as isize - 1);
+        let target = (self.sidebar_selected as isize + delta).clamp(0, rows.len() as isize - 1);
         self.sidebar_selected = target as usize;
+        // Browsing with the keyboard previews files as you land on them;
+        // focus stays in the sidebar so arrows keep working.
+        if let Some((_, entry)) = rows.get(self.sidebar_selected) {
+            if !entry.is_dir {
+                let path = entry.path.clone();
+                self.open_path_preview(&path, false, window, cx);
+            }
+        }
         cx.notify();
     }
 
-    fn sidebar_up(&mut self, _: &SidebarUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_move(-1, cx);
+    fn sidebar_up(&mut self, _: &SidebarUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_move(-1, window, cx);
     }
 
-    fn sidebar_down(&mut self, _: &SidebarDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_move(1, cx);
+    fn sidebar_down(&mut self, _: &SidebarDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_move(1, window, cx);
     }
 
-    fn sidebar_expand(&mut self, _: &SidebarExpand, _: &mut Window, cx: &mut Context<Self>) {
+    fn sidebar_expand(&mut self, _: &SidebarExpand, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.sidebar_rows();
         let Some((_, entry)) = rows.get(self.sidebar_selected) else {
             return;
@@ -707,7 +820,7 @@ impl Workspace {
             return;
         };
         if tree.is_expanded(&path) {
-            self.sidebar_move(1, cx); // step into
+            self.sidebar_move(1, window, cx); // step into
         } else {
             tree.toggle(&path);
             cx.notify();
@@ -1257,7 +1370,7 @@ impl Workspace {
                             .bg(t.accent),
                     )
                 })
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     this.sidebar_selected = row_ix;
                     if is_dir {
                         if let Some(tree) = this.tree.as_mut() {
@@ -1265,8 +1378,10 @@ impl Workspace {
                         }
                         window.focus(&this.sidebar_focus);
                         cx.notify();
-                    } else {
+                    } else if event.click_count() >= 2 {
                         this.open_path(&path, window, cx);
+                    } else {
+                        this.open_path_preview(&path, true, window, cx);
                     }
                 }))
         });
@@ -1326,9 +1441,11 @@ impl Workspace {
         let active = self.active;
         let show_tabs = !self.tabs.is_empty() && !self.focus_mode;
 
+        let preview_tab = self.preview_tab;
         let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
             let title = tab.title(cx);
             let is_preview = matches!(tab, Tab::Editor { view: EditorView::Preview(_), .. });
+            let is_transient = preview_tab == Some(ix);
             let is_active = ix == active;
             let (icon, color) = seti::icon_for(&title);
             let tint = seti_tint(color, &t);
@@ -1356,6 +1473,7 @@ impl Workspace {
                     div()
                         .text_size(px(t.ui_size))
                         .text_color(if is_active { t.fg_strong } else { t.fg_muted })
+                        .when(is_transient, |d| d.italic())
                         .child(title),
                 )
                 .when(is_preview, |d| {
@@ -1380,7 +1498,11 @@ impl Workspace {
                             this.close_tab_at(ix, window, cx);
                         })),
                 )
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    // Double-clicking a preview tab pins it.
+                    if event.click_count() >= 2 && this.preview_tab == Some(ix) {
+                        this.preview_tab = None;
+                    }
                     this.set_active(ix, window, cx);
                 }))
         });
@@ -1561,6 +1683,14 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_title(window, cx);
+        // Editing a previewed buffer pins its tab.
+        if let Some(ix) = self.preview_tab {
+            if let Some(Tab::Editor { editor, .. }) = self.tabs.get(ix) {
+                if editor.read(cx).save.is_dirty() {
+                    self.preview_tab = None;
+                }
+            }
+        }
         let t = theme(cx);
         let sidebar = self.render_sidebar(cx);
         let titlebar = self.render_titlebar(cx);
@@ -1712,5 +1842,20 @@ impl Render for Workspace {
                         ),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_plan_rules() {
+        use PreviewPlan::*;
+        assert_eq!(preview_plan(None, Some(2)), ActivateExisting(2));
+        assert_eq!(preview_plan(Some(1), Some(1)), ActivateExisting(1));
+        assert_eq!(preview_plan(Some(1), Some(3)), ActivateExisting(3));
+        assert_eq!(preview_plan(Some(1), None), ReplacePreview(1));
+        assert_eq!(preview_plan(None, None), PushNew);
     }
 }
