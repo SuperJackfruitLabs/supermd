@@ -587,13 +587,10 @@ mod tests {
         cx.dispatch_action(FinderConfirm);
         cx.dispatch_action(FinderDismiss);
         cx.run_until_parked();
-        assert_eq!(
-            *events.borrow(),
-            vec![
-                "open:/nonexistent/notes/deep/nested/readme.md".to_string(),
-                "dismissed".to_string()
-            ]
-        );
+        // Build the expectation via PathBuf so the separator matches the
+        // platform (join yields backslashes on Windows).
+        let expected = format!("open:{}", test_files()[1].1.display());
+        assert_eq!(*events.borrow(), vec![expected, "dismissed".to_string()]);
     }
 
     #[gpui::test]
