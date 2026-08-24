@@ -58,6 +58,20 @@ actions!(
     ]
 );
 
+/// The welcome tour must be editable (it promises clickable checkboxes),
+/// so it lives as a real file the user owns. Written once; never
+/// clobbers user edits.
+pub(crate) fn ensure_welcome_file(config_dir: &Path) -> PathBuf {
+    let path = config_dir.join("Welcome.md");
+    if !path.exists() {
+        let _ = std::fs::create_dir_all(config_dir);
+        if let Err(err) = std::fs::write(&path, include_str!("../WELCOME.md")) {
+            eprintln!("supermd: cannot write welcome file: {err}");
+        }
+    }
+    path
+}
+
 /// Persist a just-opened workspace root into the recents list.
 fn record_recent(root: &Path) {
     let dir = crate::settings::config_dir();
@@ -260,8 +274,19 @@ impl Workspace {
                 // No explicit target: start with an empty workspace and
                 // the welcome document. (A Finder/Dock launch has an
                 // arbitrary cwd — listing it would show the filesystem.)
-                let welcome = Reader::welcome(&languages(cx));
-                tabs.push(Tab::Reader(cx.new(|_| welcome)));
+                let path = ensure_welcome_file(&crate::settings::config_dir());
+                match Editor::read_file(&path) {
+                    Ok(text) => {
+                        let langs = languages(cx);
+                        let editor = cx.new(|cx| Editor::from_text(&path, text, &langs, cx));
+                        tabs.push(Tab::Editor { editor, view: EditorView::Edit });
+                    }
+                    Err(_) => {
+                        // Unwritable config dir: fall back to read-only.
+                        let welcome = Reader::welcome(&languages(cx));
+                        tabs.push(Tab::Reader(cx.new(|_| welcome)));
+                    }
+                }
             }
         }
 
@@ -2131,6 +2156,18 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn welcome_file_written_once_and_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = ensure_welcome_file(dir.path());
+        assert!(p.ends_with("Welcome.md"));
+        let first = std::fs::read_to_string(&p).unwrap();
+        assert!(first.contains("Welcome to SuperMD"));
+        std::fs::write(&p, "user edited").unwrap();
+        ensure_welcome_file(dir.path());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "user edited");
+    }
 
     #[test]
     fn preview_plan_rules() {
