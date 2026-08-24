@@ -56,11 +56,14 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   TOML files in `~/.supermd/themes/`. Your light and dark picks follow
   the system appearance automatically.
 - **Extensible** — plugins are WebAssembly components dropped into
-  `~/.supermd/plugins/`: block renderers (` ```dot ` graphviz ships
-  first-party) and palette commands (⌘⇧P — try "Insert Table of
-  Contents"). Sandboxed hard: no filesystem, no network, no
-  processes; a hung plugin is cut off in 2 s. Author one from
-  `plugins/template/` in ~20 lines of Rust.
+  `~/.supermd/plugins/`: block renderers (` ```dot ` graphviz),
+  palette commands (⌘⇧P), inline renderers (`:tada:` → 🎉),
+  decoration rules (TODO highlighting needs zero code — just a
+  manifest), formatters, and paste processors (CSV → table).
+  Sandboxed hard: no filesystem without per-plugin consent, no
+  network, no processes; a hung plugin is cut off in 2 s. Author one
+  from `plugins/template/` in ~20 lines of Rust; five ship
+  first-party (dot, toc, emoji, tidy, todo-marks).
 - **Update aware** — a quiet launch-time check against GitHub releases
   shows an "update available" pill in the titlebar when a newer version
   ships; clicking opens the download page. Nothing phones home beyond

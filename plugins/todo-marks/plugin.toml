@@ -1,0 +1,8 @@
+name = "todo-marks"
+version = "0.1.0"
+description = "Highlight TODO / FIXME / NOTE in prose"
+authors = ["SuperJackfruitLabs"]
+
+[[decorations]]
+pattern = "\\b(TODO|FIXME|NOTE)\\b"
+style = "accent"

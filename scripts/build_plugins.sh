@@ -11,7 +11,7 @@ if [ "${1:-}" = "--fixtures" ]; then
     BASE="$ROOT/plugins/fixtures"
 else
     OUT="$ROOT/dist/plugins"
-    CRATES="dot toc"
+    CRATES="dot toc emoji tidy todo-marks"
     BASE="$ROOT/plugins"
 fi
 

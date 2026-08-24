@@ -20,3 +20,4 @@ The phase-by-phase build record that used to live in WELCOME.md.
 | 13 | Projector registry + live mermaid diagrams | Done |
 | 14 | Linux + Windows: platform layer, chrome, packaging, 3-OS CI | Done |
 | 15 | Extensions Phase 1: wasm runtime, palette, dot + toc plugins | Done |
+| 16 | Extensions Phase 2: inline/decorations/formatters/paste, workspace-read consent | Done |
