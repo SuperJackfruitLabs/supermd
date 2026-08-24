@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Getting Started — SuperMD Docs</title>
-<meta name="description" content="SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.">
-<link rel="canonical" href="https://supermd.app/docs/">
+<title>Capabilities — SuperMD Docs</title>
+<meta name="description" content="Plugins are pure by default: no filesystem, no network, no environment, no clock. Capabilities widen that — always host-mediated, always with user consent. This page is the author-facing contract.">
+<link rel="canonical" href="https://supermd.app/docs/capabilities/">
 <style>
   :root {
     --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
@@ -100,7 +100,7 @@
 <aside class="sidebar">
 <h4>Using SuperMD</h4>
 <ul>
-<li class="current"><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/">Getting Started</a></li>
 <li><a href="/docs/editing/">Editing</a></li>
 <li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
 <li><a href="/docs/diagrams/">Diagrams</a></li>
@@ -111,23 +111,43 @@
 <ul>
 <li><a href="/docs/plugins/">Plugins</a></li>
 <li><a href="/docs/writing-plugins/">Writing a Plugin</a></li>
-<li><a href="/docs/capabilities/">Capabilities</a></li>
+<li class="current"><a href="/docs/capabilities/">Capabilities</a></li>
 <li><a href="/docs/grammars/">Grammar Plugins</a></li>
 </ul>
 
 </aside>
 <main class="doc">
-<h1>Getting Started</h1>
-<p>SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.</p>
-<h2>Install</h2>
-<p><strong>macOS</strong> — <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download the DMG</a>, open it, and drag SuperMD into Applications. The app is signed and notarized, so it opens without warnings. If you launch it straight from the DMG, SuperMD offers to move itself into Applications for you.</p>
-<p><strong>Linux</strong> — grab the <code>.deb</code> or the <code>.tar.gz</code> from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<p><strong>Windows</strong> — run the installer from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<h2>First launch</h2>
-<p>SuperMD opens with a welcome tour — and the tour itself is a real, editable document. Click things: checkboxes toggle, tables dissolve into editable text, bold markers appear under your cursor and fold away when you leave.</p>
-<p>When you're ready to work with your own notes, press <strong>⌘ O</strong> (Ctrl+O on Windows/Linux) or click <strong>Open Folder</strong> in the sidebar. SuperMD remembers your recent workspaces and can reopen the last one on launch.</p>
+<h1>Capabilities</h1>
+<p>Plugins are pure by default: no filesystem, no network, no environment, no clock. Capabilities widen that — always host-mediated, always with user consent. This page is the author-facing contract.</p>
+<h2>Declaring capabilities</h2>
+<pre><code class="language-toml">capabilities = ["workspace-read", "net"]
+</code></pre>
+<p>Unknown capability names reject the plugin at load, so older SuperMD versions fail your plugin clearly instead of running it half-working.</p>
+<h2><code>workspace-read</code></h2>
+<p>After a one-time consent banner, the user's open workspace is mounted <strong>read-only</strong> at <code>/workspace</code> inside your sandbox. Standard file APIs work under that path; everything else stays invisible. Until consent is granted, your plugin's calls return a consent-shaped error and SuperMD shows the banner — after granting, the user retries the action.</p>
+<h2><code>net</code></h2>
+<p>Declaring <code>net</code> gives you a host <code>fetch</code> function — your plugin never opens a socket. The host enforces:</p>
+<ul>
+<li><strong>Per-domain consent</strong>: the first request to a domain returns the error <code>consent required: &lt;domain&gt;</code> and shows the user a banner naming that domain. Granted domains are remembered in settings and revocable. Denied domains fail quietly thereafter.</li>
+<li><strong>HTTPS only</strong> — <code>http://</code> URLs are rejected.</li>
+<li><strong>Limits</strong>: 5-second timeout per request, 2 MB response cap, at most 4 fetches per plugin call, redirects followed only to domains the user has granted.</li>
+</ul>
+<p>Requests take a method (GET or POST), URL, headers, and optional body; responses carry status, headers, and body bytes. Propagate fetch errors as your own errors — that's what routes the consent banner.</p>
+<p>A useful pattern: net-capable paste plugins run <em>after</em> the paste, asynchronously — the pasted text lands instantly and your replacement is applied only if the user hasn't typed in the meantime. Design for both outcomes.</p>
+<h2>Files are never yours to place</h2>
+<p>There is no write capability. Exporters and templates return <strong>content</strong>; SuperMD owns every path:</p>
+<ul>
+<li><code>export-document</code> returns files as relative paths + bytes; the user picks the destination in a save dialog. Paths containing <code>..</code> or absolute paths are rejected outright.</li>
+<li><code>render-template</code> returns a workspace-relative filename + content; SuperMD validates it, creates it inside the open workspace, and never overwrites an existing file.</li>
+</ul>
+<h2>Time limits and crash isolation</h2>
+<ul>
+<li>Compute is capped at <strong>2 seconds</strong> per call; a call that exceeds it is interrupted and returns an error. Net-capable calls get additional allowance for network time, so a slow server isn't misread as a hang.</li>
+<li>A panic inside your plugin becomes an error result, and your plugin gets a fresh instance on the next call. You cannot take the editor down.</li>
+<li>Failures are always data: a failing renderer shows an error where the diagram would be; a failing formatter leaves the document untouched; a failing hook lets the save proceed.</li>
+</ul>
 
-<div class="pager"><span class="pager-gap"></span><a class="next-link" href="/docs/editing/">Editing &rarr;</a></div>
+<div class="pager"><a class="prev-link" href="/docs/writing-plugins/">&larr; Writing a Plugin</a><span class="pager-gap"></span><a class="next-link" href="/docs/grammars/">Grammar Plugins &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Getting Started — SuperMD Docs</title>
-<meta name="description" content="SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.">
-<link rel="canonical" href="https://supermd.app/docs/">
+<title>Grammar Plugins — SuperMD Docs</title>
+<meta name="description" content="Grammar plugins add syntax highlighting for new languages — in fenced code blocks and in standalone files — with no Rust code at all. A grammar plugin is three files:">
+<link rel="canonical" href="https://supermd.app/docs/grammars/">
 <style>
   :root {
     --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
@@ -100,7 +100,7 @@
 <aside class="sidebar">
 <h4>Using SuperMD</h4>
 <ul>
-<li class="current"><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/">Getting Started</a></li>
 <li><a href="/docs/editing/">Editing</a></li>
 <li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
 <li><a href="/docs/diagrams/">Diagrams</a></li>
@@ -112,22 +112,42 @@
 <li><a href="/docs/plugins/">Plugins</a></li>
 <li><a href="/docs/writing-plugins/">Writing a Plugin</a></li>
 <li><a href="/docs/capabilities/">Capabilities</a></li>
-<li><a href="/docs/grammars/">Grammar Plugins</a></li>
+<li class="current"><a href="/docs/grammars/">Grammar Plugins</a></li>
 </ul>
 
 </aside>
 <main class="doc">
-<h1>Getting Started</h1>
-<p>SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.</p>
-<h2>Install</h2>
-<p><strong>macOS</strong> — <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download the DMG</a>, open it, and drag SuperMD into Applications. The app is signed and notarized, so it opens without warnings. If you launch it straight from the DMG, SuperMD offers to move itself into Applications for you.</p>
-<p><strong>Linux</strong> — grab the <code>.deb</code> or the <code>.tar.gz</code> from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<p><strong>Windows</strong> — run the installer from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<h2>First launch</h2>
-<p>SuperMD opens with a welcome tour — and the tour itself is a real, editable document. Click things: checkboxes toggle, tables dissolve into editable text, bold markers appear under your cursor and fold away when you leave.</p>
-<p>When you're ready to work with your own notes, press <strong>⌘ O</strong> (Ctrl+O on Windows/Linux) or click <strong>Open Folder</strong> in the sidebar. SuperMD remembers your recent workspaces and can reopen the last one on launch.</p>
+<h1>Grammar Plugins</h1>
+<p>Grammar plugins add syntax highlighting for new languages — in fenced code blocks and in standalone files — with <strong>no Rust code at all</strong>. A grammar plugin is three files:</p>
+<pre><code>my-grammar/
+  plugin.toml
+  grammar.wasm      # a compiled tree-sitter parser
+  highlights.scm    # tree-sitter highlight queries
+</code></pre>
+<h2>The manifest</h2>
+<pre><code class="language-toml">name = "graphql"
+version = "0.1.0"
 
-<div class="pager"><span class="pager-gap"></span><a class="next-link" href="/docs/editing/">Editing &rarr;</a></div>
+[[grammars]]
+name = "graphql"                  # the fence language token
+extensions = ["graphql", "gql"]   # file extensions to claim
+</code></pre>
+<p>With this installed, <code>```graphql</code> fences highlight, and opening <code>schema.graphql</code> highlights the whole file. The bundled GraphQL plugin is exactly this shape — <a href="https://github.com/SuperJackfruitLabs/supermd/tree/master/plugins/graphql">see it in the repo</a>.</p>
+<h2>Building <code>grammar.wasm</code></h2>
+<p>The parser comes from any tree-sitter grammar repository, compiled once with the tree-sitter CLI (0.23.x) and Emscripten:</p>
+<pre><code class="language-sh">scripts/build_grammar_wasm.sh &lt;grammar-repo-dir&gt; &lt;out-dir&gt;
+</code></pre>
+<p>This regenerates the parser at a compatible ABI and produces <code>grammar.wasm</code> (~40–300 KB). Users never need these tools — you build once and ship the file. One requirement: the wasm's exported symbol must match your grammar <code>name</code> (a grammar generated as <code>tree_sitter_graphql</code> must be named <code>graphql</code>).</p>
+<h2><code>highlights.scm</code></h2>
+<p>Standard tree-sitter highlight queries, using the Helix capture vocabulary (<code>@keyword</code>, <code>@type</code>, <code>@string</code>, <code>@comment</code>, <code>@function</code>, <code>@constant</code>, …). If the grammar you're wrapping is used by the Helix editor, its <code>runtime/queries/&lt;lang&gt;/highlights.scm</code> usually works as-is — check the node names match your parser's version.</p>
+<h2>Rules</h2>
+<ul>
+<li><strong>Built-ins win</strong>: a grammar named <code>rust</code> cannot shadow SuperMD's bundled Rust highlighting.</li>
+<li><strong>Several grammars per plugin</strong>: give each <code>[[grammars]]</code> entry a <code>files = "&lt;stem&gt;"</code>, and ship <code>&lt;stem&gt;.wasm</code> + <code>&lt;stem&gt;.scm</code> per grammar.</li>
+<li><strong>Failures are contained</strong>: a broken query or incompatible wasm marks the plugin failed in the load report; a grammar that misbehaves at parse time degrades that language to plain text. The editor never crashes over a grammar.</li>
+</ul>
+
+<div class="pager"><a class="prev-link" href="/docs/capabilities/">&larr; Capabilities</a><span class="pager-gap"></span></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

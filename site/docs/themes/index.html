@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Getting Started — SuperMD Docs</title>
-<meta name="description" content="SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.">
-<link rel="canonical" href="https://supermd.app/docs/">
+<title>Themes — SuperMD Docs</title>
+<meta name="description" content="⌘ T opens the theme picker. SuperMD follows your system's light/dark setting, with a theme for each: pick your light theme and your dark theme once, and the app switches with your OS.">
+<link rel="canonical" href="https://supermd.app/docs/themes/">
 <style>
   :root {
     --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
@@ -100,12 +100,12 @@
 <aside class="sidebar">
 <h4>Using SuperMD</h4>
 <ul>
-<li class="current"><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/">Getting Started</a></li>
 <li><a href="/docs/editing/">Editing</a></li>
 <li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
 <li><a href="/docs/diagrams/">Diagrams</a></li>
 <li><a href="/docs/workspace/">Working with a Folder</a></li>
-<li><a href="/docs/themes/">Themes</a></li>
+<li class="current"><a href="/docs/themes/">Themes</a></li>
 </ul>
 <h4>Extending SuperMD</h4>
 <ul>
@@ -117,17 +117,47 @@
 
 </aside>
 <main class="doc">
-<h1>Getting Started</h1>
-<p>SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.</p>
-<h2>Install</h2>
-<p><strong>macOS</strong> — <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download the DMG</a>, open it, and drag SuperMD into Applications. The app is signed and notarized, so it opens without warnings. If you launch it straight from the DMG, SuperMD offers to move itself into Applications for you.</p>
-<p><strong>Linux</strong> — grab the <code>.deb</code> or the <code>.tar.gz</code> from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<p><strong>Windows</strong> — run the installer from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<h2>First launch</h2>
-<p>SuperMD opens with a welcome tour — and the tour itself is a real, editable document. Click things: checkboxes toggle, tables dissolve into editable text, bold markers appear under your cursor and fold away when you leave.</p>
-<p>When you're ready to work with your own notes, press <strong>⌘ O</strong> (Ctrl+O on Windows/Linux) or click <strong>Open Folder</strong> in the sidebar. SuperMD remembers your recent workspaces and can reopen the last one on launch.</p>
+<h1>Themes</h1>
+<p><strong>⌘ T</strong> opens the theme picker. SuperMD follows your system's light/dark setting, with a theme for each: pick your light theme and your dark theme once, and the app switches with your OS.</p>
+<p>Eight themes ship built in: <strong>Jackfruit Light</strong> and <strong>Jackfruit Dark</strong> (the defaults), <strong>Paper</strong>, <strong>Graphite</strong>, <strong>Nord</strong>, <strong>Gruvbox Dark</strong>, and <strong>Solarized</strong> in both light and dark. Diagrams, code highlighting, and the whole interface follow the active theme.</p>
+<h2>Custom themes</h2>
+<p>A theme is a single TOML file dropped into your themes folder:</p>
+<ul>
+<li>macOS / Linux: <code>~/.supermd/themes/</code></li>
+<li>Windows: <code>%USERPROFILE%\.supermd\themes\</code></li>
+</ul>
+<p>The shape:</p>
+<pre><code class="language-toml">name = "My Theme"
+appearance = "dark"   # or "light" — decides which system mode it offers in
 
-<div class="pager"><span class="pager-gap"></span><a class="next-link" href="/docs/editing/">Editing &rarr;</a></div>
+[colors]
+bg = "#2e3440"          # page background
+fg = "#d8dee9"          # body text
+fg_strong = "#eceff4"   # headings, emphasis
+fg_muted = "#616e88"    # secondary text
+accent = "#bf616a"      # highlights, links in chrome
+link = "#88c0d0"        # links in documents
+code_bg = "#3b4252"     # code block background
+code_fg = "#d8dee9"     # code text
+border = "#434c5e"
+panel_bg = "#292e39"    # sidebar, overlays
+hover_bg = "#3b4252"
+selected_bg = "#434c5e"
+find_match_bg = "#665c22"
+find_active_bg = "#8a7d33"
+
+[syntax]
+keyword = "#81a1c1"
+function = "#88c0d0"
+type = "#8fbcbb"
+string = "#a3be8c"
+comment = "#616e88"
+constant = "#b48ead"
+</code></pre>
+<p>Optionally, <code>diff_added_bg</code>, <code>diff_added_fg</code>, <code>diff_deleted_bg</code>, and <code>diff_deleted_fg</code> under <code>[colors]</code> tune the git diff view; sensible defaults are used otherwise.</p>
+<p>Restart SuperMD and your theme appears in the picker alongside the built-ins. A theme file that doesn't parse is skipped with a message in the terminal — it never breaks the app.</p>
+
+<div class="pager"><a class="prev-link" href="/docs/workspace/">&larr; Working with a Folder</a><span class="pager-gap"></span><a class="next-link" href="/docs/plugins/">Plugins &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

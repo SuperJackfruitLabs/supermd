@@ -7,5 +7,14 @@
   </url>
 <!-- docs -->
 <url><loc>https://supermd.app/docs/</loc></url>
+<url><loc>https://supermd.app/docs/editing/</loc></url>
+<url><loc>https://supermd.app/docs/shortcuts/</loc></url>
+<url><loc>https://supermd.app/docs/diagrams/</loc></url>
+<url><loc>https://supermd.app/docs/workspace/</loc></url>
+<url><loc>https://supermd.app/docs/themes/</loc></url>
+<url><loc>https://supermd.app/docs/plugins/</loc></url>
+<url><loc>https://supermd.app/docs/writing-plugins/</loc></url>
+<url><loc>https://supermd.app/docs/capabilities/</loc></url>
+<url><loc>https://supermd.app/docs/grammars/</loc></url>
 <!-- /docs -->
 </urlset>

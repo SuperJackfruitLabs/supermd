@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Getting Started — SuperMD Docs</title>
-<meta name="description" content="SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.">
-<link rel="canonical" href="https://supermd.app/docs/">
+<title>Plugins — SuperMD Docs</title>
+<meta name="description" content="SuperMD is extensible with sandboxed WebAssembly plugins. Twelve ship with the project — Graphviz diagrams, emoji shortcodes, a CSV viewer, an HTML exporter, daily-note templates, and more — and anyone can write their own.">
+<link rel="canonical" href="https://supermd.app/docs/plugins/">
 <style>
   :root {
     --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
@@ -100,7 +100,7 @@
 <aside class="sidebar">
 <h4>Using SuperMD</h4>
 <ul>
-<li class="current"><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/">Getting Started</a></li>
 <li><a href="/docs/editing/">Editing</a></li>
 <li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
 <li><a href="/docs/diagrams/">Diagrams</a></li>
@@ -109,7 +109,7 @@
 </ul>
 <h4>Extending SuperMD</h4>
 <ul>
-<li><a href="/docs/plugins/">Plugins</a></li>
+<li class="current"><a href="/docs/plugins/">Plugins</a></li>
 <li><a href="/docs/writing-plugins/">Writing a Plugin</a></li>
 <li><a href="/docs/capabilities/">Capabilities</a></li>
 <li><a href="/docs/grammars/">Grammar Plugins</a></li>
@@ -117,17 +117,39 @@
 
 </aside>
 <main class="doc">
-<h1>Getting Started</h1>
-<p>SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.</p>
-<h2>Install</h2>
-<p><strong>macOS</strong> — <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download the DMG</a>, open it, and drag SuperMD into Applications. The app is signed and notarized, so it opens without warnings. If you launch it straight from the DMG, SuperMD offers to move itself into Applications for you.</p>
-<p><strong>Linux</strong> — grab the <code>.deb</code> or the <code>.tar.gz</code> from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<p><strong>Windows</strong> — run the installer from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<h2>First launch</h2>
-<p>SuperMD opens with a welcome tour — and the tour itself is a real, editable document. Click things: checkboxes toggle, tables dissolve into editable text, bold markers appear under your cursor and fold away when you leave.</p>
-<p>When you're ready to work with your own notes, press <strong>⌘ O</strong> (Ctrl+O on Windows/Linux) or click <strong>Open Folder</strong> in the sidebar. SuperMD remembers your recent workspaces and can reopen the last one on launch.</p>
+<h1>Plugins</h1>
+<p>SuperMD is extensible with sandboxed WebAssembly plugins. Twelve ship with the project — Graphviz diagrams, emoji shortcodes, a CSV viewer, an HTML exporter, daily-note templates, and more — and anyone can <a href="/docs/writing-plugins/">write their own</a>.</p>
+<h2>What plugins can add</h2>
+<ul>
+<li><strong>Rendered blocks</strong> — claim a fence language and draw it (the Graphviz plugin renders <code>```dot</code> fences).</li>
+<li><strong>Commands</strong> — entries in the command palette (<strong>⌘ ⇧ P</strong>), like <em>Insert Table of Contents</em>.</li>
+<li><strong>Inline replacements</strong> — patterns like <code>:tada:</code> rendered as 🎉, revealed as raw text when your cursor touches them.</li>
+<li><strong>Formatters</strong> — "Format: …" palette commands, optionally run on every save.</li>
+<li><strong>Paste transforms</strong> — pasted CSV becomes a Markdown table; a pasted link can gain its page title.</li>
+<li><strong>Exporters</strong> — "Export: HTML" renders your document to a file you choose.</li>
+<li><strong>File viewers</strong> — open non-Markdown files as rendered views (CSV as tables); <strong>⌘ E</strong> switches to the raw source.</li>
+<li><strong>Status widgets</strong> — word count and reading time in the corner of the editor.</li>
+<li><strong>Templates</strong> — "New: Daily Note" creates today's journal file in your workspace.</li>
+<li><strong>Save hooks</strong> — the table-of-contents plugin refreshes its markers every time you save.</li>
+<li><strong>Syntax highlighting</strong> — new languages for fences and files (GraphQL ships this way).</li>
+</ul>
+<h2>Installing a plugin</h2>
+<p>A plugin is a folder. Drop it into:</p>
+<ul>
+<li>macOS / Linux: <code>~/.supermd/plugins/</code></li>
+<li>Windows: <code>%USERPROFILE%\.supermd\plugins\</code></li>
+</ul>
+<p>then run <strong>Reload Plugins</strong> from the palette (or restart). If a plugin fails to load, the reason appears at the bottom of the command palette — a broken plugin never breaks the app.</p>
+<h2>The safety model</h2>
+<p>Plugins run inside a WebAssembly sandbox with <strong>no access to anything by default</strong> — no files, no network, no environment, no clock.</p>
+<p>Two capabilities exist, and both ask you first:</p>
+<ul>
+<li><strong>Workspace reading</strong> — a plugin that wants to read files in your open folder triggers a one-time consent banner. Granting gives it read-only access to that folder and nothing else.</li>
+<li><strong>Network access</strong> — a plugin that wants to fetch from the web asks per website: the first request to a domain shows a banner naming it. Grants are remembered and revocable, and requests are limited (HTTPS only, small responses, strict timeouts).</li>
+</ul>
+<p>Some things plugins can <strong>never</strong> do, with no permission to ask for: run programs, write files anywhere they choose (exports and templates only go where <em>you</em> pick), draw their own interface, or run in the background. And a plugin that hangs or crashes is simply cut off — after two seconds it's interrupted, the document is untouched, and the app carries on.</p>
 
-<div class="pager"><span class="pager-gap"></span><a class="next-link" href="/docs/editing/">Editing &rarr;</a></div>
+<div class="pager"><a class="prev-link" href="/docs/themes/">&larr; Themes</a><span class="pager-gap"></span><a class="next-link" href="/docs/writing-plugins/">Writing a Plugin &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

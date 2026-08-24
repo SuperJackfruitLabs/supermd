@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Getting Started — SuperMD Docs</title>
-<meta name="description" content="SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.">
-<link rel="canonical" href="https://supermd.app/docs/">
+<title>Keyboard Shortcuts — SuperMD Docs</title>
+<meta name="description" content="Every shortcut, as shown in-app with ⌘ / (Ctrl+/). macOS keys on the left; on Windows and Linux, ⌘ becomes Ctrl and ⌥ becomes Alt.">
+<link rel="canonical" href="https://supermd.app/docs/shortcuts/">
 <style>
   :root {
     --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
@@ -100,9 +100,9 @@
 <aside class="sidebar">
 <h4>Using SuperMD</h4>
 <ul>
-<li class="current"><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/">Getting Started</a></li>
 <li><a href="/docs/editing/">Editing</a></li>
-<li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
+<li class="current"><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
 <li><a href="/docs/diagrams/">Diagrams</a></li>
 <li><a href="/docs/workspace/">Working with a Folder</a></li>
 <li><a href="/docs/themes/">Themes</a></li>
@@ -117,17 +117,51 @@
 
 </aside>
 <main class="doc">
-<h1>Getting Started</h1>
-<p>SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.</p>
-<h2>Install</h2>
-<p><strong>macOS</strong> — <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download the DMG</a>, open it, and drag SuperMD into Applications. The app is signed and notarized, so it opens without warnings. If you launch it straight from the DMG, SuperMD offers to move itself into Applications for you.</p>
-<p><strong>Linux</strong> — grab the <code>.deb</code> or the <code>.tar.gz</code> from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<p><strong>Windows</strong> — run the installer from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<h2>First launch</h2>
-<p>SuperMD opens with a welcome tour — and the tour itself is a real, editable document. Click things: checkboxes toggle, tables dissolve into editable text, bold markers appear under your cursor and fold away when you leave.</p>
-<p>When you're ready to work with your own notes, press <strong>⌘ O</strong> (Ctrl+O on Windows/Linux) or click <strong>Open Folder</strong> in the sidebar. SuperMD remembers your recent workspaces and can reopen the last one on launch.</p>
+<h1>Keyboard Shortcuts</h1>
+<p>Every shortcut, as shown in-app with <strong>⌘ /</strong> (Ctrl+/). macOS keys on the left; on Windows and Linux, ⌘ becomes Ctrl and ⌥ becomes Alt.</p>
+<h2>General</h2>
+<table><thead><tr><th>macOS</th><th>Windows / Linux</th><th>Action</th></tr></thead><tbody>
+<tr><td>⌘ N</td><td>Ctrl N</td><td>New file</td></tr>
+<tr><td>⌘ O</td><td>Ctrl O</td><td>Open file or folder</td></tr>
+<tr><td>⌘ P</td><td>Ctrl P</td><td>Go to file</td></tr>
+<tr><td>⌘ F</td><td>Ctrl F</td><td>Find in file</td></tr>
+<tr><td>⌘ E</td><td>Ctrl E</td><td>Toggle edit / preview</td></tr>
+<tr><td>⌘ ⇧ D</td><td>Ctrl Shift D</td><td>Show changes vs git HEAD</td></tr>
+<tr><td>⌘ ⇧ F</td><td>Ctrl Shift F</td><td>Search in workspace</td></tr>
+<tr><td>⌘ ⇧ P</td><td>Ctrl Shift P</td><td>Command palette (plugins)</td></tr>
+<tr><td>⌃ ⌘ F</td><td>Ctrl Alt F</td><td>Focus mode</td></tr>
+<tr><td>⌘ B</td><td>Ctrl B</td><td>Toggle sidebar</td></tr>
+<tr><td>⌘ ⇧ O</td><td>Ctrl Shift O</td><td>Toggle outline</td></tr>
+<tr><td>⌘ 1</td><td>Ctrl 1</td><td>Focus sidebar</td></tr>
+<tr><td>⌘ W</td><td>Ctrl W</td><td>Close tab</td></tr>
+<tr><td>⌃ Tab / ⌘ ⇧ ]</td><td>Ctrl Tab / Ctrl Shift ]</td><td>Next tab</td></tr>
+<tr><td>⌘ ⇧ [</td><td>Ctrl Shift [</td><td>Previous tab</td></tr>
+<tr><td>⌘ S</td><td>Ctrl S</td><td>Save now</td></tr>
+<tr><td>⌘ + / − / 0</td><td>Ctrl + / − / 0</td><td>Zoom image tab</td></tr>
+<tr><td>⌘ T</td><td>Ctrl T</td><td>Theme picker</td></tr>
+<tr><td>⌘ /</td><td>Ctrl /</td><td>Shortcut reference</td></tr>
+</tbody></table>
+<h2>Editor</h2>
+<table><thead><tr><th>macOS</th><th>Windows / Linux</th><th>Action</th></tr></thead><tbody>
+<tr><td>⌘ Z / ⌘ ⇧ Z</td><td>Ctrl Z / Ctrl Shift Z</td><td>Undo / redo</td></tr>
+<tr><td>⌥ ← →</td><td>Alt ← →</td><td>Move by word</td></tr>
+<tr><td>⌘ ← →</td><td>Ctrl ← →</td><td>Line start / end</td></tr>
+<tr><td>⌘ ↑ ↓</td><td>Ctrl ↑ ↓</td><td>Document start / end</td></tr>
+<tr><td>⌥ ⌫</td><td>Alt Backspace</td><td>Delete word</td></tr>
+<tr><td>⌘ G / ⌘ ⇧ G</td><td>Ctrl G / Ctrl Shift G</td><td>Next / previous match</td></tr>
+<tr><td>Click ✓ / ○</td><td>Click ✓ / ○</td><td>Toggle task checkbox</td></tr>
+<tr><td>Click table / image</td><td>Click table / image</td><td>Edit its source</td></tr>
+</tbody></table>
+<h2>Sidebar</h2>
+<table><thead><tr><th>Key</th><th>Action</th></tr></thead><tbody>
+<tr><td>↑ ↓</td><td>Move selection</td></tr>
+<tr><td>→</td><td>Expand folder</td></tr>
+<tr><td>←</td><td>Collapse / go to parent</td></tr>
+<tr><td>⏎</td><td>Open</td></tr>
+</tbody></table>
+<p>While browsing with the arrow keys, files open in a single reusable preview tab; press ⏎ or double-click to pin a file in its own tab.</p>
 
-<div class="pager"><span class="pager-gap"></span><a class="next-link" href="/docs/editing/">Editing &rarr;</a></div>
+<div class="pager"><a class="prev-link" href="/docs/editing/">&larr; Editing</a><span class="pager-gap"></span><a class="next-link" href="/docs/diagrams/">Diagrams &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

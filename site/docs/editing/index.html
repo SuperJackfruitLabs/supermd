@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Getting Started — SuperMD Docs</title>
-<meta name="description" content="SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.">
-<link rel="canonical" href="https://supermd.app/docs/">
+<title>Editing — SuperMD Docs</title>
+<meta name="description" content="SuperMD's editor is hybrid: your document always looks typeset, and the raw Markdown appears exactly where — and only where — you're working. There is no separate source mode to switch into and no preview pane to keep in sync. The page is the editor.">
+<link rel="canonical" href="https://supermd.app/docs/editing/">
 <style>
   :root {
     --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
@@ -100,8 +100,8 @@
 <aside class="sidebar">
 <h4>Using SuperMD</h4>
 <ul>
-<li class="current"><a href="/docs/">Getting Started</a></li>
-<li><a href="/docs/editing/">Editing</a></li>
+<li><a href="/docs/">Getting Started</a></li>
+<li class="current"><a href="/docs/editing/">Editing</a></li>
 <li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
 <li><a href="/docs/diagrams/">Diagrams</a></li>
 <li><a href="/docs/workspace/">Working with a Folder</a></li>
@@ -117,17 +117,33 @@
 
 </aside>
 <main class="doc">
-<h1>Getting Started</h1>
-<p>SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.</p>
-<h2>Install</h2>
-<p><strong>macOS</strong> — <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download the DMG</a>, open it, and drag SuperMD into Applications. The app is signed and notarized, so it opens without warnings. If you launch it straight from the DMG, SuperMD offers to move itself into Applications for you.</p>
-<p><strong>Linux</strong> — grab the <code>.deb</code> or the <code>.tar.gz</code> from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<p><strong>Windows</strong> — run the installer from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<h2>First launch</h2>
-<p>SuperMD opens with a welcome tour — and the tour itself is a real, editable document. Click things: checkboxes toggle, tables dissolve into editable text, bold markers appear under your cursor and fold away when you leave.</p>
-<p>When you're ready to work with your own notes, press <strong>⌘ O</strong> (Ctrl+O on Windows/Linux) or click <strong>Open Folder</strong> in the sidebar. SuperMD remembers your recent workspaces and can reopen the last one on launch.</p>
+<h1>Editing</h1>
+<p>SuperMD's editor is <em>hybrid</em>: your document always looks typeset, and the raw Markdown appears exactly where — and only where — you're working. There is no separate source mode to switch into and no preview pane to keep in sync. The page is the editor.</p>
+<h2>Markers reveal where you touch</h2>
+<p>Click inside a <strong>bold phrase</strong> and the <code>**</code> markers appear around it; click away and they fold up again. The same applies everywhere:</p>
+<ul>
+<li>Headings show their <code>#</code> marks while your cursor is on the line.</li>
+<li>Links display as their text; touch one and the <code>[text](url)</code> form opens for editing.</li>
+<li>Blockquotes, lists, and inline code all reveal their markers on contact.</li>
+</ul>
+<p>You always edit real Markdown — SuperMD never rewrites your file behind your back. What lands on disk is exactly the plain CommonMark you typed.</p>
+<h2>Checkboxes, tables, and code</h2>
+<ul>
+<li><strong>Task lists</strong> — click a checkbox to toggle it. <code>- [ ]</code> becomes <code>- [x]</code>, one undo step.</li>
+<li><strong>Tables</strong> — rendered as proper tables. Click a row and the whole table dissolves into editable pipe syntax; click away and it re-renders.</li>
+<li><strong>Code fences</strong> — syntax highlighting for 78+ languages, live as you type. The ``` fence delimiters hide while you're outside the block.</li>
+<li><strong>Images</strong> — display inline; click one to edit its <code>![alt](path)</code> source.</li>
+</ul>
+<p>Diagrams work the same way — see <a href="/docs/diagrams/">Diagrams</a>.</p>
+<h2>Preview and focus</h2>
+<ul>
+<li><strong>⌘ E</strong> (Ctrl+E) toggles a fully rendered read-only preview of the current document — useful for a final read-through.</li>
+<li><strong>⌃ ⌘ F</strong> (Ctrl+Alt+F) enters focus mode: chrome fades away, just you and the text.</li>
+</ul>
+<h2>Saving is not your job</h2>
+<p>SuperMD autosaves shortly after you stop typing, and <strong>⌘ S</strong> (Ctrl+S) saves immediately if you want the reassurance. If a file changed on disk while you had unsaved edits — say, from a git checkout — SuperMD never silently overwrites either side: the disk version is backed up first, every time.</p>
 
-<div class="pager"><span class="pager-gap"></span><a class="next-link" href="/docs/editing/">Editing &rarr;</a></div>
+<div class="pager"><a class="prev-link" href="/docs/">&larr; Getting Started</a><span class="pager-gap"></span><a class="next-link" href="/docs/shortcuts/">Keyboard Shortcuts &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

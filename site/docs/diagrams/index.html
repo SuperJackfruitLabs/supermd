@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Getting Started — SuperMD Docs</title>
-<meta name="description" content="SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.">
-<link rel="canonical" href="https://supermd.app/docs/">
+<title>Diagrams — SuperMD Docs</title>
+<meta name="description" content="Fenced code blocks in two languages render as live diagrams, right in the document.">
+<link rel="canonical" href="https://supermd.app/docs/diagrams/">
 <style>
   :root {
     --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
@@ -100,10 +100,10 @@
 <aside class="sidebar">
 <h4>Using SuperMD</h4>
 <ul>
-<li class="current"><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/">Getting Started</a></li>
 <li><a href="/docs/editing/">Editing</a></li>
 <li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
-<li><a href="/docs/diagrams/">Diagrams</a></li>
+<li class="current"><a href="/docs/diagrams/">Diagrams</a></li>
 <li><a href="/docs/workspace/">Working with a Folder</a></li>
 <li><a href="/docs/themes/">Themes</a></li>
 </ul>
@@ -117,17 +117,31 @@
 
 </aside>
 <main class="doc">
-<h1>Getting Started</h1>
-<p>SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.</p>
-<h2>Install</h2>
-<p><strong>macOS</strong> — <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download the DMG</a>, open it, and drag SuperMD into Applications. The app is signed and notarized, so it opens without warnings. If you launch it straight from the DMG, SuperMD offers to move itself into Applications for you.</p>
-<p><strong>Linux</strong> — grab the <code>.deb</code> or the <code>.tar.gz</code> from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<p><strong>Windows</strong> — run the installer from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<h2>First launch</h2>
-<p>SuperMD opens with a welcome tour — and the tour itself is a real, editable document. Click things: checkboxes toggle, tables dissolve into editable text, bold markers appear under your cursor and fold away when you leave.</p>
-<p>When you're ready to work with your own notes, press <strong>⌘ O</strong> (Ctrl+O on Windows/Linux) or click <strong>Open Folder</strong> in the sidebar. SuperMD remembers your recent workspaces and can reopen the last one on launch.</p>
+<h1>Diagrams</h1>
+<p>Fenced code blocks in two languages render as live diagrams, right in the document.</p>
+<h2>Mermaid</h2>
+<pre><code class="language-markdown">```mermaid
+flowchart TD
+  Draft --&gt; Review
+  Review --&gt; Published
+  Review --&gt; Draft
+```
+</code></pre>
+<p>Flowcharts, sequence diagrams, state machines — the common Mermaid diagram types render inline, using your current theme's colors and fonts. No web view, no external service: rendering happens locally.</p>
+<h2>Graphviz</h2>
+<pre><code class="language-markdown">```dot
+digraph {
+  a -&gt; b
+  b -&gt; c
+}
+```
+</code></pre>
+<p><code>dot</code> and <code>graphviz</code> fences render through the bundled Graphviz plugin, themed to match.</p>
+<h2>Editing a diagram</h2>
+<p>Click a diagram and it dissolves into its editable source, like every other block in SuperMD. Click away and it re-renders. If the source has a syntax error, the error message appears in the diagram's place — your document keeps working, and the raw text is one click away.</p>
+<p>Diagrams re-render when you switch themes, so they never look pasted-in.</p>
 
-<div class="pager"><span class="pager-gap"></span><a class="next-link" href="/docs/editing/">Editing &rarr;</a></div>
+<div class="pager"><a class="prev-link" href="/docs/shortcuts/">&larr; Keyboard Shortcuts</a><span class="pager-gap"></span><a class="next-link" href="/docs/workspace/">Working with a Folder &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

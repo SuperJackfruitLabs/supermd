@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Writing a Plugin — SuperMD Docs</title>
+<meta name="description" content="A SuperMD plugin is a WebAssembly component plus a plugin.toml manifest, in a folder under ~/.supermd/plugins/. This page walks the whole path from template to installed plugin. You'll need Rust and about ten minutes.">
+<link rel="canonical" href="https://supermd.app/docs/writing-plugins/">
+<style>
+  :root {
+    --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
+    --accent: #c9821c; --panel: #f8f5ec; --border: #eae5d8; --code: #f6f2e9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #211f1a; --fg: #d9d4c8; --strong: #f2ede2; --muted: #8f897a;
+      --accent: #e5a63b; --panel: #262420; --border: #383428; --code: #2b2822;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header.top {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 28px; border-bottom: 1px solid var(--border);
+  }
+  .wordmark { font-weight: 700; font-size: 19px; color: var(--strong); }
+  .wordmark .mark { color: var(--accent); font-weight: 800; }
+  header.top nav a { margin-left: 20px; color: var(--fg); font-size: 15px; }
+  .layout { display: flex; max-width: 1080px; margin: 0 auto; }
+  .sidebar {
+    width: 220px; flex: none; padding: 32px 20px; font-size: 14px;
+    border-right: 1px solid var(--border); min-height: calc(100vh - 61px);
+  }
+  .sidebar h4 {
+    color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+    font-size: 11px; margin: 18px 0 8px;
+  }
+  .sidebar h4:first-child { margin-top: 0; }
+  .sidebar ul { list-style: none; }
+  .sidebar li { margin: 2px 0; }
+  .sidebar li a { display: block; color: var(--fg); padding: 4px 8px; border-radius: 6px; }
+  .sidebar li a:hover { background: var(--panel); text-decoration: none; }
+  .sidebar li.current a { background: var(--panel); color: var(--strong); font-weight: 600; }
+  main.doc { flex: 1; min-width: 0; max-width: 44rem; padding: 36px 32px 64px; }
+  .doc h1 { color: var(--strong); font-size: 32px; line-height: 1.2; margin-bottom: 18px; }
+  .doc h2 { color: var(--strong); font-size: 22px; margin: 34px 0 10px; }
+  .doc h3 { color: var(--strong); font-size: 17px; margin: 26px 0 8px; }
+  .doc p, .doc ul, .doc ol { margin-bottom: 14px; }
+  .doc ul, .doc ol { padding-left: 24px; }
+  .doc li { margin: 4px 0; }
+  .doc code {
+    background: var(--code); border-radius: 4px; padding: 1px 5px; font-size: 13.5px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .doc pre {
+    background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; font-size: 13px; overflow-x: auto; margin-bottom: 14px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .doc pre code { background: none; padding: 0; font-size: 13px; }
+  .doc table { border-collapse: collapse; margin-bottom: 14px; width: 100%; font-size: 14.5px; }
+  .doc th, .doc td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .doc th { background: var(--panel); color: var(--strong); }
+  .doc blockquote {
+    border-left: 3px solid var(--accent); padding-left: 14px; color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .pager {
+    display: flex; justify-content: space-between; margin-top: 48px;
+    padding-top: 18px; border-top: 1px solid var(--border); font-size: 15px;
+  }
+  footer {
+    text-align: center; color: var(--muted); font-size: 13px;
+    padding: 28px 0 40px; border-top: 1px solid var(--border);
+  }
+  @media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); min-height: 0; }
+    main.doc { padding: 24px 20px 48px; }
+  }
+
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="wordmark" href="/">Super<span class="mark">MD</span></a>
+  <nav>
+    <a href="/docs/">Docs</a>
+    <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download</a>
+    <a href="https://github.com/SuperJackfruitLabs/supermd">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+<aside class="sidebar">
+<h4>Using SuperMD</h4>
+<ul>
+<li><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/editing/">Editing</a></li>
+<li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
+<li><a href="/docs/diagrams/">Diagrams</a></li>
+<li><a href="/docs/workspace/">Working with a Folder</a></li>
+<li><a href="/docs/themes/">Themes</a></li>
+</ul>
+<h4>Extending SuperMD</h4>
+<ul>
+<li><a href="/docs/plugins/">Plugins</a></li>
+<li class="current"><a href="/docs/writing-plugins/">Writing a Plugin</a></li>
+<li><a href="/docs/capabilities/">Capabilities</a></li>
+<li><a href="/docs/grammars/">Grammar Plugins</a></li>
+</ul>
+
+</aside>
+<main class="doc">
+<h1>Writing a Plugin</h1>
+<p>A SuperMD plugin is a WebAssembly component plus a <code>plugin.toml</code> manifest, in a folder under <code>~/.supermd/plugins/</code>. This page walks the whole path from template to installed plugin. You'll need Rust and about ten minutes.</p>
+<h2>Start from the template</h2>
+<p>Copy <a href="https://github.com/SuperJackfruitLabs/supermd/tree/master/plugins/template"><code>plugins/template/</code></a> from the repo. It's a complete, buildable plugin where every surface returns "not implemented" — you fill in the ones you want.</p>
+<h2>The manifest</h2>
+<p><code>plugin.toml</code> declares what your plugin contributes. A complete example using several surfaces:</p>
+<pre><code class="language-toml">name = "my-plugin"
+version = "0.1.0"
+
+# Render ```mylang fences as SVG.
+fences = ["mylang"]
+
+# Command palette entries.
+[[commands]]
+id = "my-plugin.hello"
+title = "Say Hello"
+
+# Inline pattern replacement (regex, one match consumed whole).
+[[inline]]
+id = "shortcode"
+pattern = ":([a-z]+):"
+
+# Regex → style highlighting, no code involved.
+[[decorations]]
+pattern = "\\b(TODO|FIXME)\\b"
+style = "accent"        # accent | muted | strong | highlight
+
+formats = true          # adds "Format: my-plugin" to the palette
+paste = true            # transform pasted text
+
+# Export formats: "Export: HTML" in the palette.
+[[exports]]
+id = "html"
+name = "HTML"
+extension = "html"
+
+# Rendered views for file types (content in, markdown out).
+[[viewers]]
+extensions = ["csv"]
+
+# Status-strip text.
+[[widgets]]
+id = "words"
+
+# "New: Daily Note" in the palette.
+[[templates]]
+id = "daily"
+name = "Daily Note"
+
+# Run on every save.
+hooks = ["save"]
+</code></pre>
+<p>Declare only what you use — the host never calls surfaces you didn't declare.</p>
+<h2>Implement the surfaces</h2>
+<p>Each manifest entry maps to one exported function in <code>src/lib.rs</code>:</p>
+<table><thead><tr><th>Manifest</th><th>Export</th><th>Signature (in, out)</th></tr></thead><tbody>
+<tr><td><code>fences</code></td><td><code>render-block</code></td><td>language + source + theme → SVG</td></tr>
+<tr><td><code>[[commands]]</code></td><td><code>run-command</code></td><td>id + document + selection → replacement</td></tr>
+<tr><td><code>[[inline]]</code></td><td><code>render-inline</code></td><td>pattern id + matched text → replacement text</td></tr>
+<tr><td><code>formats</code></td><td><code>format-document</code></td><td>document → document</td></tr>
+<tr><td><code>paste</code></td><td><code>process-paste</code></td><td>text → optional replacement</td></tr>
+<tr><td><code>[[exports]]</code></td><td><code>export-document</code></td><td>document + format + theme → files (bytes)</td></tr>
+<tr><td><code>[[viewers]]</code></td><td><code>render-view</code></td><td>filename + content → markdown</td></tr>
+<tr><td><code>[[widgets]]</code></td><td><code>status-text</code></td><td>document → one line of text</td></tr>
+<tr><td><code>[[templates]]</code></td><td><code>render-template</code></td><td>id + date/context → filename + content</td></tr>
+<tr><td><code>hooks</code></td><td><code>on-save</code></td><td>path + document → optional replacement</td></tr>
+</tbody></table>
+<p>Everything is a pure function call: data in, data out, errors as strings. Returning an error shows a message; it never crashes the editor.</p>
+<h2>Build and install</h2>
+<pre><code class="language-sh">rustup target add wasm32-wasip2
+cargo build --release --target wasm32-wasip2
+mkdir -p ~/.supermd/plugins/my-plugin
+cp target/wasm32-wasip2/release/*.wasm ~/.supermd/plugins/my-plugin/plugin.wasm
+cp plugin.toml ~/.supermd/plugins/my-plugin/
+</code></pre>
+<p>Run <strong>Reload Plugins</strong> from the palette. Your fences render, your commands appear.</p>
+<p>If your plugin needs to read the workspace or fetch from the web, read <a href="/docs/capabilities/">Capabilities</a>. For syntax-highlighting plugins, see <a href="/docs/grammars/">Grammar Plugins</a> — they're data-only, no Rust required.</p>
+<h2>Troubleshooting</h2>
+<ul>
+<li><strong>"failed: …" in the palette</strong> — the manifest didn't parse or the wasm didn't link; run SuperMD from a terminal to see the full reason.</li>
+<li><strong>A link error mentioning <code>wasi:</code> imports</strong> — a dependency pulled in code needing files, clocks, or randomness. Plugins are pure by default; remove the dependency or gate the feature.</li>
+<li><strong>Your surface returns an error every time</strong> — check that the manifest declares it; undeclared surfaces are never called.</li>
+</ul>
+
+<div class="pager"><a class="prev-link" href="/docs/plugins/">&larr; Plugins</a><span class="pager-gap"></span><a class="next-link" href="/docs/capabilities/">Capabilities &rarr;</a></div>
+</main>
+</div>
+<footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>
+</body>
+</html>
