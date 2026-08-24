@@ -1109,6 +1109,7 @@ impl Editor {
 
     /// Source-space style attributes for one line, one entry per byte.
     fn line_attrs(&self, ix: usize, t: &Theme) -> (String, Vec<Attr>) {
+        // (decoration overlay applied below, after style spans)
         let range = self.view_buffer().line_range(ix);
         let text = self.view_buffer().line_text(ix);
         let (_, base_weight, family, _) = self.line_typography(ix, t);
@@ -1163,6 +1164,28 @@ impl Editor {
                         {
                             a.italic = true;
                         }
+                    }
+                }
+            }
+        }
+
+        // Plugin decoration overlays (prose lines only).
+        if !self.is_code_mode()
+            && !matches!(self.view_line_kinds().get(ix), Some(LineKind::Code))
+        {
+            for (deco, color, is_bg) in decoration_overlay(
+                &text,
+                &range,
+                crate::extensions::decoration_table(),
+                t,
+            ) {
+                let start = deco.start.max(range.start) - range.start;
+                let end = deco.end.min(range.end) - range.start;
+                for a in &mut attrs[start..end] {
+                    if is_bg {
+                        a.bg = Some(color);
+                    } else {
+                        a.color = color;
                     }
                 }
             }
@@ -1276,6 +1299,73 @@ struct Attr {
     bg: Option<Hsla>,
     underline: bool,
     strike: bool,
+}
+
+
+/// Decoration overlay for one line: absolute byte ranges + color, from
+/// host-compiled plugin decoration rules. Pure — table injected.
+fn decoration_overlay(
+    line_text: &str,
+    line_range: &Range<usize>,
+    table: &[crate::extensions::CompiledDecoration],
+    t: &Theme,
+) -> Vec<(Range<usize>, Hsla, bool)> {
+    // (range, color, is_background)
+    let mut out = Vec::new();
+    for rule in table {
+        let (color, is_bg) = match rule.style.as_str() {
+            "accent" => (t.accent, false),
+            "muted" => (t.fg_muted, false),
+            "strong" => (t.fg_strong, false),
+            "highlight" => (t.find_match_bg, true),
+            _ => continue,
+        };
+        for m in rule.regex.find_iter(line_text) {
+            out.push((
+                line_range.start + m.start()..line_range.start + m.end(),
+                color,
+                is_bg,
+            ));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod decoration_tests {
+    use super::*;
+
+    #[test]
+    fn decorations_match_and_map_styles() {
+        let table = vec![crate::extensions::CompiledDecoration {
+            regex: regex::Regex::new(r"\b(TODO|FIXME)\b").unwrap(),
+            style: "accent".into(),
+        }];
+        let t = Theme::light();
+        let hits = decoration_overlay("a TODO here", &(100..111), &table, &t);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, 102..106);
+        assert_eq!(hits[0].1, t.accent);
+        assert!(!hits[0].2);
+    }
+
+    #[test]
+    fn unknown_style_skipped_and_highlight_is_bg() {
+        let table = vec![
+            crate::extensions::CompiledDecoration {
+                regex: regex::Regex::new("x").unwrap(),
+                style: "sparkle".into(),
+            },
+            crate::extensions::CompiledDecoration {
+                regex: regex::Regex::new("y").unwrap(),
+                style: "highlight".into(),
+            },
+        ];
+        let t = Theme::light();
+        let hits = decoration_overlay("xy", &(0..2), &table, &t);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].2, "highlight is a background style");
+    }
 }
 
 /// Compress per-byte attributes into TextRuns.

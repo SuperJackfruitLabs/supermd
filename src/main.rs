@@ -166,6 +166,7 @@ fn main() {
             for (dir, err) in host.failures() {
                 eprintln!("supermd: plugin failed: {}: {err}", dir.display());
             }
+            extensions::set_decoration_table(extensions::compile_decorations(&host.plugins()));
             extensions::set_fence_table(
                 host.plugins()
                     .iter()

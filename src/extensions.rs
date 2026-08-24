@@ -425,6 +425,35 @@ pub fn fence_table() -> &'static [(String, String, Vec<String>)] {
     FENCE_TABLE.get().map(|v| v.as_slice()).unwrap_or(&[])
 }
 
+/// Host-compiled decoration rules (regex validated at manifest parse).
+pub struct CompiledDecoration {
+    pub regex: regex::Regex,
+    pub style: String,
+}
+
+static DECORATION_TABLE: std::sync::OnceLock<Vec<CompiledDecoration>> = std::sync::OnceLock::new();
+
+pub fn set_decoration_table(rules: Vec<CompiledDecoration>) {
+    let _ = DECORATION_TABLE.set(rules);
+}
+
+pub fn decoration_table() -> &'static [CompiledDecoration] {
+    DECORATION_TABLE.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
+/// Build the decoration table from loaded plugin metas.
+pub fn compile_decorations(metas: &[PluginMeta]) -> Vec<CompiledDecoration> {
+    metas
+        .iter()
+        .flat_map(|m| m.decorations.iter())
+        .filter_map(|d| {
+            regex::Regex::new(&d.pattern)
+                .ok()
+                .map(|regex| CompiledDecoration { regex, style: d.style.clone() })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
