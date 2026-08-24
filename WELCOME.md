@@ -55,6 +55,7 @@ This very table is a live widget now — click a row to edit its raw pipes.
 - [x] Real tables and inline images while editing; fence lines collapse too
 - [x] Click these checkboxes to toggle them — ⌘Z undoes
 - [ ] Try ⌘F to find, ⌘N for a new note, and edit a file in another app to watch it reload
+- [ ] In a git repo, hit ⌘⇧D to see what you've changed since the last commit
 
 ---
 

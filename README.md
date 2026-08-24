@@ -27,10 +27,16 @@ Built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   queries, plus an extras registry), in fenced blocks and standalone
   files alike. Code files get a real code editor: monospace, full
   width, line-number gutter, auto-indent.
-- **Themes** — six built-in (Paper, Graphite, Solarized ×2, Nord,
-  Gruvbox Dark), live picker on ⌘T, custom themes as TOML files in
-  `~/.supermd/themes/`. Your light and dark picks follow the system
-  appearance automatically.
+- **Show Changes** — ⌘⇧D diffs the open file against git HEAD, with
+  word-level marks rendered in the editor's own typography (added words
+  on a green wash, deleted words struck through in red, inline in the
+  flow). Code files get line diffs with a diff-aware gutter; modified
+  files get a dot in the sidebar. Read-only — SuperMD never writes to
+  your repo.
+- **Themes** — eight built-in (Jackfruit ×2, Paper, Graphite,
+  Solarized ×2, Nord, Gruvbox Dark), live picker on ⌘T, custom themes
+  as TOML files in `~/.supermd/themes/`. Your light and dark picks
+  follow the system appearance automatically.
 - **Safe by default** — autosave with atomic writes, per-session
   backups in `~/.supermd/backups`, external-change detection that never
   silently clobbers anything, and live reload of clean buffers when
