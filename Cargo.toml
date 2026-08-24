@@ -47,6 +47,9 @@ opt-level = 2
 [patch.crates-io]
 merman-render = { path = "vendor/merman-render" }
 
+[build-dependencies]
+winresource = "0.1.31"
+
 [package.metadata.deb]
 name = "supermd"
 section = "editors"
