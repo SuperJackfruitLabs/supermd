@@ -16,6 +16,7 @@ mod palette;
 mod platform;
 mod reader;
 mod search;
+mod seeding;
 mod search_ui;
 mod seti;
 mod settings;
@@ -348,6 +349,11 @@ fn main() {
         cx.set_global(highlight::SyntaxLanguages(Arc::new(
             highlight::Languages::new(),
         )));
+        // Seed the installer-bundled default plugins on first run
+        // (user deletions and modifications are respected).
+        if let Some(bundled) = platform::bundled_plugins_dir() {
+            seeding::run_seeding(&bundled, &settings::config_dir().join("plugins"));
+        }
         // Extension host: discover + compile plugins, snapshot the
         // contribution tables for pure discovery contexts.
         {

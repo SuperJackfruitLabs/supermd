@@ -153,3 +153,61 @@ pub fn reveal_dir(path: &std::path::Path) {
     };
     let _ = std::process::Command::new(tool).arg(path).spawn();
 }
+
+/// The installer-planted default-plugins payload, probed relative to
+/// the running executable: macOS app bundle Resources, deb lib dir,
+/// or a plugins/ dir beside the binary (tarball, Windows). Dev runs
+/// (under target/) have no payload and seed nothing.
+pub fn bundled_plugins_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    bundled_plugins_dir_for(&exe)
+}
+
+fn bundled_plugins_dir_for(exe: &std::path::Path) -> Option<PathBuf> {
+    if exe.components().any(|c| c.as_os_str() == "target") {
+        return None;
+    }
+    let dir = exe.parent()?;
+    [
+        dir.join("../Resources/plugins"),
+        dir.join("../lib/supermd/plugins"),
+        dir.join("plugins"),
+    ]
+    .into_iter()
+    .find(|p| p.is_dir())
+}
+
+#[cfg(test)]
+mod bundled_tests {
+    use super::*;
+
+    #[test]
+    fn probes_each_installer_layout_and_skips_dev() {
+        let root = tempfile::tempdir().unwrap();
+        // macOS bundle layout
+        let mac = root.path().join("SuperMD.app/Contents");
+        std::fs::create_dir_all(mac.join("MacOS")).unwrap();
+        std::fs::create_dir_all(mac.join("Resources/plugins")).unwrap();
+        let found = bundled_plugins_dir_for(&mac.join("MacOS/supermd")).unwrap();
+        assert!(found.ends_with("Resources/plugins"));
+        // deb layout
+        let deb = root.path().join("usr");
+        std::fs::create_dir_all(deb.join("bin")).unwrap();
+        std::fs::create_dir_all(deb.join("lib/supermd/plugins")).unwrap();
+        let found = bundled_plugins_dir_for(&deb.join("bin/supermd")).unwrap();
+        assert!(found.ends_with("lib/supermd/plugins"));
+        // beside-the-binary layout (tarball / Windows)
+        let flat = root.path().join("flat");
+        std::fs::create_dir_all(flat.join("plugins")).unwrap();
+        let found = bundled_plugins_dir_for(&flat.join("supermd")).unwrap();
+        assert!(found.ends_with("plugins"));
+        // dev run: a target/ path never seeds even if plugins/ exists
+        let dev = root.path().join("proj/target/debug");
+        std::fs::create_dir_all(dev.join("plugins")).unwrap();
+        assert!(bundled_plugins_dir_for(&dev.join("supermd")).is_none());
+        // no payload anywhere
+        let bare = root.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(bundled_plugins_dir_for(&bare.join("supermd")).is_none());
+    }
+}
