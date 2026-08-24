@@ -47,7 +47,7 @@ pub trait Projector: Send + Sync + 'static {
 
 /// Registered in priority order; earlier projectors win overlaps.
 pub fn projectors() -> &'static [&'static dyn Projector] {
-    static REGISTRY: &[&dyn Projector] = &[&TableProjector, &ImageProjector];
+    static REGISTRY: &[&dyn Projector] = &[&TableProjector, &ImageProjector, &DiagramProjector];
     REGISTRY
 }
 
@@ -159,6 +159,141 @@ impl Projector for ImageProjector {
     }
 }
 
+// ── diagram ────────────────────────────────────────────────────────────
+
+pub struct DiagramPayload {
+    pub body: String,
+}
+
+pub struct DiagramProjector;
+
+impl Projector for DiagramProjector {
+    fn name(&self) -> &'static str {
+        "diagram"
+    }
+
+    fn discover(
+        &self,
+        text: &str,
+        blocks: &[BlockInfo],
+        lines: &[Range<usize>],
+    ) -> Vec<Claim> {
+        // A fence is claimable only when closed — the matching
+        // BlockKind::Fence carries close_line.
+        let closed = |range: &Range<usize>| {
+            blocks.iter().any(|b| {
+                matches!(&b.kind, BlockKind::Fence { close_line: Some(_), .. })
+                    && b.range.start <= range.start
+                    && range.end <= b.range.end + 1
+            })
+        };
+        super::spans::fence_infos(text)
+            .into_iter()
+            .filter(|f| f.fenced && f.lang.as_deref() == Some("mermaid") && closed(&f.block))
+            .map(|f| {
+                let first = line_of_byte(lines, f.block.start);
+                let last = line_of_byte(lines, f.block.end.max(f.block.start + 1) - 1);
+                Claim {
+                    lines: first..last + 1,
+                    bytes: f.block.clone(),
+                    payload: Arc::new(DiagramPayload {
+                        body: text.get(f.body.clone()).unwrap_or_default().to_string(),
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    fn render(&self, ctx: &mut WidgetCtx<'_>) -> AnyElement {
+        use gpui::prelude::*;
+        use gpui::{div, px, SharedString};
+        let payload = ctx
+            .payload
+            .downcast_ref::<DiagramPayload>()
+            .expect("diagram projector payload");
+        let t = ctx.theme;
+        match crate::diagram::diagram_state(&payload.body, 664.0, ctx.cx) {
+            crate::diagram::DiagramState::Ready(image) => {
+                let handle = ctx.editor.clone();
+                let first_line = ctx.lines.start;
+                div()
+                    .id(("diagram", ctx.item_ix))
+                    .my_1()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| {
+                        handle.update(cx, |editor, cx| {
+                            let start = editor.core.buffer.line_range(first_line).start;
+                            editor.core.set_cursor(start);
+                            editor.core.break_undo_group();
+                            window.focus(&editor.focus_handle);
+                            cx.notify();
+                        });
+                    })
+                    .child(gpui::img(image).max_w_full().rounded_md())
+                    .into_any_element()
+            }
+            crate::diagram::DiagramState::Pending => div()
+                .my_1()
+                .w_full()
+                .min_h(px(120.))
+                .rounded_lg()
+                .bg(t.code_bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.))
+                .text_color(t.fg_muted)
+                .child("diagram…")
+                .into_any_element(),
+            crate::diagram::DiagramState::Failed(msg) => {
+                let handle = ctx.editor.clone();
+                let first_line = ctx.lines.start;
+                div()
+                    .id(("diagram-err", ctx.item_ix))
+                    .my_1()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| {
+                        handle.update(cx, |editor, cx| {
+                            let start = editor.core.buffer.line_range(first_line).start;
+                            editor.core.set_cursor(start);
+                            editor.core.break_undo_group();
+                            window.focus(&editor.focus_handle);
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .rounded_t_lg()
+                            .bg(t.diff_deleted_bg)
+                            .text_size(px(11.))
+                            .text_color(t.diff_deleted_fg)
+                            .child(SharedString::from(format!("diagram error: {msg}"))),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .rounded_b_lg()
+                            .bg(t.code_bg)
+                            .font_family(t.mono_family.clone())
+                            .text_size(px(t.code_size))
+                            .text_color(t.code_fg)
+                            .child(SharedString::from(payload.body.clone())),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +306,26 @@ mod tests {
             start += line.len() + 1;
         }
         out
+    }
+
+    #[test]
+    fn mermaid_fences_claimed_others_not() {
+        let src = "```mermaid\nflowchart LR\n a-->b\n```\n\n```rust\nfn x(){}\n```\nrest";
+        let lines = lines_of(src);
+        let blocks = crate::editor::blocks::blocks(src);
+        let claims = DiagramProjector.discover(src, &blocks, &lines);
+        assert_eq!(claims.len(), 1, "only the mermaid fence");
+        assert_eq!(claims[0].lines, 0..4);
+        let p = claims[0].payload.downcast_ref::<DiagramPayload>().unwrap();
+        assert!(p.body.contains("flowchart"));
+    }
+
+    #[test]
+    fn unclosed_mermaid_fence_not_claimed() {
+        let src = "```mermaid\nflowchart LR";
+        let lines = lines_of(src);
+        let blocks = crate::editor::blocks::blocks(src);
+        assert!(DiagramProjector.discover(src, &blocks, &lines).is_empty());
     }
 
     #[test]
