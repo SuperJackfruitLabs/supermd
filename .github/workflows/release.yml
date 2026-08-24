@@ -3,12 +3,13 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  macos:
     name: Build, sign, notarize macOS app
     runs-on: macos-latest
     env:
@@ -80,11 +81,83 @@ jobs:
           xcrun stapler staple "$DMG"
           spctl --assess --type open --context context:primary-signature -v "$DMG"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/supermd-*.dmg
+          if-no-files-found: error
+
+  linux:
+    name: Build Linux packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig1-dev \
+            libfreetype6-dev
+      - name: Run tests
+        run: cargo test
+      - name: Bundle tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash scripts/bundle_linux.sh "$VERSION"
+      - name: Build deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb --no-build -o dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/supermd-linux-*.tar.gz
+            dist/*.deb
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows packages
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test
+      - name: Bundle
+        shell: pwsh
+        run: |
+          $version = "$env:GITHUB_REF_NAME".TrimStart("v")
+          if (-not $version) { $version = "0.0.0-dev" }
+          pwsh scripts/bundle_windows.ps1 -Version $version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/supermd-windows-*.zip
+            dist/SuperMD-Setup-*.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [macos, linux, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ls -la artifacts/
           gh release create "$GITHUB_REF_NAME" \
-            dist/supermd-*.dmg \
+            artifacts/* \
             --title "SuperMD $GITHUB_REF_NAME" \
             --generate-notes
