@@ -11,6 +11,7 @@ mod git;
 mod highlight;
 mod input;
 mod install;
+mod install_ui;
 mod markdown;
 mod palette;
 mod platform;
@@ -167,6 +168,10 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("down"), palette::PaletteDown, Some("Palette")),
             KeyBinding::new(&platform::keybinding("enter"), palette::PaletteConfirm, Some("Palette")),
             KeyBinding::new(&platform::keybinding("escape"), palette::PaletteDismiss, Some("Palette")),
+            KeyBinding::new(&platform::keybinding("up"), install_ui::InstallUp, Some("InstallOverlay")),
+            KeyBinding::new(&platform::keybinding("down"), install_ui::InstallDown, Some("InstallOverlay")),
+            KeyBinding::new(&platform::keybinding("enter"), install_ui::InstallConfirm, Some("InstallOverlay")),
+            KeyBinding::new(&platform::keybinding("escape"), install_ui::InstallDismiss, Some("InstallOverlay")),
             KeyBinding::new(&platform::keybinding("ctrl-cmd-f"), ToggleFocusMode, None),
             KeyBinding::new(&platform::keybinding("up"), search_ui::SearchUp, Some("Search")),
             KeyBinding::new(&platform::keybinding("down"), search_ui::SearchDown, Some("Search")),
@@ -376,6 +381,8 @@ fn main() {
             ),
         ))));
 
+        cx.set_global(catalog::CatalogFetcher(catalog::ureq_fetcher()));
+
         extensions::start_inline_drainer(cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -555,7 +562,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 102);
+        assert_eq!(bindings.len(), 106);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));

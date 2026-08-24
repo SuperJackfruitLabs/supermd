@@ -76,6 +76,11 @@ pub fn ureq_fetcher() -> Fetcher {
     })
 }
 
+/// Global fetcher (ureq in the app; tests inject mocks).
+pub struct CatalogFetcher(pub Fetcher);
+
+impl gpui::Global for CatalogFetcher {}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     format!("{:x}", sha2::Sha256::digest(bytes))
