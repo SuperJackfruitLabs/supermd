@@ -2125,3 +2125,430 @@ impl Render for Editor {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{KeyBinding, TestAppContext, VisualTestContext};
+    use std::sync::{Arc, Mutex};
+
+    /// Everything an editor test touches on disk, rooted in tempdirs:
+    /// the edited file and the session backup registry. Nothing under
+    /// the real HOME is read or written.
+    struct Fixture {
+        _files: tempfile::TempDir,
+        backups: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    impl Fixture {
+        fn backup_contents(&self) -> Vec<String> {
+            let mut out = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(self.backups.path().join("backups")) {
+                for entry in entries.flatten() {
+                    out.push(std::fs::read_to_string(entry.path()).unwrap());
+                }
+            }
+            out
+        }
+    }
+
+    fn open_editor<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+        text: &str,
+    ) -> (Fixture, Entity<Editor>, &'a mut VisualTestContext) {
+        let files = tempfile::tempdir().unwrap();
+        let backups = tempfile::tempdir().unwrap();
+        let path = files.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        let langs = Arc::new(Languages::new());
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(
+                crate::theme::Theme::dark(),
+            )));
+            cx.set_global(crate::highlight::SyntaxLanguages(langs.clone()));
+            cx.set_global(SessionBackups(Arc::new(Mutex::new(
+                autosave::BackupRegistry::new(backups.path().join("backups")),
+            ))));
+        });
+        let contents = text.to_string();
+        let file = path.clone();
+        let (editor, cx) =
+            cx.add_window_view(move |_, cx| Editor::from_text(&file, contents, &langs, cx));
+        cx.update(|window, app| {
+            let handle = editor.read(app).focus_handle.clone();
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+        (Fixture { _files: files, backups, path }, editor, cx)
+    }
+
+    fn buffer_text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
+        cx.update(|_, app| editor.read(app).text())
+    }
+
+    fn head(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> usize {
+        cx.update(|_, app| editor.read(app).core.selection.head)
+    }
+
+    fn widget_count(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> usize {
+        cx.update(|_, app| {
+            editor
+                .read(app)
+                .projection
+                .iter()
+                .filter(|item| matches!(item, projection::Item::Widget { .. }))
+                .count()
+        })
+    }
+
+    #[gpui::test]
+    fn typing_flows_through_the_window_input_handler(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "");
+        cx.simulate_input("hello world");
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "hello world");
+            assert_eq!(ed.core.selection.head, 11);
+            assert!(ed.core.selection.is_cursor());
+            assert!(ed.save.is_dirty(), "typing marks the buffer dirty");
+        });
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), "hello world\t");
+    }
+
+    #[gpui::test]
+    fn movement_actions_place_the_cursor(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "alpha beta\ngamma\n");
+        cx.dispatch_action(DocEnd);
+        assert_eq!(head(&editor, cx), 17);
+        cx.dispatch_action(DocStart);
+        assert_eq!(head(&editor, cx), 0);
+        cx.dispatch_action(MoveRight);
+        assert_eq!(head(&editor, cx), 1);
+        cx.dispatch_action(LineEnd);
+        assert_eq!(head(&editor, cx), 10, "line end stops before the newline");
+        cx.dispatch_action(MoveWordLeft);
+        assert_eq!(head(&editor, cx), 6, "word-left lands on the start of beta");
+        cx.dispatch_action(LineStart);
+        assert_eq!(head(&editor, cx), 0);
+        // Vertical movement goes through the painted-line geometry cache.
+        cx.dispatch_action(MoveDown);
+        assert_eq!(head(&editor, cx), 11, "down lands on the start of gamma");
+        cx.dispatch_action(MoveUp);
+        assert_eq!(head(&editor, cx), 0);
+    }
+
+    #[gpui::test]
+    fn selection_extends_and_typing_replaces_it(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "alpha beta");
+        cx.dispatch_action(SelectWordRight);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.core.selection.range(), 0..5);
+            assert_eq!(ed.core.selected_text(), "alpha");
+        });
+        cx.dispatch_action(SelectAll);
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), 0..10)
+        });
+        cx.simulate_input("x");
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "x", "typing replaces the whole selection");
+            assert_eq!(ed.core.selection.head, 1);
+        });
+    }
+
+    #[gpui::test]
+    fn backspace_delete_and_word_backspace_edit_the_buffer(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "foo bar\n");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Backspace);
+        assert_eq!(buffer_text(&editor, cx), "foo bar");
+        cx.dispatch_action(DeleteWordLeft);
+        assert_eq!(buffer_text(&editor, cx), "foo ");
+        cx.dispatch_action(DocStart);
+        cx.dispatch_action(Delete);
+        assert_eq!(buffer_text(&editor, cx), "oo ");
+        assert_eq!(head(&editor, cx), 0);
+    }
+
+    #[gpui::test]
+    fn undo_and_redo_roundtrip_a_typed_group(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "");
+        cx.simulate_input("abc");
+        assert_eq!(buffer_text(&editor, cx), "abc");
+        cx.dispatch_action(Undo);
+        assert_eq!(buffer_text(&editor, cx), "", "quick keystrokes undo as one group");
+        cx.dispatch_action(Redo);
+        assert_eq!(buffer_text(&editor, cx), "abc");
+        assert_eq!(head(&editor, cx), 3);
+        cx.dispatch_action(Redo);
+        assert_eq!(buffer_text(&editor, cx), "abc", "redo past history is a no-op");
+    }
+
+    #[gpui::test]
+    fn copy_cut_and_paste_go_through_the_clipboard(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "hello world");
+        cx.dispatch_action(SelectAll);
+        cx.dispatch_action(Copy);
+        assert_eq!(buffer_text(&editor, cx), "hello world", "copy leaves the buffer alone");
+        let clip = cx.update(|_, app| app.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(clip.as_deref(), Some("hello world"));
+
+        cx.dispatch_action(Cut);
+        assert_eq!(buffer_text(&editor, cx), "");
+        cx.dispatch_action(Paste);
+        assert_eq!(buffer_text(&editor, cx), "hello world");
+        assert_eq!(head(&editor, cx), 11);
+    }
+
+    #[gpui::test]
+    fn bound_keystrokes_trigger_editor_actions(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "");
+        cx.update(|_, app| {
+            app.bind_keys([
+                KeyBinding::new("enter", Newline, Some("Editor")),
+                KeyBinding::new("backspace", Backspace, Some("Editor")),
+            ]);
+        });
+        cx.simulate_input("hi");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(buffer_text(&editor, cx), "hi\n");
+        cx.simulate_keystrokes("backspace backspace");
+        assert_eq!(buffer_text(&editor, cx), "h");
+    }
+
+    #[gpui::test]
+    fn save_now_writes_the_file_and_backs_up_the_original(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "save.md", "v1\n");
+        // A clean buffer has nothing to flush: no write, no backup.
+        cx.dispatch_action(SaveNow);
+        assert!(fx.backup_contents().is_empty());
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), "v1\n");
+
+        cx.simulate_input("new ");
+        cx.dispatch_action(SaveNow);
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), "new v1\n");
+        assert_eq!(fx.backup_contents(), vec!["v1\n".to_string()]);
+        cx.update(|_, app| assert!(!editor.read(app).save.is_dirty()));
+
+        // Second save in the same session: no second backup of the file.
+        cx.simulate_input("more ");
+        cx.dispatch_action(SaveNow);
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), "new more v1\n");
+        assert_eq!(fx.backup_contents().len(), 1);
+    }
+
+    #[gpui::test]
+    fn external_disk_change_is_backed_up_before_overwrite(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "conflict.md", "ours\n");
+        cx.simulate_input("A");
+        assert_eq!(buffer_text(&editor, cx), "Aours\n");
+
+        // Simulate an external edit; push mtime clearly forward so the
+        // conflict check never races sub-second timestamp granularity.
+        std::fs::write(&fx.path, "theirs\n").unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        let f = std::fs::File::options().write(true).open(&fx.path).unwrap();
+        f.set_modified(later).unwrap();
+
+        cx.dispatch_action(SaveNow);
+        assert_eq!(
+            std::fs::read_to_string(&fx.path).unwrap(),
+            "Aours\n",
+            "our buffer wins the write"
+        );
+        assert_eq!(
+            fx.backup_contents(),
+            vec!["theirs\n".to_string()],
+            "the clobbered disk version is backed up first"
+        );
+    }
+
+    #[gpui::test]
+    fn debounce_timer_rechecks_before_flushing(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "note.md", "");
+        cx.simulate_input("z");
+        // Fire the debounce timer (test clock) while the wall clock says
+        // the last edit was a moment ago: should_flush's re-check must
+        // decline, keeping the buffer dirty and the disk untouched.
+        cx.background_executor
+            .advance_clock(autosave::DEBOUNCE + std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(editor.read(app).save.is_dirty()));
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), "");
+    }
+
+    #[gpui::test]
+    fn find_opens_matches_cycles_and_closes(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "one two one\nstone\n");
+        cx.dispatch_action(OpenFind);
+        cx.update(|_, app| {
+            let state = editor.read(app).find.as_ref().expect("find bar open");
+            assert!(state.matches.is_empty(), "empty query matches nothing");
+        });
+
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "one".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let state = ed.find.as_ref().unwrap();
+            assert_eq!(state.matches, vec![0..3, 8..11, 14..17]);
+            assert_eq!(state.active, 0);
+        });
+
+        cx.dispatch_action(FindNext);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.core.selection.range(), 8..11);
+            assert_eq!(ed.core.selected_text(), "one");
+        });
+        cx.dispatch_action(FindNext);
+        cx.dispatch_action(FindNext);
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), 0..3, "next wraps around")
+        });
+        cx.dispatch_action(FindPrev);
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), 14..17, "prev wraps back")
+        });
+
+        cx.dispatch_action(CloseFind);
+        cx.update(|window, app| {
+            let ed = editor.read(app);
+            assert!(ed.find.is_none());
+            assert!(ed.focus_handle.is_focused(window), "close refocuses the editor");
+        });
+    }
+
+    #[gpui::test]
+    fn markdown_projects_widgets_that_dissolve_under_the_cursor(cx: &mut TestAppContext) {
+        let src = "# Title\n\n|a|b|\n|-|-|\n|1|2|\n\n```mermaid\nflowchart LR\n a-->b\n```\n";
+        let (_fx, editor, cx) = open_editor(cx, "doc.md", src);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(!ed.is_code_mode());
+            assert_eq!(ed.title().as_ref(), "doc.md");
+            assert_eq!(ed.heading_lines(), vec![(1, "Title".to_string(), 0)]);
+        });
+        assert_eq!(
+            widget_count(&editor, cx),
+            2,
+            "table and mermaid fence each project a widget"
+        );
+
+        // Cursor inside the table dissolves that widget back to source.
+        let row_start =
+            cx.update(|_, app| editor.read(app).core.buffer.line_range(4).start);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(row_start);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(widget_count(&editor, cx), 1, "table dissolved, diagram remains");
+
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(widget_count(&editor, cx), 2, "leaving the table re-forms it");
+    }
+
+    #[gpui::test]
+    fn code_mode_newline_copies_leading_indentation(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "main.rs", "fn main() {\n    let x = 1;\n}");
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.is_code_mode());
+            assert_eq!(ed.gutter_label(1), "2");
+            assert!(ed.projection.iter().all(|i| matches!(i, projection::Item::Line(_))));
+        });
+        let line1_end = cx.update(|_, app| editor.read(app).core.buffer.line_range(1).end);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(line1_end);
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "fn main() {\n    let x = 1;\n    \n}",
+            "newline auto-indents in code mode"
+        );
+    }
+
+    #[gpui::test]
+    fn diff_mode_outside_a_repo_shows_placeholder_and_exits(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "diff.md", "hello\n");
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.diff_active());
+            let d = ed.diff.as_ref().unwrap();
+            let Some(crate::git::Baseline::NotInRepo) = d.missing else {
+                panic!("tempdir must not resolve a git baseline")
+            };
+        });
+        editor.update_in(cx, |ed, _, cx| ed.exit_diff(cx));
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(!editor.read(app).diff_active()));
+    }
+
+    #[gpui::test]
+    fn reload_from_disk_replaces_buffer_and_clamps_cursor(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "note.md", "one two three\n");
+        cx.dispatch_action(DocEnd);
+        cx.simulate_input("!");
+        std::fs::write(&fx.path, "short\n").unwrap();
+        editor.update_in(cx, |ed, _, cx| ed.reload_from_disk(cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "short\n");
+            assert_eq!(ed.core.selection.head, 6, "cursor clamps into the new text");
+            assert!(!ed.save.is_dirty(), "reload resets the save policy");
+        });
+    }
+
+    #[gpui::test]
+    fn ime_marked_text_composes_and_commits(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "");
+        editor.update_in(cx, |ed, window, cx| {
+            ed.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+        });
+        cx.update(|_, app| assert_eq!(editor.read(app).text(), "ni"));
+        let marked = editor.update_in(cx, |ed, window, cx| ed.marked_text_range(window, cx));
+        assert_eq!(marked, Some(0..2));
+
+        // Committing replaces the composition with multibyte text; the
+        // selection round-trips through UTF-16 offsets.
+        editor.update_in(cx, |ed, window, cx| {
+            ed.replace_text_in_range(None, "\u{4f60}", window, cx);
+        });
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "\u{4f60}");
+            assert_eq!(ed.core.selection.head, 3, "cursor sits after the 3-byte char");
+        });
+        let marked = editor.update_in(cx, |ed, window, cx| ed.marked_text_range(window, cx));
+        assert_eq!(marked, None, "commit clears the composition");
+        let sel = editor
+            .update_in(cx, |ed, window, cx| ed.selected_text_range(false, window, cx))
+            .unwrap();
+        assert_eq!(sel.range, 1..1, "UTF-16 offset for a BMP CJK char is 1");
+    }
+}
