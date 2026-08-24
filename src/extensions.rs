@@ -32,6 +32,26 @@ struct ExportInfoFile {
     extension: Option<String>,
 }
 
+/// A tree-sitter grammar a plugin contributes (grammar.wasm +
+/// highlights.scm alongside the manifest).
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct GrammarInfo {
+    pub name: String,
+    pub extensions: Vec<String>,
+    /// Filename stem for this grammar's wasm/scm pair; required when a
+    /// plugin ships more than one grammar.
+    #[serde(default)]
+    pub files: Option<String>,
+}
+
+/// (wasm, scm) paths for a grammar declaration.
+pub fn grammar_paths(dir: &Path, g: &GrammarInfo) -> (PathBuf, PathBuf) {
+    match &g.files {
+        Some(stem) => (dir.join(format!("{stem}.wasm")), dir.join(format!("{stem}.scm"))),
+        None => (dir.join("grammar.wasm"), dir.join("highlights.scm")),
+    }
+}
+
 /// An export format a plugin offers ("Export: <name>" in the palette).
 #[derive(Clone, Debug)]
 pub struct ExportInfo {
@@ -52,6 +72,7 @@ pub struct PluginMeta {
     pub formats: bool,
     pub paste: bool,
     pub exports: Vec<ExportInfo>,
+    pub grammars: Vec<GrammarInfo>,
     pub capabilities: Vec<String>,
     pub dir: PathBuf,
 }
@@ -79,6 +100,8 @@ struct ManifestFile {
     paste: bool,
     #[serde(default)]
     exports: Vec<ExportInfoFile>,
+    #[serde(default)]
+    grammars: Vec<GrammarInfo>,
     /// Only "workspace-read" and "net" are understood; anything else
     /// is rejected so old builds give a clear error for newer manifests.
     #[serde(default)]
@@ -105,6 +128,11 @@ pub fn parse_manifest(dir: &Path, toml_src: &str) -> Result<PluginMeta, String> 
             return Err(format!("unknown decoration style `{}`", d.style));
         }
     }
+    if file.grammars.len() > 1 && file.grammars.iter().any(|g| g.files.is_none()) {
+        return Err(
+            "plugins with multiple grammars must set files = \"<stem>\" on each".to_string()
+        );
+    }
     let _ = (file.description, file.authors);
     Ok(PluginMeta {
         name: file.name,
@@ -124,6 +152,7 @@ pub fn parse_manifest(dir: &Path, toml_src: &str) -> Result<PluginMeta, String> 
                 extension: e.extension.unwrap_or_else(|| "txt".to_string()),
             })
             .collect(),
+        grammars: file.grammars,
         capabilities: file.capabilities,
         dir: dir.to_path_buf(),
     })
@@ -151,11 +180,31 @@ pub fn discover(plugins_dir: &Path) -> (Vec<PluginMeta>, Vec<(PathBuf, String)>)
             .map_err(|e| e.to_string())
             .and_then(|src| parse_manifest(&dir, &src))
             .and_then(|meta| {
-                if dir.join("plugin.wasm").exists() {
-                    Ok(meta)
-                } else {
-                    Err("plugin.wasm missing".to_string())
+                // Grammar-only plugins ship grammar.wasm + highlights.scm
+                // instead of a component; anything with a component
+                // surface still needs plugin.wasm.
+                let needs_component = meta.grammars.is_empty()
+                    || !meta.commands.is_empty()
+                    || !meta.fences.is_empty()
+                    || !meta.inline.is_empty()
+                    || meta.formats
+                    || meta.paste
+                    || !meta.exports.is_empty();
+                if needs_component && !dir.join("plugin.wasm").exists() {
+                    return Err("plugin.wasm missing".to_string());
                 }
+                for g in &meta.grammars {
+                    let (wasm, scm) = grammar_paths(&dir, g);
+                    if !wasm.exists() || !scm.exists() {
+                        return Err(format!(
+                            "grammar `{}` needs {} and {}",
+                            g.name,
+                            wasm.file_name().unwrap_or_default().to_string_lossy(),
+                            scm.file_name().unwrap_or_default().to_string_lossy(),
+                        ));
+                    }
+                }
+                Ok(meta)
             });
         match result {
             Ok(meta) => loaded.push(meta),
@@ -1619,6 +1668,57 @@ style = "accent"
         assert_eq!(ok.len(), 1);
         assert_eq!(ok[0].name, "good");
         assert_eq!(fail.len(), 1);
+    }
+
+    #[test]
+    fn grammars_parse_and_relax_wasm_requirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("g");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            p.join("plugin.toml"),
+            "name=\"g\"\nversion=\"0\"\n[[grammars]]\nname=\"graphql\"\nextensions=[\"graphql\",\"gql\"]\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("grammar.wasm"), b"\0asm").unwrap();
+        std::fs::write(p.join("highlights.scm"), "(comment) @comment").unwrap();
+        let (ok, fail) = discover(dir.path());
+        assert_eq!(fail.len(), 0, "{fail:?}");
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].grammars[0].name, "graphql");
+        assert_eq!(ok[0].grammars[0].extensions, ["graphql", "gql"]);
+    }
+
+    #[test]
+    fn grammar_missing_files_fails_discover() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("g");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            p.join("plugin.toml"),
+            "name=\"g\"\nversion=\"0\"\n[[grammars]]\nname=\"x\"\nextensions=[\"x\"]\n",
+        )
+        .unwrap();
+        let (ok, fail) = discover(dir.path());
+        assert!(ok.is_empty());
+        assert_eq!(fail.len(), 1);
+        assert!(fail[0].1.contains("grammar"), "{}", fail[0].1);
+    }
+
+    #[test]
+    fn multi_grammar_requires_files_stem() {
+        let two = r#"
+name = "g"
+version = "0"
+[[grammars]]
+name = "a"
+extensions = ["a"]
+[[grammars]]
+name = "b"
+extensions = ["b"]
+"#;
+        let err = parse_manifest(Path::new("/p/g"), two).unwrap_err();
+        assert!(err.contains("files"), "{err}");
     }
 
     #[test]
