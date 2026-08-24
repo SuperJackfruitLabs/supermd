@@ -54,6 +54,10 @@ fn needs_component(meta: &PluginMeta) -> bool {
         || meta.formats
         || meta.paste
         || !meta.exports.is_empty()
+        || !meta.viewers.is_empty()
+        || !meta.widgets.is_empty()
+        || !meta.templates.is_empty()
+        || !meta.hooks.is_empty()
 }
 
 /// (wasm, scm) paths for a grammar declaration.
@@ -62,6 +66,26 @@ pub fn grammar_paths(dir: &Path, g: &GrammarInfo) -> (PathBuf, PathBuf) {
         Some(stem) => (dir.join(format!("{stem}.wasm")), dir.join(format!("{stem}.scm"))),
         None => (dir.join("grammar.wasm"), dir.join("highlights.scm")),
     }
+}
+
+/// A custom viewer: claims file extensions whose content the plugin
+/// renders to markdown for the Reader.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct ViewerRule {
+    pub extensions: Vec<String>,
+}
+
+/// A status-strip widget (text-only).
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct WidgetRule {
+    pub id: String,
+}
+
+/// A file template ("New: <name>" in the palette).
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct TemplateRule {
+    pub id: String,
+    pub name: String,
 }
 
 /// An export format a plugin offers ("Export: <name>" in the palette).
@@ -85,6 +109,11 @@ pub struct PluginMeta {
     pub paste: bool,
     pub exports: Vec<ExportInfo>,
     pub grammars: Vec<GrammarInfo>,
+    pub viewers: Vec<ViewerRule>,
+    pub widgets: Vec<WidgetRule>,
+    pub templates: Vec<TemplateRule>,
+    /// Hook events; only "save" is understood.
+    pub hooks: Vec<String>,
     pub capabilities: Vec<String>,
     pub dir: PathBuf,
 }
@@ -114,6 +143,14 @@ struct ManifestFile {
     exports: Vec<ExportInfoFile>,
     #[serde(default)]
     grammars: Vec<GrammarInfo>,
+    #[serde(default)]
+    viewers: Vec<ViewerRule>,
+    #[serde(default)]
+    widgets: Vec<WidgetRule>,
+    #[serde(default)]
+    templates: Vec<TemplateRule>,
+    #[serde(default)]
+    hooks: Vec<String>,
     /// Only "workspace-read" and "net" are understood; anything else
     /// is rejected so old builds give a clear error for newer manifests.
     #[serde(default)]
@@ -138,6 +175,11 @@ pub fn parse_manifest(dir: &Path, toml_src: &str) -> Result<PluginMeta, String> 
     for d in &file.decorations {
         if !matches!(d.style.as_str(), "accent" | "muted" | "strong" | "highlight") {
             return Err(format!("unknown decoration style `{}`", d.style));
+        }
+    }
+    for h in &file.hooks {
+        if h != "save" {
+            return Err(format!("unknown hook event `{h}` (known: save)"));
         }
     }
     if file.grammars.len() > 1 && file.grammars.iter().any(|g| g.files.is_none()) {
@@ -165,6 +207,10 @@ pub fn parse_manifest(dir: &Path, toml_src: &str) -> Result<PluginMeta, String> 
             })
             .collect(),
         grammars: file.grammars,
+        viewers: file.viewers,
+        widgets: file.widgets,
+        templates: file.templates,
+        hooks: file.hooks,
         capabilities: file.capabilities,
         dir: dir.to_path_buf(),
     })
@@ -946,6 +992,14 @@ pub fn fence_table() -> Vec<(String, String, Vec<String>)> {
 static FORMAT_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 static PASTE_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 static ENRICH_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+/// (extension, plugin) — first plugin wins on overlap.
+static VIEWER_TABLE: std::sync::RwLock<Vec<(String, String)>> =
+    std::sync::RwLock::new(Vec::new());
+static WIDGET_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+/// (plugin, template id, display name)
+static TEMPLATE_ENTRIES: std::sync::RwLock<Vec<(String, String, String)>> =
+    std::sync::RwLock::new(Vec::new());
+static HOOK_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 
 pub fn set_surface_tables(metas: &[PluginMeta]) {
     let has_net = |m: &&PluginMeta| m.capabilities.iter().any(|c| c == "net");
@@ -964,6 +1018,56 @@ pub fn set_surface_tables(metas: &[PluginMeta]) {
         .filter(|m| m.paste && has_net(m))
         .map(|m| m.name.clone())
         .collect();
+    let mut viewers: Vec<(String, String)> = Vec::new();
+    for m in metas {
+        for rule in &m.viewers {
+            for ext in &rule.extensions {
+                if !viewers.iter().any(|(e, _)| e == ext) {
+                    viewers.push((ext.clone(), m.name.clone()));
+                }
+            }
+        }
+    }
+    *VIEWER_TABLE.write().unwrap() = viewers;
+    *WIDGET_PLUGINS.write().unwrap() = metas
+        .iter()
+        .filter(|m| !m.widgets.is_empty())
+        .map(|m| m.name.clone())
+        .collect();
+    *TEMPLATE_ENTRIES.write().unwrap() = metas
+        .iter()
+        .flat_map(|m| {
+            m.templates
+                .iter()
+                .map(|t| (m.name.clone(), t.id.clone(), t.name.clone()))
+        })
+        .collect();
+    *HOOK_PLUGINS.write().unwrap() = metas
+        .iter()
+        .filter(|m| m.hooks.iter().any(|h| h == "save"))
+        .map(|m| m.name.clone())
+        .collect();
+}
+
+pub fn viewer_for_extension(ext: &str) -> Option<String> {
+    VIEWER_TABLE
+        .read()
+        .unwrap()
+        .iter()
+        .find(|(e, _)| e == ext)
+        .map(|(_, p)| p.clone())
+}
+
+pub fn widget_plugins() -> Vec<String> {
+    WIDGET_PLUGINS.read().unwrap().clone()
+}
+
+pub fn template_entries() -> Vec<(String, String, String)> {
+    TEMPLATE_ENTRIES.read().unwrap().clone()
+}
+
+pub fn hook_plugins() -> Vec<String> {
+    HOOK_PLUGINS.read().unwrap().clone()
 }
 
 pub fn format_plugins() -> Vec<String> {
@@ -1612,8 +1716,11 @@ name = "Raw"
         assert_eq!(m.capabilities, ["workspace-read"]);
     }
 
+    /// One test, sequential scenarios: the surface tables are process
+    /// globals and parallel tests would race them.
     #[test]
-    fn paste_tables_split_by_net_capability() {
+    fn surface_tables_fill_from_metas() {
+        // paste plugins split by net capability
         let sync_meta = parse_manifest(
             Path::new("/p/tidy"),
             "name=\"tidy-split-test\"\nversion=\"0\"\npaste=true\n",
@@ -1627,6 +1734,8 @@ name = "Raw"
         set_surface_tables(&[sync_meta, net_meta]);
         assert_eq!(paste_plugins(), ["tidy-split-test"]);
         assert_eq!(enrich_plugins(), ["url-split-test"]);
+
+        phase5_surfaces_parse_and_fill_tables_scenario();
     }
 
     #[test]
@@ -1687,6 +1796,68 @@ style = "accent"
         assert_eq!(ok.len(), 1);
         assert_eq!(ok[0].name, "good");
         assert_eq!(fail.len(), 1);
+    }
+
+    fn phase5_surfaces_parse_and_fill_tables_scenario() {
+        let m = parse_manifest(
+            Path::new("/p/x"),
+            r#"
+name = "p5"
+version = "0"
+hooks = ["save"]
+[[viewers]]
+extensions = ["csv", "tsv"]
+[[widgets]]
+id = "words"
+[[templates]]
+id = "daily"
+name = "Daily Note"
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.viewers[0].extensions, ["csv", "tsv"]);
+        assert_eq!(m.widgets[0].id, "words");
+        assert_eq!(m.templates[0].name, "Daily Note");
+        assert_eq!(m.hooks, ["save"]);
+        let other = parse_manifest(
+            Path::new("/p/y"),
+            "name=\"y\"\nversion=\"0\"\n[[viewers]]\nextensions=[\"csv\"]\n",
+        )
+        .unwrap();
+        set_surface_tables(&[m, other]);
+        assert_eq!(viewer_for_extension("csv"), Some("p5".to_string())); // first wins
+        assert_eq!(viewer_for_extension("png"), None);
+        assert_eq!(widget_plugins(), ["p5"]);
+        assert_eq!(
+            template_entries(),
+            [("p5".to_string(), "daily".to_string(), "Daily Note".to_string())]
+        );
+        assert_eq!(hook_plugins(), ["p5"]);
+    }
+
+    #[test]
+    fn unknown_hook_event_rejected() {
+        let err = parse_manifest(
+            Path::new("/p/x"),
+            "name=\"x\"\nversion=\"0\"\nhooks=[\"open\"]\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("open"), "{err}");
+    }
+
+    #[test]
+    fn phase5_surfaces_imply_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("w");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            p.join("plugin.toml"),
+            "name=\"w\"\nversion=\"0\"\n[[widgets]]\nid=\"x\"\n",
+        )
+        .unwrap();
+        let (ok, fail) = discover(dir.path());
+        assert!(ok.is_empty());
+        assert!(fail[0].1.contains("plugin.wasm"), "{}", fail[0].1);
     }
 
     #[test]
