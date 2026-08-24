@@ -432,4 +432,65 @@ mod tests {
         assert_eq!(order[0], 1, "shorter exact-name match ranks first");
         assert_eq!(order.len(), 2);
     }
+
+    #[test]
+    fn non_matching_candidates_are_dropped() {
+        let rels = vec!["readme.md".to_string(), "zzz.bin".to_string()];
+        let (order, indices) = score_candidates("xyq", &rels);
+        assert!(order.is_empty());
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn results_truncate_at_max() {
+        let rels: Vec<String> = (0..MAX_RESULTS + 20).map(|i| format!("file{i}.md")).collect();
+        let (order, indices) = score_candidates("file", &rels);
+        assert_eq!(order.len(), MAX_RESULTS);
+        assert_eq!(indices.len(), MAX_RESULTS);
+    }
+
+    #[test]
+    fn smart_case_matches_case_insensitively_for_lowercase_query() {
+        let rels = vec!["README.md".to_string()];
+        let (order, _) = score_candidates("readme", &rels);
+        assert_eq!(order, vec![0]);
+    }
+
+    #[test]
+    fn preview_reads_text_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        std::fs::write(&path, "hello\nworld\n").unwrap();
+        match load_preview(&path) {
+            PreviewContent::Text(text) => assert_eq!(text.as_ref(), "hello\nworld\n"),
+            _ => panic!("expected text preview"),
+        }
+    }
+
+    #[test]
+    fn preview_truncates_long_files_to_120_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.txt");
+        let content: String = (0..500).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, content).unwrap();
+        match load_preview(&path) {
+            PreviewContent::Text(text) => {
+                assert_eq!(text.lines().count(), 120);
+                assert!(text.starts_with("line 0\n"));
+            }
+            _ => panic!("expected text preview"),
+        }
+    }
+
+    #[test]
+    fn preview_detects_images_and_unreadable_paths() {
+        assert!(matches!(
+            load_preview(std::path::Path::new("shot.png")),
+            PreviewContent::Image(_)
+        ));
+        assert!(matches!(
+            load_preview(std::path::Path::new("/nonexistent/definitely-missing.txt")),
+            PreviewContent::Unreadable
+        ));
+    }
 }

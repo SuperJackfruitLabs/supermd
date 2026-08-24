@@ -397,5 +397,67 @@ mod tests {
         assert_eq!(DiagramKey::bucket(700.0), 704);
         assert_eq!(DiagramKey::bucket(650.0), 640);
     }
+
+    #[test]
+    fn real_font_family_passes_through_untranslated() {
+        let mut t = Theme::light();
+        t.body_family = "Georgia".into();
+        let dt = DiagramTheme::from_theme(&t);
+        assert_eq!(dt.font_body, "Georgia");
+        // and it lands in the mermaid site config verbatim
+        assert_eq!(dt.site_config()["fontFamily"], "Georgia");
+    }
+
+    #[test]
+    fn empty_source_reports_detection_error() {
+        let t = DiagramTheme::default_light();
+        let err = to_svg("", &t).unwrap_err();
+        assert!(err.contains("No diagram type detected"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rasterize_rejects_out_of_range_sizes() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="#c9821c"/></svg>"##;
+        let err = rasterize(svg, 100.0).unwrap_err();
+        assert!(err.contains("out of range"), "unexpected error: {err}");
+        assert!(err.contains("10000x5000"), "size missing from error: {err}");
+    }
+
+    #[test]
+    fn reinserting_key_updates_state_without_duplicating_order() {
+        let mut c = DiagramCache::default();
+        let key = DiagramKey { source_hash: 7, theme_fingerprint: 0, width_bucket: 704 };
+        c.insert(key.clone(), DiagramState::Pending);
+        c.insert(key.clone(), DiagramState::Failed("boom".into()));
+        assert_eq!(c.len(), 1);
+        let Some(DiagramState::Failed(msg)) = c.get(&key) else { panic!("expected Failed") };
+        assert_eq!(msg, "boom");
+        // The re-insert must not have queued a second eviction entry:
+        // fill up to exactly CACHE_CAP distinct keys — nothing evicts,
+        // so the original key must survive.
+        for i in 100..227u64 {
+            c.insert(
+                DiagramKey { source_hash: i, theme_fingerprint: 0, width_bucket: 704 },
+                DiagramState::Pending,
+            );
+        }
+        assert_eq!(c.len(), 128);
+        assert!(c.get(&key).is_some(), "duplicate order entry caused premature eviction");
+    }
+
+    #[test]
+    fn hash_str_is_deterministic_and_input_sensitive() {
+        assert_eq!(hash_str("flowchart LR"), hash_str("flowchart LR"));
+        assert_ne!(hash_str("flowchart LR"), hash_str("flowchart TD"));
+    }
+
+    #[test]
+    fn body_of_fence_slices_range() {
+        let text = "```mermaid\nflowchart LR\n```\n";
+        assert_eq!(body_of_fence(text, &(11..24)), "flowchart LR\n");
+        // out-of-bounds and non-char-boundary ranges degrade to empty
+        assert_eq!(body_of_fence("abc", &(0..99)), "");
+        assert_eq!(body_of_fence("é", &(1..2)), "");
+    }
 }
 

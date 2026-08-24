@@ -73,6 +73,21 @@ mod tests {
     }
 
     #[test]
+    fn needs_install_gates_on_platform_and_location() {
+        // Pure path inspection — never launches or moves anything.
+        let dmg = Path::new("/Volumes/SuperMD/SuperMD.app/Contents/MacOS/supermd");
+        assert_eq!(needs_install(dmg), cfg!(target_os = "macos"));
+        let translocated = Path::new(
+            "/private/var/folders/x/AppTranslocation/9F41/d/SuperMD.app/Contents/MacOS/supermd",
+        );
+        assert_eq!(needs_install(translocated), cfg!(target_os = "macos"));
+        assert!(!needs_install(Path::new(
+            "/Applications/SuperMD.app/Contents/MacOS/supermd"
+        )));
+        assert!(!needs_install(Path::new("/home/u/.local/bin/supermd")));
+    }
+
+    #[test]
     fn bundle_path_finds_app_ancestor() {
         assert_eq!(
             bundle_path(Path::new("/Volumes/S/SuperMD.app/Contents/MacOS/supermd")),

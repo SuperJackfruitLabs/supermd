@@ -186,6 +186,44 @@ mod tests {
     }
 
     #[test]
+    fn overlong_lines_truncate_on_char_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        // 6 + 233 = 239 bytes, then a 2-byte char straddling the
+        // 240-byte cut, then a second match beyond the cut.
+        let line = format!("needle{}é{}needle\n", "a".repeat(233), "b".repeat(20));
+        std::fs::write(dir.path().join("long.txt"), &line).unwrap();
+        let (tx, rx) = channel();
+        let c = AtomicBool::new(false);
+        search_workspace(dir.path(), "needle", &c, tx);
+        let all: Vec<SearchMatch> = rx.iter().flatten().collect();
+        assert_eq!(all.len(), 1, "{all:?}");
+        let m = &all[0];
+        assert!(m.line_text.ends_with('…'), "{:?}", m.line_text);
+        assert!(m.line_text.len() <= MAX_LINE_BYTES + '…'.len_utf8());
+        assert!(m.line_text.is_char_boundary(m.line_text.len() - '…'.len_utf8()));
+        // The hit past the truncation point is dropped; the leading one stays.
+        assert_eq!(m.ranges, vec![0..6]);
+    }
+
+    #[test]
+    fn query_with_line_terminator_is_rejected() {
+        let dir = fixture();
+        let (tx, rx) = channel();
+        let c = AtomicBool::new(false);
+        assert!(!search_workspace(dir.path(), "alpha\nbeta", &c, tx));
+        assert_eq!(rx.iter().count(), 0);
+    }
+
+    #[test]
+    fn closed_receiver_stops_search_without_panic() {
+        let dir = fixture();
+        let (tx, rx) = channel();
+        drop(rx);
+        let c = AtomicBool::new(false);
+        assert!(!search_workspace(dir.path(), "alpha", &c, tx));
+    }
+
+    #[test]
     fn cap_stops_early_and_reports() {
         let dir = tempfile::tempdir().unwrap();
         let body = "hit\n".repeat(SEARCH_CAP + 50);

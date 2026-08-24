@@ -569,6 +569,51 @@ mod tests {
     }
 
     #[test]
+    fn strikethrough_span_includes_markers() {
+        let src = "a ~~gone~~ b\n";
+        assert_eq!(
+            spans_of_kind(src, |k| *k == StyleKind::Strikethrough),
+            vec![2..10]
+        );
+    }
+
+    #[test]
+    fn list_marker_len_rejects_non_markers() {
+        assert_eq!(list_marker_len("plain"), None);
+        assert_eq!(list_marker_len("12x rest"), None);
+        // Sanity: the paren form is a marker.
+        assert_eq!(list_marker_len("3) x"), Some(3));
+    }
+
+    #[test]
+    fn fence_without_language_gets_no_syntax_spans() {
+        let langs = Languages::new();
+        let src = "```\nlet x = 1;\n```\n";
+        let spans = markdown_spans_highlighted(src, &langs);
+        assert!(spans.iter().any(|s| s.kind == StyleKind::FenceContent));
+        assert!(!spans.iter().any(|s| matches!(s.kind, StyleKind::Syntax(_))));
+    }
+
+    #[test]
+    fn empty_fence_produces_no_fence_spans() {
+        let src = "```\n```\n";
+        assert!(spans_of_kind(src, |k| *k == StyleKind::FenceContent).is_empty());
+        assert!(spans_of_kind(src, |k| *k == StyleKind::FenceDelimiter).is_empty());
+    }
+
+    #[test]
+    fn multi_line_indented_code_body_accumulates() {
+        // Indented code arrives as one Text event per line; the fence
+        // body must extend over all of them.
+        let src = "para\n\n    aa\n    bb\n";
+        let bodies = spans_of_kind(src, |k| *k == StyleKind::FenceContent);
+        assert_eq!(bodies.len(), 1);
+        let body = &src[bodies[0].clone()];
+        assert!(body.contains("aa"), "body was {body:?}");
+        assert!(body.contains("bb"), "body was {body:?}");
+    }
+
+    #[test]
     fn line_kinds_classify_heading_code_body() {
         let src = "# Title\nbody\n```rust\nlet x = 1;\n```\ntail";
         let langs = Languages::new();

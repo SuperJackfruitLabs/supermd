@@ -211,6 +211,24 @@ mod tests {
     }
 
     #[test]
+    fn nested_image_markup_is_not_a_block() {
+        // An image inside another image's alt text: the inner End(Image)
+        // consumes the tracked range, so neither becomes a block widget.
+        let src = "![a ![b](c)](d)\n";
+        assert!(!blocks(src)
+            .iter()
+            .any(|b| matches!(b.kind, BlockKind::Image { .. })));
+    }
+
+    #[test]
+    fn indented_code_is_not_a_fence_block() {
+        let src = "para\n\n    code\n";
+        assert!(!blocks(src)
+            .iter()
+            .any(|b| matches!(b.kind, BlockKind::Fence { .. })));
+    }
+
+    #[test]
     fn parse_row_basic_and_edge_pipes() {
         assert_eq!(parse_row("| a | b |"), vec!["a", "b"]);
         assert_eq!(parse_row("a | b"), vec!["a", "b"]);

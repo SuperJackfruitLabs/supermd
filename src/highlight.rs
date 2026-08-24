@@ -279,6 +279,34 @@ mod mapping_tests {
         assert_eq!(f("q.sql"), Some("sql"));
         assert_eq!(f("conf.yaml"), Some("yaml"));
     }
+
+    #[test]
+    fn plaintext_produces_no_spans() {
+        let langs = super::Languages::new();
+        assert!(langs.highlight("plaintext", "let x = 1;").is_empty());
+    }
+
+    #[test]
+    fn highlight_document_reaches_nested_blocks() {
+        use crate::markdown::{parse, Block};
+        let md = "```rust\nfn main() {}\n```\n\n\
+                  > ```rust\n> let q = 1;\n> ```\n\n\
+                  - ```rust\n  let l = 2;\n  ```\n\n\
+                  plain paragraph\n\n\
+                  ```\nno lang\n```\n";
+        let mut doc = parse(md);
+        super::Languages::new().highlight_document(&mut doc);
+        let Block::Code { spans, .. } = &doc.blocks[0] else { panic!("expected top-level code") };
+        assert!(!spans.is_empty());
+        let Block::Quote(inner) = &doc.blocks[1] else { panic!("expected quote") };
+        let Block::Code { spans, .. } = &inner[0] else { panic!("expected quoted code") };
+        assert!(!spans.is_empty());
+        let Block::List { items, .. } = &doc.blocks[2] else { panic!("expected list") };
+        let Block::Code { spans, .. } = &items[0].blocks[0] else { panic!("expected list code") };
+        assert!(!spans.is_empty());
+        let Block::Code { lang, spans, .. } = &doc.blocks[4] else { panic!("expected bare code") };
+        assert!(lang.is_none() && spans.is_empty());
+    }
 }
 
 pub struct SyntaxLanguages(pub Arc<Languages>);

@@ -664,6 +664,149 @@ mod tests {
     }
 
     #[test]
+    fn spans_without_delimiters_hide_nothing() {
+        // Synthetic spans placed over text with no marker characters:
+        // both delimiter scans find zero bytes, so nothing hides.
+        for kind in [StyleKind::Strong, StyleKind::Emphasis, StyleKind::Strikethrough] {
+            let dl = display_line("abc", 0, &[span(0..3, kind)], 100..100);
+            assert_eq!(dl.text, "abc");
+            assert_eq!(dl.segs.len(), 1);
+            assert_eq!(dl.segs[0].kind, SegKind::Verbatim);
+        }
+    }
+
+    #[test]
+    fn delim_scans_default_to_zero_for_non_inline_kinds() {
+        // Kinds outside the inline family have no delimiter bytes.
+        assert_eq!(leading_delim(&StyleKind::Link, "[x](y)", 0), 0);
+        assert_eq!(trailing_delim(&StyleKind::Link, "[x](y)", 6), 0);
+    }
+
+    #[test]
+    fn spans_entirely_off_line_are_ignored() {
+        // Span ends before this line starts.
+        let dl = display_line("**x**", 100, &[span(0..5, StyleKind::Strong)], 50..50);
+        assert_eq!(dl.text, "**x**");
+        // Span starts after this line ends.
+        let dl = display_line("**x**", 100, &[span(200..205, StyleKind::Strong)], 50..50);
+        assert_eq!(dl.text, "**x**");
+    }
+
+    #[test]
+    fn link_span_crossing_lines_stays_visible() {
+        // A Link span that starts on an earlier line never collapses:
+        // the transform needs both ends on the same line.
+        let dl = display_line("tail)", 100, &[span(90..105, StyleKind::Link)], 0..0);
+        assert_eq!(dl.text, "tail)");
+    }
+
+    #[test]
+    fn heading_span_without_leading_hashes_stays_visible() {
+        // Setext-style heading: the span carries Heading but the line
+        // has no # prefix, so there is nothing to hide.
+        let dl = display_line("Title", 0, &[span(0..5, StyleKind::Heading(1))], 100..100);
+        assert_eq!(dl.text, "Title");
+        // Seven hashes is not a heading prefix either.
+        let dl =
+            display_line("####### x", 0, &[span(0..9, StyleKind::Heading(6))], 100..100);
+        assert_eq!(dl.text, "####### x");
+    }
+
+    #[test]
+    fn marker_spans_crossing_line_start_do_nothing() {
+        // Synthetic list/task/quote markers straddling the line start:
+        // replacements require both ends on the line.
+        for kind in [
+            StyleKind::ListMarker,
+            StyleKind::TaskMarker(true),
+            StyleKind::QuoteMarker,
+        ] {
+            let dl = display_line("- item", 100, &[span(98..102, kind)], 0..0);
+            assert_eq!(dl.text, "- item");
+        }
+    }
+
+    #[test]
+    fn structural_span_kinds_pass_through() {
+        // Kinds the display transform does not handle leave the line as-is.
+        let dl = display_line("code", 0, &[span(0..4, StyleKind::FenceContent)], 100..100);
+        assert_eq!(dl.text, "code");
+        let dl = display_line("code", 0, &[span(0..4, StyleKind::Syntax(3))], 100..100);
+        assert_eq!(dl.text, "code");
+    }
+
+    #[test]
+    fn malformed_link_shapes_stay_visible() {
+        // "]" is the last byte: no "(" can follow.
+        let dl = display_line("[abc]", 0, &[span(0..5, StyleKind::Link)], 100..100);
+        assert_eq!(dl.text, "[abc]");
+        // Unterminated destination.
+        let dl = display_line("[a](b", 0, &[span(0..5, StyleKind::Link)], 100..100);
+        assert_eq!(dl.text, "[a](b");
+        // Trailing bytes after the destination close.
+        let dl = display_line("[a](b)c", 0, &[span(0..7, StyleKind::Link)], 100..100);
+        assert_eq!(dl.text, "[a](b)c");
+    }
+
+    #[test]
+    fn nested_parens_in_link_dest() {
+        // Balanced parens inside the destination still scan.
+        let dl = display_line("[a](b(c))", 0, &[span(0..9, StyleKind::Link)], 100..100);
+        assert_eq!(dl.text, "a");
+    }
+
+    #[test]
+    fn empty_line_gets_anchor_segment() {
+        let dl = display_line("", 5, &[], 0..0);
+        assert_eq!(dl.text, "");
+        assert_eq!(
+            dl.segs,
+            vec![Seg { src: 5..5, disp: 0..0, kind: SegKind::Verbatim, toggle: None }]
+        );
+        assert_eq!(src_to_disp(&dl, 5), 0);
+        assert_eq!(disp_to_src(&dl, 0), 5);
+    }
+
+    #[test]
+    fn mapping_clamps_out_of_range_offsets() {
+        let dl = display_line("plain text", 50, &[], 0..0);
+        // Source offset before the line snaps to display start.
+        assert_eq!(src_to_disp(&dl, 10), 0);
+        // Source offset past the line snaps to display end.
+        assert_eq!(src_to_disp(&dl, 1000), dl.text.len());
+        // Display offset past the text snaps to the line's source end.
+        assert_eq!(disp_to_src(&dl, 1000), 60);
+    }
+
+    #[test]
+    fn disp_to_src_past_replacement_reaches_following_text() {
+        // "- item" -> "• item"; a display offset inside "item" walks
+        // past the replacement segment into the verbatim tail.
+        let dl = display_line("- item", 0, &[span(0..2, StyleKind::ListMarker)], 100..100);
+        assert_eq!(disp_to_src(&dl, 5), 3); // 't' -> src byte 3
+    }
+
+    #[test]
+    fn disp_to_src_on_sparse_or_empty_segment_maps() {
+        // Hand-built maps (valid inputs to the pub API): a display gap
+        // snaps to the next segment's source start, and a map with no
+        // segments resolves to offset 0.
+        let sparse = DisplayLine {
+            text: "ab cd".into(),
+            segs: vec![
+                Seg { src: 0..2, disp: 0..2, kind: SegKind::Verbatim, toggle: None },
+                Seg { src: 10..12, disp: 4..6, kind: SegKind::Verbatim, toggle: None },
+            ],
+        };
+        assert_eq!(disp_to_src(&sparse, 3), 10);
+        // At the first segment's display end, that segment's source end
+        // wins over the gap's snap target.
+        assert_eq!(disp_to_src(&sparse, 2), 2);
+        let empty = DisplayLine { text: String::new(), segs: Vec::new() };
+        assert_eq!(disp_to_src(&empty, 0), 0);
+    }
+
+    #[test]
     fn no_spans_passthrough_identity() {
         let dl = display_line("plain text", 50, &[], 0..0);
         assert_eq!(dl.text, "plain text");

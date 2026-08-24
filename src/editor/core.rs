@@ -247,6 +247,16 @@ mod tests {
     }
 
     #[test]
+    fn delete_forward_removes_selection() {
+        let mut ed = EditorCore::new("hello world");
+        ed.set_cursor(5);
+        ed.select_to(11);
+        ed.delete_forward(now());
+        assert_eq!(ed.buffer.text(), "hello");
+        assert_eq!(ed.selection, Selection::cursor(5));
+    }
+
+    #[test]
     fn select_all_and_selected_text() {
         let mut ed = EditorCore::new("héllo");
         ed.select_all();
