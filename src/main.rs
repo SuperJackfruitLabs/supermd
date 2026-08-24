@@ -5,6 +5,7 @@ mod finder;
 mod git;
 mod highlight;
 mod input;
+mod install;
 mod markdown;
 mod reader;
 mod search;
