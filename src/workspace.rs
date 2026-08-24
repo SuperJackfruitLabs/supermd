@@ -186,6 +186,8 @@ pub struct Workspace {
     theme_picker: Option<ThemePickerState>,
     theme_picker_focus: FocusHandle,
     last_title: String,
+    /// Absolute paths of files with uncommitted git changes (sidebar dots).
+    git_modified: std::collections::HashSet<PathBuf>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
 
@@ -215,7 +217,7 @@ impl Workspace {
             }
         }
 
-        Self {
+        let mut workspace = Self {
             tree,
             tabs,
             active: 0,
@@ -232,8 +234,26 @@ impl Workspace {
             theme_picker: None,
             theme_picker_focus: cx.focus_handle(),
             last_title: String::new(),
+            git_modified: Default::default(),
             _watcher: None,
-        }
+        };
+        workspace.refresh_git_status();
+        workspace
+    }
+
+    /// Rescan uncommitted changes for the sidebar dots. Cheap enough to
+    /// run on every watcher drain; skipped instantly outside a repo.
+    fn refresh_git_status(&mut self) {
+        self.git_modified = match &self.tree {
+            Some(tree) => {
+                let root = tree.root.clone();
+                crate::git::modified_paths(&root)
+                    .into_iter()
+                    .map(|rel| root.join(rel))
+                    .collect()
+            }
+            None => Default::default(),
+        };
     }
 
     /// (Re)start the fs watcher on the current workspace root and spawn
@@ -298,6 +318,7 @@ impl Workspace {
         if let Some(tree) = &mut self.tree {
             tree.refresh();
         }
+        self.refresh_git_status();
         let langs = languages(cx);
         for tab in &self.tabs {
             if let Tab::Editor { editor, .. } = tab {
@@ -1062,6 +1083,7 @@ impl Workspace {
         let rows = tree.visible();
 
         let kb_selected = self.sidebar_selected;
+        let git_modified = self.git_modified.clone();
         let items = rows.into_iter().enumerate().map(|(row_ix, (depth, entry))| {
             let is_active = active_path.as_deref() == Some(entry.path.as_path());
             let is_kb_selected = row_ix == kb_selected;
@@ -1069,6 +1091,7 @@ impl Workspace {
             let path = entry.path.clone();
             let is_dir = entry.is_dir;
             let expanded = is_dir && self.tree.as_ref().is_some_and(|t| t.is_expanded(&path));
+            let is_modified = !is_dir && git_modified.contains(&entry.path);
 
             div()
                 .id(id)
@@ -1116,6 +1139,17 @@ impl Workspace {
                         .overflow_hidden()
                         .child(SharedString::from(entry.name.clone())),
                 )
+                .child(div().flex_1())
+                .when(is_modified, |d| {
+                    d.child(
+                        div()
+                            .size(px(5.))
+                            .flex_none()
+                            .mr(px(2.))
+                            .rounded_full()
+                            .bg(t.accent),
+                    )
+                })
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.sidebar_selected = row_ix;
                     if is_dir {
