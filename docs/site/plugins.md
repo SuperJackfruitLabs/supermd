@@ -1,6 +1,6 @@
 # Plugins
 
-SuperMD is extensible with sandboxed WebAssembly plugins. Eleven ship with the project — [listed below](#the-bundled-plugins) — and anyone can [write their own](writing-plugins.md).
+SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-installed, three more are one keystroke away, and anyone can [write their own](writing-plugins.md).
 
 ## What plugins can add
 
@@ -34,9 +34,13 @@ SuperMD is extensible with sandboxed WebAssembly plugins. Eleven ship with the p
 
 These live in [`plugins/`](https://github.com/SuperJackfruitLabs/supermd/tree/master/plugins) in the repo — each one doubles as a working example for the surface it uses.
 
-## Installing a plugin
+## Installing plugins
 
-A plugin is a folder. Drop it into:
+The first eight in the table above come **pre-installed** — SuperMD seeds them on first launch. Delete any from your plugins folder and it stays gone; SuperMD never re-adds a plugin you removed, and never touches one you've modified.
+
+For the rest (and to re-install anything you deleted), open the command palette and run **Install Plugins…** — pick from the catalog and it downloads from the SuperMD repository, verifies, and installs in one step.
+
+Manual installation also works: a plugin is just a folder. Drop it into:
 
 - macOS / Linux: `~/.supermd/plugins/`
 - Windows: `%USERPROFILE%\.supermd\plugins\`

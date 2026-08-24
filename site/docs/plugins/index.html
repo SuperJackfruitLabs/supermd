@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Plugins — SuperMD Docs</title>
-<meta name="description" content="SuperMD is extensible with sandboxed WebAssembly plugins. Eleven ship with the project — listed below — and anyone can write their own.">
+<meta name="description" content="SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-installed, three more are one keystroke away, and anyone can write their own.">
 <link rel="canonical" href="https://supermd.app/docs/plugins/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
@@ -141,7 +141,7 @@
 </aside>
 <main class="doc">
 <h1>Plugins</h1>
-<p>SuperMD is extensible with sandboxed WebAssembly plugins. Eleven ship with the project — <a href="#the-bundled-plugins">listed below</a> — and anyone can <a href="/docs/writing-plugins/">write their own</a>.</p>
+<p>SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-installed, three more are one keystroke away, and anyone can <a href="/docs/writing-plugins/">write their own</a>.</p>
 <h2>What plugins can add</h2>
 <ul>
 <li><strong>Rendered blocks</strong> — claim a fence language and draw it (the Graphviz plugin renders <code>```dot</code> fences).</li>
@@ -171,8 +171,10 @@
 <tr><td><strong>graphql</strong></td><td>Syntax highlighting for <code>```graphql</code> fences and <code>.graphql</code> / <code>.gql</code> files — a <a href="/docs/grammars/">grammar plugin</a></td></tr>
 </tbody></table>
 <p>These live in <a href="https://github.com/SuperJackfruitLabs/supermd/tree/master/plugins"><code>plugins/</code></a> in the repo — each one doubles as a working example for the surface it uses.</p>
-<h2>Installing a plugin</h2>
-<p>A plugin is a folder. Drop it into:</p>
+<h2>Installing plugins</h2>
+<p>The first eight in the table above come <strong>pre-installed</strong> — SuperMD seeds them on first launch. Delete any from your plugins folder and it stays gone; SuperMD never re-adds a plugin you removed, and never touches one you've modified.</p>
+<p>For the rest (and to re-install anything you deleted), open the command palette and run <strong>Install Plugins…</strong> — pick from the catalog and it downloads from the SuperMD repository, verifies, and installs in one step.</p>
+<p>Manual installation also works: a plugin is just a folder. Drop it into:</p>
 <ul>
 <li>macOS / Linux: <code>~/.supermd/plugins/</code></li>
 <li>Windows: <code>%USERPROFILE%\.supermd\plugins\</code></li>
