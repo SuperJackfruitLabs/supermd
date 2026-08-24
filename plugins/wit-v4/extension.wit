@@ -1,0 +1,124 @@
+package supermd:extension@0.4.0;
+
+interface types {
+    /// Palette entry contributed by a plugin.
+    record command-info { id: string, title: string }
+
+    /// The active theme, for renderers that produce themed output.
+    record theme {
+        background: string,
+        surface: string,
+        primary: string,
+        text: string,
+        muted: string,
+        border: string,
+        font-body: string,
+        dark: bool,
+    }
+
+    record command-input {
+        document: string,
+        selection-start: u32,
+        selection-end: u32,
+    }
+
+    variant command-output {
+        replace-document(string),
+        replace-selection(string),
+        insert-at-cursor(string),
+    }
+}
+
+interface host-api {
+    record fetch-request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    }
+
+    record fetch-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    /// Host-mediated HTTPS. The plugin never opens a socket; the host
+    /// enforces capability, per-domain consent, and size/time limits.
+    /// A consent-shaped error ("consent required: <domain>") drives
+    /// the banner flow.
+    fetch: func(req: fetch-request) -> result<fetch-response, string>;
+}
+
+world extension {
+    use types.{theme, command-input, command-output};
+
+    import host-api;
+
+    /// Render a claimed fenced block to SVG.
+    export render-block: func(lang: string, source: string, theme: theme)
+        -> result<string, string>;
+
+    /// Run a contributed command.
+    export run-command: func(id: string, input: command-input)
+        -> result<command-output, string>;
+
+    /// Replace one inline pattern match (cached by matched text).
+    export render-inline: func(pattern-id: string, matched: string)
+        -> result<string, string>;
+
+    /// Normalize a whole document ("Format Document" / on-save).
+    export format-document: func(document: string)
+        -> result<string, string>;
+
+    /// Transform pasted text; none = leave the paste unchanged.
+    export process-paste: func(text: string)
+        -> result<option<string>, string>;
+
+    record export-file {
+        /// Relative path; the host validates and owns the destination.
+        path: string,
+        bytes: list<u8>,
+    }
+
+    /// Produce the files for one export format. One entry = the host
+    /// shows a save dialog; several = a directory picker.
+    export export-document: func(document: string, format: string,
+        theme: theme) -> result<list<export-file>, string>;
+
+    /// Render a non-markdown file to MARKDOWN; the host shows it with
+    /// the existing Reader. This is the whole viewer model.
+    export render-view: func(filename: string, content: string)
+        -> result<string, string>;
+
+    /// One-line status text for the active document ("1,234 words").
+    export status-text: func(document: string)
+        -> result<string, string>;
+
+    record template-context {
+        /// "2026-08-24"
+        date: string,
+        /// "16:52"
+        time: string,
+        /// "Monday"
+        weekday: string,
+        /// Workspace root folder name, "" when no folder is open.
+        workspace: string,
+    }
+
+    record template-file {
+        /// Relative path under the workspace root (host-validated).
+        filename: string,
+        content: string,
+    }
+
+    /// Materialize a template ("New: Daily Note").
+    export render-template: func(id: string, context: template-context)
+        -> result<template-file, string>;
+
+    /// Pre-save transform; none = save unchanged. Runs on every save
+    /// for plugins declaring hooks = ["save"] — NOT gated by the
+    /// format-on-save setting.
+    export on-save: func(path: string, document: string)
+        -> result<option<string>, string>;
+}

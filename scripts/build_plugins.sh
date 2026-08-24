@@ -7,7 +7,7 @@ TARGET=wasm32-wasip2
 
 if [ "${1:-}" = "--fixtures" ]; then
     OUT="$ROOT/tests/fixtures/plugins"
-    CRATES="echo panic hang reader fetcher"
+    CRATES="echo panic hang reader fetcher probe"
     BASE="$ROOT/plugins/fixtures"
 else
     OUT="$ROOT/dist/plugins"

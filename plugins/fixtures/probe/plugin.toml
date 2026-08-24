@@ -1,0 +1,14 @@
+name = "probe"
+version = "0.1.0"
+formats = true
+hooks = ["save"]
+
+[[viewers]]
+extensions = ["prb"]
+
+[[widgets]]
+id = "len"
+
+[[templates]]
+id = "note"
+name = "Probe Note"
