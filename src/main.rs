@@ -175,6 +175,11 @@ fn main() {
                     .map(|p| (p.name.clone(), p.version.clone(), p.fences.clone()))
                     .collect(),
             );
+            let mut host = host;
+            host.set_grants(startup_settings.plugin_grants.clone());
+            if let Some(dir) = arg.as_ref().filter(|p| p.is_dir()) {
+                host.set_workspace_root(Some(dir.clone()));
+            }
             cx.set_global(extensions::ExtensionState(Arc::new(std::sync::Mutex::new(host))));
         }
         cx.set_global(editor::SessionBackups(Arc::new(std::sync::Mutex::new(

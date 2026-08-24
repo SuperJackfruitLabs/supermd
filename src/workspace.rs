@@ -236,6 +236,8 @@ pub struct Workspace {
     palette: Option<(Entity<crate::palette::Palette>, gpui::Subscription)>,
     /// Transient plugin-command error, auto-cleared.
     command_error: Option<SharedString>,
+    /// Plugin awaiting a workspace-read consent decision.
+    consent_request: Option<String>,
     /// Index of the transient preview tab (at most one; italic title).
     preview_tab: Option<usize>,
     /// Newer released version tag, when the launch check found one.
@@ -310,6 +312,7 @@ impl Workspace {
             search: None,
             palette: None,
             command_error: None,
+            consent_request: None,
             preview_tab: None,
             update_available: None,
             startup_recents: crate::settings::load(&crate::settings::config_dir())
@@ -662,6 +665,9 @@ impl Workspace {
     pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_dir() {
             record_recent(path);
+            if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
+                state.0.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
+            }
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
@@ -1011,8 +1017,9 @@ impl Workspace {
         let (document, selection) = editor.read(cx).command_snapshot();
         if id == "__format" {
             let snapshot = document.clone();
+            let plugin_bg = plugin.clone();
             let run = cx.background_executor().spawn(async move {
-                host.lock().unwrap().format_document(&plugin, &document)
+                host.lock().unwrap().format_document(&plugin_bg, &document)
             });
             cx.spawn(async move |this, cx| {
                 let result = run.await;
@@ -1033,15 +1040,16 @@ impl Workspace {
                             ),
                         }
                     }
-                    Err(e) => this.show_command_error(e, cx),
+                    Err(e) => this.handle_plugin_error(plugin.clone(), e, cx),
                 })
                 .ok();
             })
             .detach();
             return;
         }
+        let plugin_bg = plugin.clone();
         let run = cx.background_executor().spawn(async move {
-            host.lock().unwrap().run_command(&plugin, &id, &document, selection)
+            host.lock().unwrap().run_command(&plugin_bg, &id, &document, selection)
         });
         cx.spawn(async move |this, cx| {
             let result = run.await;
@@ -1049,11 +1057,48 @@ impl Workspace {
                 Ok(out) => {
                     editor.update(cx, |editor, cx| editor.apply_command_output(&out, cx));
                 }
-                Err(e) => this.show_command_error(e, cx),
+                Err(e) => this.handle_plugin_error(plugin.clone(), e, cx),
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Consent-shaped errors raise the Allow/Deny banner; everything
+    /// else is a transient strip.
+    fn handle_plugin_error(&mut self, plugin: String, error: String, cx: &mut Context<Self>) {
+        if error.contains("awaiting consent") {
+            self.consent_request = Some(plugin);
+            cx.notify();
+        } else {
+            self.show_command_error(error, cx);
+        }
+    }
+
+    fn resolve_consent(&mut self, allow: bool, cx: &mut Context<Self>) {
+        let Some(plugin) = self.consent_request.take() else {
+            return;
+        };
+        let dir = crate::settings::config_dir();
+        let mut settings = crate::settings::load(&dir);
+        let grant = if allow { "workspace-read" } else { "denied:workspace-read" };
+        settings
+            .plugin_grants
+            .entry(plugin)
+            .or_default()
+            .push(grant.to_string());
+        let _ = crate::settings::save(&dir, &settings);
+        if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
+            state.0.lock().unwrap().set_grants(settings.plugin_grants.clone());
+        }
+        self.show_command_error(
+            if allow {
+                "Access granted — run the command again".to_string()
+            } else {
+                "Access denied".to_string()
+            },
+            cx,
+        );
     }
 
     fn open_plugins_folder(
@@ -2543,6 +2588,64 @@ impl Render for Workspace {
                                     cx.stop_propagation();
                                 })
                                 .child(palette),
+                        ),
+                )
+            })
+            .when_some(self.consent_request.clone(), |root, plugin| {
+                let t = theme(cx);
+                root.child(
+                    div()
+                        .absolute()
+                        .bottom_4()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_3()
+                                .py(px(8.))
+                                .rounded_md()
+                                .bg(t.panel_bg)
+                                .border_1()
+                                .border_color(t.border)
+                                .shadow_lg()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_3()
+                                .text_size(px(12.))
+                                .child(div().text_color(t.fg).child(SharedString::from(format!(
+                                    "Plugin \"{plugin}\" wants to read files in this workspace"
+                                ))))
+                                .child(
+                                    div()
+                                        .id("consent-allow")
+                                        .px_2()
+                                        .py(px(3.))
+                                        .rounded_md()
+                                        .bg(t.accent)
+                                        .text_color(t.bg)
+                                        .cursor_pointer()
+                                        .child("Allow")
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                            this.resolve_consent(true, cx);
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("consent-deny")
+                                        .px_2()
+                                        .py(px(3.))
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_color(t.fg_muted)
+                                        .hover(|s| s.bg(t.hover_bg))
+                                        .child("Deny")
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                            this.resolve_consent(false, cx);
+                                        })),
+                                ),
                         ),
                 )
             })

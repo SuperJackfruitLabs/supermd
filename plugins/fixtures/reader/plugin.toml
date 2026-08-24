@@ -1,0 +1,4 @@
+name = "reader"
+version = "0.1.0"
+formats = true
+capabilities = ["workspace-read"]

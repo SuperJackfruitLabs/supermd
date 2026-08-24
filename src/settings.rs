@@ -14,6 +14,9 @@ pub struct Settings {
     pub recent_workspaces: Vec<String>,
     /// Run the first formatter plugin before every save (default off).
     pub format_on_save: bool,
+    /// Per-plugin capability grants ("workspace-read") or refusals
+    /// ("denied:workspace-read").
+    pub plugin_grants: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -24,6 +27,7 @@ impl Default for Settings {
             reopen_last: true,
             recent_workspaces: Vec::new(),
             format_on_save: false,
+            plugin_grants: Default::default(),
         }
     }
 }
@@ -90,6 +94,15 @@ mod tests {
     #[test]
     fn format_on_save_defaults_off() {
         assert!(!Settings::default().format_on_save);
+    }
+
+    #[test]
+    fn plugin_grants_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        s.plugin_grants.insert("reader".into(), vec!["workspace-read".into()]);
+        save(dir.path(), &s).unwrap();
+        assert_eq!(load(dir.path()), s);
     }
 
     #[test]

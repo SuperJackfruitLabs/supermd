@@ -203,6 +203,8 @@ pub struct ExtensionHost {
     engine: wasmtime::Engine,
     plugins: Vec<LoadedPlugin>,
     failures: Vec<(PathBuf, String)>,
+    workspace_root: Option<PathBuf>,
+    grants: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl ExtensionHost {
@@ -233,7 +235,50 @@ impl ExtensionHost {
                 Err(e) => failures.push((meta.dir.clone(), format!("compile: {e:#}"))),
             }
         }
-        Self { engine, plugins, failures }
+        Self { engine, plugins, failures, workspace_root: None, grants: Default::default() }
+    }
+
+    /// Workspace root used for workspace-read preopens.
+    pub fn set_workspace_root(&mut self, root: Option<PathBuf>) {
+        if self.workspace_root != root {
+            self.workspace_root = root;
+            // Instances carry preopens; rebuild on next call.
+            for p in &mut self.plugins {
+                p.instance = None;
+            }
+        }
+    }
+
+    /// Persisted capability grants; instances rebuild on change.
+    pub fn set_grants(&mut self, grants: std::collections::BTreeMap<String, Vec<String>>) {
+        if self.grants != grants {
+            self.grants = grants;
+            for p in &mut self.plugins {
+                p.instance = None;
+            }
+        }
+    }
+
+    fn wants_workspace_read(&self, plugin: &str) -> bool {
+        self.plugins
+            .iter()
+            .find(|p| p.meta.name == plugin)
+            .is_some_and(|p| p.meta.capabilities.iter().any(|c| c == "workspace-read"))
+    }
+
+    fn granted(&self, plugin: &str, cap: &str) -> bool {
+        self.grants
+            .get(plugin)
+            .is_some_and(|caps| caps.iter().any(|c| c == cap))
+    }
+
+    /// Err when the plugin declares a capability that is not granted —
+    /// checked host-side before any wasm runs.
+    pub fn consent_gate(&self, plugin: &str) -> Result<(), String> {
+        if self.wants_workspace_read(plugin) && !self.granted(plugin, "workspace-read") {
+            return Err(format!("awaiting consent for workspace-read ({plugin})"));
+        }
+        Ok(())
     }
 
     pub fn plugins(&self) -> Vec<PluginMeta> {
@@ -244,12 +289,33 @@ impl ExtensionHost {
         &self.failures
     }
 
+    fn state_for(&self, plugin: &str) -> HostState {
+        if self.wants_workspace_read(plugin) && self.granted(plugin, "workspace-read") {
+            if let Some(root) = &self.workspace_root {
+                let mut builder = wasmtime_wasi::WasiCtxBuilder::new();
+                builder.inherit_stderr();
+                if builder
+                    .preopened_dir(root, "/workspace", wasmtime_wasi::FsPerms::ReadOnly)
+                    .is_ok()
+                {
+                    return HostState {
+                        ctx: builder.build(),
+                        table: wasmtime_wasi::ResourceTable::new(),
+                    };
+                }
+            }
+        }
+        zero_grant_state()
+    }
+
     fn ensure_bound(&mut self, plugin: &str) -> Result<&mut Bound, String> {
+        self.consent_gate(plugin)?;
+        let state = self.state_for(plugin);
         let Some(slot) = self.plugins.iter_mut().find(|p| p.meta.name == plugin) else {
             return Err(format!("no such plugin '{plugin}'"));
         };
         if slot.instance.is_none() {
-            let mut store = wasmtime::Store::new(&self.engine, zero_grant_state());
+            let mut store = wasmtime::Store::new(&self.engine, state);
             store.set_epoch_deadline(CALL_DEADLINE_TICKS);
             let mut linker = wasmtime::component::Linker::new(&self.engine);
             // wasip2 std needs core WASI interfaces even for pure
@@ -261,7 +327,11 @@ impl ExtensionHost {
             match v2::Extension::instantiate(&mut store, &slot.component, &linker) {
                 Ok(instance) => slot.instance = Some(Bound::V2(store, instance)),
                 Err(_) => {
-                    let mut store = wasmtime::Store::new(&self.engine, zero_grant_state());
+                    let state = HostState {
+                        ctx: wasmtime_wasi::WasiCtxBuilder::new().inherit_stderr().build(),
+                        table: wasmtime_wasi::ResourceTable::new(),
+                    }; // v1 plugins predate capabilities: zero-grant
+                    let mut store = wasmtime::Store::new(&self.engine, state);
                     store.set_epoch_deadline(CALL_DEADLINE_TICKS);
                     let instance =
                         Extension::instantiate(&mut store, &slot.component, &linker)
@@ -683,6 +753,36 @@ mod host_tests {
         // old surfaces still trap-recover.
         let e = host.render_inline("panic", "e", "x").unwrap_err();
         assert!(e.contains("0.2"), "{e}");
+    }
+
+    #[test]
+    fn reader_denied_without_grant() {
+        let Some(dir) = fixtures_dir() else { eprintln!("SKIP"); return; };
+        let mut host = ExtensionHost::load(&dir);
+        let e = host.format_document("reader", "x").unwrap_err();
+        assert!(e.contains("consent"), "{e}");
+    }
+
+    #[test]
+    fn reader_reads_probe_with_grant_but_cannot_escape() {
+        let Some(dir) = fixtures_dir() else { eprintln!("SKIP"); return; };
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("probe.txt"), "workspace contents").unwrap();
+        // a file OUTSIDE the workspace that an escape would reach
+        let parent = ws.path().parent().unwrap();
+        let _ = std::fs::write(parent.join("outside.txt"), "secret");
+        let mut host = ExtensionHost::load(&dir);
+        host.set_workspace_root(Some(ws.path().to_path_buf()));
+        let mut grants = std::collections::BTreeMap::new();
+        grants.insert("reader".to_string(), vec!["workspace-read".to_string()]);
+        host.set_grants(grants);
+        let body = host.format_document("reader", "x").unwrap();
+        assert!(body.contains("workspace contents"), "{body}");
+        let escape = host.format_document("reader", "escape");
+        match escape {
+            Ok(s) => assert!(!s.contains("secret"), "preopen escape leaked: {s}"),
+            Err(_) => {} // denied is the expected shape
+        }
     }
 
     #[test]
