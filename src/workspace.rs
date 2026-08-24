@@ -315,6 +315,14 @@ impl Workspace {
     }
 
     fn on_fs_events(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        // Ignore churn from ignored paths (target/, node_modules/, …) so
+        // builds in an open workspace don't hammer the UI.
+        if let Some(tree) = &self.tree {
+            let root = tree.root.clone();
+            if !paths.iter().any(|p| crate::files::is_visible(&root, p)) {
+                return;
+            }
+        }
         if let Some(tree) = &mut self.tree {
             tree.refresh();
         }

@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// Belt-and-braces fallback for folders without a .gitignore.
 const IGNORED_DIRS: &[&str] = &[
     "target",
     "node_modules",
@@ -13,6 +14,58 @@ const IGNORED_DIRS: &[&str] = &[
     "__pycache__",
     ".venv",
 ];
+
+fn walk_builder(root: &Path) -> ignore::WalkBuilder {
+    let mut b = ignore::WalkBuilder::new(root);
+    b.hidden(true)
+        .git_ignore(true)
+        .require_git(false)
+        .git_global(false)
+        .git_exclude(true)
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !(e.file_type().is_some_and(|t| t.is_dir()) && IGNORED_DIRS.contains(&name.as_ref()))
+        });
+    b
+}
+
+/// Canonical workspace walker: gitignore rules (even without git),
+/// hidden files skipped, well-known build dirs skipped.
+pub fn workspace_walk(root: &Path) -> ignore::Walk {
+    walk_builder(root).build()
+}
+
+/// True if `path` (inside `root`) survives the workspace ignore rules.
+/// Checks hidden/well-known components plus the root .gitignore — used
+/// to drop watcher events from ignored paths.
+pub fn is_visible(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    for comp in rel.components() {
+        if let std::path::Component::Normal(name) = comp {
+            let n = name.to_string_lossy();
+            if n.starts_with('.') || IGNORED_DIRS.contains(&n.as_ref()) {
+                return false;
+            }
+        }
+    }
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    builder.add(root.join(".gitignore"));
+    let Ok(gitignore) = builder.build() else {
+        return true;
+    };
+    let mut acc = root.to_path_buf();
+    let count = rel.components().count();
+    for (ix, comp) in rel.components().enumerate() {
+        acc.push(comp);
+        let is_dir = ix + 1 < count || acc.is_dir();
+        if gitignore.matched(&acc, is_dir).is_ignore() {
+            return false;
+        }
+    }
+    true
+}
 
 #[derive(Clone, Debug)]
 pub struct FsEntry {
@@ -59,26 +112,22 @@ impl FileTree {
         if self.children.contains_key(dir) {
             return;
         }
-        let mut entries: Vec<FsEntry> = std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    return None;
-                }
-                let is_dir = entry.file_type().ok()?.is_dir();
-                if is_dir && IGNORED_DIRS.contains(&name.as_str()) {
-                    return None;
-                }
-                Some(FsEntry {
-                    path: entry.path(),
-                    name,
-                    is_dir,
+        let mut entries: Vec<FsEntry> = {
+            let mut b = walk_builder(dir);
+            b.max_depth(Some(1));
+            b.build()
+                .flatten()
+                .filter(|e| e.path() != dir)
+                .filter_map(|e| {
+                    let is_dir = e.file_type()?.is_dir();
+                    Some(FsEntry {
+                        name: e.file_name().to_string_lossy().into_owned(),
+                        path: e.into_path(),
+                        is_dir,
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
         entries.sort_by(|a, b| {
             b.is_dir
                 .cmp(&a.is_dir)
@@ -125,29 +174,12 @@ impl FileTree {
     /// All files under the root (for the fuzzy finder). Bounded to keep
     /// pathological folders from stalling the UI.
     pub fn all_files(&self, limit: usize) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let mut stack = vec![self.root.clone()];
-        while let Some(dir) = stack.pop() {
-            if out.len() >= limit {
-                break;
-            }
-            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    continue;
-                }
-                match entry.file_type() {
-                    Ok(t) if t.is_dir() => {
-                        if !IGNORED_DIRS.contains(&name.as_str()) {
-                            stack.push(entry.path());
-                        }
-                    }
-                    Ok(t) if t.is_file() => out.push(entry.path()),
-                    _ => {}
-                }
-            }
-        }
-        out
+        workspace_walk(&self.root)
+            .flatten()
+            .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+            .map(|e| e.into_path())
+            .take(limit)
+            .collect()
     }
 }
 
@@ -182,6 +214,47 @@ pub fn pick_untitled(existing: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listing_respects_gitignore_and_hides_dotfiles() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/junk.txt"), "x").unwrap();
+        std::fs::write(dir.path().join(".hidden.md"), "x").unwrap();
+        std::fs::write(dir.path().join("kept.md"), "x").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        let mut tree = FileTree::new(dir.path().to_path_buf());
+        let names: Vec<String> = tree.visible().into_iter().map(|(_, e)| e.name).collect();
+        assert!(names.contains(&"kept.md".to_string()), "{names:?}");
+        assert!(!names.contains(&"target".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with('.')), "{names:?}");
+    }
+
+    #[test]
+    fn all_files_respects_ignore_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        std::fs::write(dir.path().join("node_modules/dep.js"), "x").unwrap();
+        std::fs::write(dir.path().join("a.md"), "x").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
+        let tree = FileTree::new(dir.path().to_path_buf());
+        let files = tree.all_files(1000);
+        assert!(files.iter().any(|p| p.ends_with("a.md")), "{files:?}");
+        assert!(
+            !files.iter().any(|p| p.to_string_lossy().contains("node_modules")),
+            "{files:?}"
+        );
+    }
+
+    #[test]
+    fn is_visible_rejects_ignored_and_hidden_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        assert!(is_visible(dir.path(), &dir.path().join("src/main.rs")));
+        assert!(!is_visible(dir.path(), &dir.path().join("target/debug/app")));
+        assert!(!is_visible(dir.path(), &dir.path().join(".git/HEAD")));
+        assert!(!is_visible(dir.path(), &dir.path().join("a/.hidden")));
+    }
 
     #[test]
     fn expand_to_opens_all_ancestors() {
