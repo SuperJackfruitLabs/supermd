@@ -29,3 +29,43 @@ jobs:
         run: cargo test
       - name: Build
         run: cargo build
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig1-dev \
+            libfreetype6-dev
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Measure coverage
+        # view/input/search_ui/reader are the pure GPU render shell — no
+        # unit tests can reach them, so they'd only dilute the number.
+        run: |
+          cargo llvm-cov --json --summary-only \
+            --ignore-filename-regex 'src/(view|input|search_ui|reader)\.rs' \
+            > coverage.json
+          PCT=$(jq -r '.data[0].totals.lines.percent | . * 10 | round / 10' coverage.json)
+          echo "PCT=$PCT" >> "$GITHUB_ENV"
+          echo "### Test coverage: ${PCT}% (lines)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Update coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: 9fb5226b83eda4ae8cb0568e7bc7755f
+          filename: supermd-coverage.json
+          label: coverage
+          message: ${{ env.PCT }}%
+          valColorRange: ${{ env.PCT }}
+          minColorRange: 40
+          maxColorRange: 90
