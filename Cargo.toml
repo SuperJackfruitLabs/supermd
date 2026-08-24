@@ -29,6 +29,9 @@ serde_json = "1.0.151"
 
 [dev-dependencies]
 tempfile = "3"
+# test-support unlocks TestAppContext/VisualTestContext for driving the
+# GPUI shell headlessly; feature unification scopes it to test builds.
+gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
 
 [profile.release]
 strip = true

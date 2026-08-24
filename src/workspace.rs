@@ -2413,4 +2413,173 @@ mod tests {
         assert_eq!(preview_plan(Some(1), None), ReplacePreview(1));
         assert_eq!(preview_plan(None, None), PushNew);
     }
+
+    // ── shell interaction tests (headless gpui test platform) ──────────
+
+    use gpui::TestAppContext;
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    /// Workspace construction reads and writes settings under the HOME
+    /// env var; point it at a tempdir (serialized — env is process-wide).
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TempHome {
+        _dir: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    fn temp_home() -> TempHome {
+        let guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.path());
+        TempHome { _dir: dir, prev, _guard: guard }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn workspace_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.md");
+        let b = root.path().join("b.md");
+        std::fs::write(&a, "# a\n").unwrap();
+        std::fs::write(&b, "# b\n").unwrap();
+        (root, a, b)
+    }
+
+    fn open_workspace<'a>(
+        cx: &'a mut TestAppContext,
+        root: &Path,
+    ) -> (Entity<Workspace>, &'a mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(
+                crate::theme::Theme::dark(),
+            )));
+            cx.set_global(crate::highlight::SyntaxLanguages(Arc::new(
+                crate::highlight::Languages::new(),
+            )));
+        });
+        let root = root.to_path_buf();
+        cx.add_window_view(|_, cx| Workspace::new(Some(root), cx))
+    }
+
+    fn tab_paths(ws: &Workspace, cx: &App) -> Vec<Option<PathBuf>> {
+        ws.tabs.iter().map(|t| t.path(cx)).collect()
+    }
+
+    #[gpui::test]
+    fn browsing_reuses_the_single_preview_slot(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, false, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app), vec![Some(a.clone())]);
+            assert_eq!(w.preview_tab, Some(0));
+            assert_eq!(w.active, 0);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&b, false, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app), vec![Some(b.clone())], "slot replaced, not pushed");
+            assert_eq!(w.preview_tab, Some(0));
+        });
+    }
+
+    #[gpui::test]
+    fn deliberate_open_pins_the_preview_tab(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, false, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.preview_tab, None, "deliberate open pins");
+            assert_eq!(tab_paths(w, app), vec![Some(a.clone())]);
+        });
+    }
+
+    #[gpui::test]
+    fn preview_activates_existing_pinned_tab_instead_of_replacing(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx)); // pinned tab 0
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&b, false, window, cx)); // preview tab 1
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app), vec![Some(a.clone()), Some(b.clone())]);
+            assert_eq!(w.preview_tab, Some(1));
+            assert_eq!(w.active, 1);
+        });
+
+        // Browsing back to the pinned file activates it; the preview
+        // slot (and its tab) survives untouched.
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, false, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app).len(), 2);
+            assert_eq!(w.active, 0);
+            assert_eq!(w.preview_tab, Some(1));
+        });
+    }
+
+    #[gpui::test]
+    fn closing_a_tab_shifts_the_preview_index(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&b, false, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.close_tab_at(0, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app), vec![Some(b.clone())]);
+            assert_eq!(w.preview_tab, Some(0), "preview index shifted down");
+            assert_eq!(w.active, 0);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.close_tab_at(0, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.tabs.is_empty());
+            assert_eq!(w.preview_tab, None, "closing the preview clears the slot");
+        });
+    }
+
+    #[gpui::test]
+    fn opening_a_directory_switches_root_and_records_recents(cx: &mut TestAppContext) {
+        let home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let other = tempfile::tempdir().unwrap();
+        let other_root = other.path().canonicalize().unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&other_root, window, cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(w.tree.as_ref().map(|t| t.root.clone()), Some(other_root.clone()));
+        });
+        let settings =
+            std::fs::read_to_string(home._dir.path().join(".supermd/settings.toml")).unwrap();
+        assert!(
+            settings.contains(other_root.to_str().unwrap()),
+            "recents recorded under temp HOME: {settings}"
+        );
+    }
 }
