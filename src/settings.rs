@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 pub struct Settings {
     pub light_theme: String,
     pub dark_theme: String,
+    /// Reopen the most recent workspace when launched without a path.
+    pub reopen_last: bool,
+    /// Absolute workspace paths, most recent first, max 8.
+    pub recent_workspaces: Vec<String>,
 }
 
 impl Default for Settings {
@@ -15,7 +19,19 @@ impl Default for Settings {
         Self {
             light_theme: "Jackfruit Light".into(),
             dark_theme: "Jackfruit Dark".into(),
+            reopen_last: true,
+            recent_workspaces: Vec::new(),
         }
+    }
+}
+
+impl Settings {
+    /// Record a just-opened workspace: dedupe, push front, cap at 8.
+    pub fn note_workspace(&mut self, path: &Path) {
+        let p = path.to_string_lossy().into_owned();
+        self.recent_workspaces.retain(|x| *x != p);
+        self.recent_workspaces.insert(0, p);
+        self.recent_workspaces.truncate(8);
     }
 }
 
@@ -62,9 +78,37 @@ mod tests {
     #[test]
     fn save_load_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let s = Settings { light_theme: "Solarized Light".into(), dark_theme: "Nord".into() };
+        let s = Settings {
+            light_theme: "Solarized Light".into(),
+            dark_theme: "Nord".into(),
+            ..Settings::default()
+        };
         save(dir.path(), &s).unwrap();
         assert_eq!(load(dir.path()), s);
+    }
+
+    #[test]
+    fn note_workspace_dedupes_and_caps() {
+        let mut s = Settings::default();
+        assert!(s.reopen_last);
+        for i in 0..10 {
+            s.note_workspace(Path::new(&format!("/w/{i}")));
+        }
+        assert_eq!(s.recent_workspaces.len(), 8);
+        assert_eq!(s.recent_workspaces[0], "/w/9");
+        s.note_workspace(Path::new("/w/5"));
+        assert_eq!(s.recent_workspaces[0], "/w/5");
+        assert_eq!(s.recent_workspaces.iter().filter(|p| *p == "/w/5").count(), 1);
+    }
+
+    #[test]
+    fn old_settings_files_still_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.toml"), "light_theme = \"Paper\"\n").unwrap();
+        let s = load(dir.path());
+        assert_eq!(s.light_theme, "Paper");
+        assert!(s.reopen_last);
+        assert!(s.recent_workspaces.is_empty());
     }
 
     #[test]
