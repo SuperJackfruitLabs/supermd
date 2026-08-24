@@ -257,6 +257,73 @@ mod tests {
     }
 
     #[test]
+    fn is_visible_rejects_paths_outside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_visible(dir.path(), Path::new("/elsewhere/file.md")));
+    }
+
+    #[test]
+    fn is_visible_allows_paths_with_parent_components() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(is_visible(dir.path(), &dir.path().join("a/../b.md")));
+    }
+
+    #[test]
+    fn is_visible_rejects_gitignored_custom_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "build/\n").unwrap();
+        assert!(!is_visible(dir.path(), &dir.path().join("build/x.md")));
+        assert!(is_visible(dir.path(), &dir.path().join("src/x.md")));
+    }
+
+    #[test]
+    fn root_name_uses_last_component_or_display() {
+        assert_eq!(FileTree::new(PathBuf::from("/tmp/proj")).root_name(), "proj");
+        assert_eq!(FileTree::new(PathBuf::from("/")).root_name(), "/");
+    }
+
+    #[test]
+    fn toggle_flips_expansion() {
+        let mut tree = FileTree::new(PathBuf::from("/root"));
+        assert!(tree.is_expanded(Path::new("/root")));
+        tree.toggle(Path::new("/root"));
+        assert!(!tree.is_expanded(Path::new("/root")));
+        tree.toggle(Path::new("/root"));
+        assert!(tree.is_expanded(Path::new("/root")));
+    }
+
+    #[test]
+    fn visible_sorts_dirs_first_then_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("zeta")).unwrap();
+        std::fs::create_dir(dir.path().join("Alpha")).unwrap();
+        std::fs::write(dir.path().join("b.md"), "x").unwrap();
+        std::fs::write(dir.path().join("A.md"), "x").unwrap();
+        let mut tree = FileTree::new(dir.path().to_path_buf());
+        let names: Vec<String> = tree.visible().into_iter().map(|(_, e)| e.name).collect();
+        assert_eq!(names, vec!["Alpha", "zeta", "A.md", "b.md"]);
+    }
+
+    #[test]
+    fn nested_expansion_and_refresh_reread_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/inner.md"), "x").unwrap();
+        let mut tree = FileTree::new(dir.path().to_path_buf());
+        // Collapsed subdir hides its contents.
+        assert!(!tree.visible().iter().any(|(_, e)| e.name == "inner.md"));
+        tree.toggle(&dir.path().join("sub"));
+        let rows = tree.visible();
+        let inner = rows.iter().find(|(_, e)| e.name == "inner.md");
+        assert_eq!(inner.map(|(depth, _)| *depth), Some(1));
+        // Cached listing ignores new files until refresh.
+        std::fs::write(dir.path().join("late.md"), "x").unwrap();
+        assert!(!tree.visible().iter().any(|(_, e)| e.name == "late.md"));
+        tree.refresh();
+        assert!(tree.visible().iter().any(|(_, e)| e.name == "late.md"));
+    }
+
+    #[test]
     fn expand_to_opens_all_ancestors() {
         let mut tree = FileTree::new(PathBuf::from("/root"));
         tree.expand_to(Path::new("/root/a/b/c.md"));

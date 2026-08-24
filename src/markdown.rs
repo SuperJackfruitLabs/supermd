@@ -327,3 +327,195 @@ pub fn parse(source: &str) -> Document {
         blocks: containers.pop().unwrap_or_default(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_one(source: &str) -> Block {
+        let mut doc = parse(source);
+        assert_eq!(doc.blocks.len(), 1, "expected one block from {source:?}");
+        doc.blocks.pop().unwrap()
+    }
+
+    #[test]
+    fn empty_source_is_empty_document() {
+        assert!(parse("").blocks.is_empty());
+    }
+
+    #[test]
+    fn heading_levels_and_text() {
+        for level in 1..=6u8 {
+            let src = format!("{} title", "#".repeat(level as usize));
+            let Block::Heading { level: l, content } = parse_one(&src) else { panic!("expected heading") };
+            assert_eq!(l, level);
+            assert_eq!(content.text, "title");
+            assert!(content.spans.is_empty());
+        }
+    }
+
+    #[test]
+    fn paragraph_plain_text_has_no_spans() {
+        let Block::Paragraph(inline) = parse_one("just words") else { panic!("expected paragraph") };
+        assert_eq!(inline.text, "just words");
+        assert!(inline.spans.is_empty());
+    }
+
+    #[test]
+    fn bold_italic_and_nested_styles() {
+        let Block::Paragraph(inline) = parse_one("a **b *c*** d") else { panic!("expected paragraph") };
+        assert_eq!(inline.text, "a b c d");
+        let bold = SpanStyle { bold: true, ..Default::default() };
+        let bold_italic = SpanStyle { bold: true, italic: true, ..Default::default() };
+        assert_eq!(inline.spans, vec![(2..4, bold), (4..5, bold_italic)]);
+    }
+
+    #[test]
+    fn inline_code_strike_and_link() {
+        let Block::Paragraph(inline) = parse_one("`x` ~~y~~ [z](https://example.com)") else { panic!("expected paragraph") };
+        assert_eq!(inline.text, "x y z");
+        let code = SpanStyle { code: true, ..Default::default() };
+        let strike = SpanStyle { strike: true, ..Default::default() };
+        let link = SpanStyle { link: true, ..Default::default() };
+        assert_eq!(inline.spans, vec![(0..1, code), (2..3, strike), (4..5, link)]);
+    }
+
+    #[test]
+    fn image_renders_placeholder_with_italic_alt() {
+        let Block::Paragraph(inline) = parse_one("![alt text](img.png)") else { panic!("expected paragraph") };
+        assert_eq!(inline.text, "\u{1f5bc} alt text");
+        assert!(inline.spans.iter().all(|(_, s)| s.italic));
+        assert_eq!(inline.spans.last().unwrap().0.end, inline.text.len());
+    }
+
+    #[test]
+    fn soft_break_is_space_hard_break_is_newline() {
+        let Block::Paragraph(soft) = parse_one("a\nb") else { panic!("expected paragraph") };
+        assert_eq!(soft.text, "a b");
+        let Block::Paragraph(hard) = parse_one("a  \nb") else { panic!("expected paragraph") };
+        assert_eq!(hard.text, "a\nb");
+    }
+
+    #[test]
+    fn fenced_code_keeps_lang_and_trims_trailing_newline() {
+        let Block::Code { lang, code, spans } = parse_one("```rust\nfn main() {}\n```") else { panic!("expected code") };
+        assert_eq!(lang.as_deref(), Some("rust"));
+        assert_eq!(code, "fn main() {}");
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn fence_info_string_keeps_first_word_only() {
+        let Block::Code { lang, .. } = parse_one("```mermaid theme=dark\nA-->B\n```") else { panic!("expected code") };
+        assert_eq!(lang.as_deref(), Some("mermaid"));
+    }
+
+    #[test]
+    fn bare_fence_and_indented_code_have_no_lang() {
+        let Block::Code { lang, code, .. } = parse_one("```\nplain\n```") else { panic!("expected code") };
+        assert_eq!(lang, None);
+        assert_eq!(code, "plain");
+        let Block::Code { lang, code, .. } = parse_one("    indented\n") else { panic!("expected code") };
+        assert_eq!(lang, None);
+        assert_eq!(code, "indented");
+    }
+
+    #[test]
+    fn quote_wraps_inner_blocks_and_nests() {
+        let Block::Quote(blocks) = parse_one("> outer\n>\n> > inner") else { panic!("expected quote") };
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], Block::Paragraph(p) if p.text == "outer"));
+        let Block::Quote(inner) = &blocks[1] else { panic!("expected nested quote") };
+        assert!(matches!(&inner[0], Block::Paragraph(p) if p.text == "inner"));
+    }
+
+    #[test]
+    fn unordered_list_tight_items() {
+        let Block::List { start, items } = parse_one("- a\n- b") else { panic!("expected list") };
+        assert_eq!(start, None);
+        assert_eq!(items.len(), 2);
+        for (item, text) in items.iter().zip(["a", "b"]) {
+            assert_eq!(item.checked, None);
+            assert!(matches!(&item.blocks[0], Block::Paragraph(p) if p.text == text));
+        }
+    }
+
+    #[test]
+    fn ordered_list_keeps_start_number() {
+        let Block::List { start, items } = parse_one("3. c\n4. d") else { panic!("expected list") };
+        assert_eq!(start, Some(3));
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn task_list_markers_set_checked_state() {
+        let Block::List { items, .. } = parse_one("- [x] done\n- [ ] todo\n- plain") else { panic!("expected list") };
+        assert_eq!(items[0].checked, Some(true));
+        assert_eq!(items[1].checked, Some(false));
+        assert_eq!(items[2].checked, None);
+    }
+
+    #[test]
+    fn nested_list_lives_inside_parent_item() {
+        let Block::List { items, .. } = parse_one("- outer\n  - inner") else { panic!("expected list") };
+        assert_eq!(items.len(), 1);
+        let inner = items[0]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::List { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("inner list");
+        assert!(matches!(&inner[0].blocks[0], Block::Paragraph(p) if p.text == "inner"));
+    }
+
+    #[test]
+    fn loose_item_paragraphs_survive() {
+        let Block::List { items, .. } = parse_one("- a\n\n- b") else { panic!("expected list") };
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0].blocks[0], Block::Paragraph(p) if p.text == "a"));
+    }
+
+    #[test]
+    fn table_head_rows_and_styled_cells() {
+        let Block::Table { head, rows } = parse_one("| A | B |\n| - | - |\n| **x** | y |\n| p | q |") else { panic!("expected table") };
+        assert_eq!(head.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].text, "x");
+        assert_eq!(rows[0][0].spans, vec![(0..1, SpanStyle { bold: true, ..Default::default() })]);
+        assert_eq!(rows[1][1].text, "q");
+    }
+
+    #[test]
+    fn rule_between_paragraphs() {
+        let doc = parse("a\n\n---\n\nb");
+        assert_eq!(doc.blocks.len(), 3);
+        assert!(matches!(doc.blocks[1], Block::Rule));
+    }
+
+    #[test]
+    fn html_is_ignored() {
+        let doc = parse("<div>raw</div>");
+        assert!(doc.blocks.is_empty());
+    }
+
+    #[test]
+    fn mixed_document_block_order() {
+        let doc = parse("# h\n\ntext\n\n- item\n\n> q\n\n```\nc\n```");
+        let kinds: Vec<&str> = doc
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Block::Heading { .. } => "heading",
+                Block::Paragraph(_) => "paragraph",
+                Block::List { .. } => "list",
+                Block::Quote(_) => "quote",
+                Block::Code { .. } => "code",
+                Block::Table { .. } => "table",
+                Block::Rule => "rule",
+            })
+            .collect();
+        assert_eq!(kinds, ["heading", "paragraph", "list", "quote", "code"]);
+    }
+}

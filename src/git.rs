@@ -141,10 +141,8 @@ mod tests {
     fn head_text_returns_committed_content() {
         let dir = repo_with_commit(&[("notes.md", "hello\n")]);
         std::fs::write(dir.path().join("notes.md"), "hello world\n").unwrap();
-        match head_text(&dir.path().join("notes.md")) {
-            Baseline::Text(t) => assert_eq!(t, "hello\n"),
-            other => panic!("expected Text, got {other:?}"),
-        }
+        let Baseline::Text(t) = head_text(&dir.path().join("notes.md")) else { panic!("expected Text") };
+        assert_eq!(t, "hello\n");
     }
 
     #[test]
@@ -193,5 +191,82 @@ mod tests {
     fn modified_paths_outside_repo_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert!(modified_paths(dir.path()).is_empty());
+    }
+
+    fn git_stdout(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn delete_loose_object(dir: &Path, hash: &str) {
+        let obj = dir
+            .join(".git/objects")
+            .join(&hash[..2])
+            .join(&hash[2..]);
+        std::fs::remove_file(obj).unwrap();
+    }
+
+    #[test]
+    fn path_without_parent_is_not_in_repo() {
+        assert!(matches!(head_text(Path::new("/")), Baseline::NotInRepo));
+    }
+
+    #[test]
+    fn bare_repo_reports_not_in_repo_and_no_modified_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        sh_git(dir.path(), &["init", "-q", "--bare"]);
+        assert!(matches!(head_text(&dir.path().join("f.md")), Baseline::NotInRepo));
+        assert!(modified_paths(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn missing_file_in_repo_is_untracked() {
+        let dir = repo_with_commit(&[("a.md", "x\n")]);
+        assert!(matches!(head_text(&dir.path().join("ghost.md")), Baseline::Untracked));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escaping_workdir_is_not_in_repo() {
+        let dir = repo_with_commit(&[("a.md", "x\n")]);
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("real.md"), "r\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("real.md"),
+            dir.path().join("link.md"),
+        )
+        .unwrap();
+        assert!(matches!(head_text(&dir.path().join("link.md")), Baseline::NotInRepo));
+    }
+
+    #[test]
+    fn tracked_directory_reports_untracked() {
+        let dir = tempfile::tempdir().unwrap();
+        sh_git(dir.path(), &["init", "-q"]);
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/file.md"), "x\n").unwrap();
+        commit_all(dir.path());
+        assert!(matches!(head_text(&dir.path().join("sub")), Baseline::Untracked));
+    }
+
+    #[test]
+    fn missing_tree_object_degrades_to_untracked() {
+        let dir = repo_with_commit(&[("a.md", "x\n")]);
+        let tree = git_stdout(dir.path(), &["rev-parse", "HEAD^{tree}"]);
+        delete_loose_object(dir.path(), &tree);
+        assert!(matches!(head_text(&dir.path().join("a.md")), Baseline::Untracked));
+    }
+
+    #[test]
+    fn missing_blob_object_degrades_to_untracked() {
+        let dir = repo_with_commit(&[("a.md", "x\n")]);
+        let blob = git_stdout(dir.path(), &["rev-parse", "HEAD:a.md"]);
+        delete_loose_object(dir.path(), &blob);
+        assert!(matches!(head_text(&dir.path().join("a.md")), Baseline::Untracked));
     }
 }

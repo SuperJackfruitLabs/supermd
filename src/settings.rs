@@ -109,6 +109,17 @@ mod tests {
     }
 
     #[test]
+    fn config_dirs_are_rooted_under_home() {
+        // Pure path construction: nothing is read from or written to disk.
+        let cfg = config_dir();
+        assert!(cfg.ends_with(".supermd"), "got {cfg:?}");
+        assert!(cfg.starts_with(crate::platform::home_dir()));
+        let themes = themes_dir();
+        assert_eq!(themes, cfg.join("themes"));
+        assert!(themes.ends_with(".supermd/themes"), "got {themes:?}");
+    }
+
+    #[test]
     fn partial_file_fills_defaults() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("settings.toml"), "dark_theme = \"Nord\"\n").unwrap();

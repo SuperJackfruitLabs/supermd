@@ -224,6 +224,19 @@ mod tests {
     }
 
     #[test]
+    fn widget_identity_is_projector_and_lines_not_payload() {
+        let w = |projector, lines: Range<usize>| Item::Widget {
+            projector,
+            lines,
+            payload: Arc::new(TablePayload),
+        };
+        assert_eq!(w(0, 2..5), w(0, 2..5)); // distinct payload Arcs still equal
+        assert_ne!(w(0, 2..5), w(1, 2..5));
+        assert_ne!(w(0, 2..5), w(0, 2..6));
+        assert_ne!(w(0, 2..5), Item::Line(2));
+    }
+
+    #[test]
     fn item_of_line_maps_emitted_consumed_and_omitted() {
         let src = "a\n\n|h|\n|-|\n|1|\n\nb";
         let lines = lines_of(src);

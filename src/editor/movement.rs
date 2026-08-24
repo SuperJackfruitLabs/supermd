@@ -119,6 +119,13 @@ mod tests {
     }
 
     #[test]
+    fn next_word_without_following_word_clamps_to_end() {
+        let b = buf("foo   ");
+        assert_eq!(next_word(&b, 3), 6); // only whitespace remains
+        assert_eq!(next_word(&b, 6), 6); // already at end
+    }
+
+    #[test]
     fn word_steps_cross_lines() {
         let b = buf("foo\nbar");
         assert_eq!(next_word(&b, 3), 7); // from line end into next word

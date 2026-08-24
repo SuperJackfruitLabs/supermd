@@ -113,4 +113,31 @@ mod tests {
         assert!(!body_font().is_empty());
         assert!(!mono_font().is_empty());
     }
+
+    #[test]
+    fn public_keybinding_translates_only_off_macos() {
+        let expected = if MACOS { "cmd-shift-f" } else { "ctrl-shift-f" };
+        assert_eq!(keybinding("cmd-shift-f"), expected);
+        let expected = if MACOS { "ctrl-cmd-f" } else { "ctrl-alt-f" };
+        assert_eq!(keybinding("ctrl-cmd-f"), expected);
+        assert_eq!(keybinding("escape"), "escape");
+    }
+
+    #[test]
+    fn public_shortcut_glyphs_translate_only_off_macos() {
+        let expected = if MACOS { "⌘ S" } else { "Ctrl S" };
+        assert_eq!(shortcut_glyphs("⌘ S"), expected);
+        let expected = if MACOS { "⌃ ⌘ F" } else { "Ctrl Alt F" };
+        assert_eq!(shortcut_glyphs("⌃ ⌘ F"), expected);
+    }
+
+    #[test]
+    fn home_dir_agrees_with_env_fallback_order() {
+        let expected = pick_home(
+            std::env::var("HOME").ok().filter(|s| !s.is_empty()),
+            std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()),
+        );
+        assert_eq!(home_dir(), expected);
+        assert!(!home_dir().as_os_str().is_empty());
+    }
 }

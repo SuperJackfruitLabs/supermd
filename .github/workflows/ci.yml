@@ -48,11 +48,12 @@ jobs:
             libfreetype6-dev
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Measure coverage
-        # view/input/search_ui/reader are the pure GPU render shell — no
-        # unit tests can reach them, so they'd only dilute the number.
+        # The GPU shell (window/element/event plumbing in these files plus
+        # editor/mod.rs) is unreachable from unit tests — coverage tracks
+        # the pure-Rust core, per the project's thin-shell philosophy.
         run: |
           cargo llvm-cov --json --summary-only \
-            --ignore-filename-regex 'src/(view|input|search_ui|reader)\.rs' \
+            --ignore-filename-regex 'src/(view|input|search_ui|reader|workspace|main)\.rs|src/editor/mod\.rs' \
             > coverage.json
           PCT=$(jq -r '.data[0].totals.lines.percent | . * 10 | round / 10' coverage.json)
           echo "PCT=$PCT" >> "$GITHUB_ENV"

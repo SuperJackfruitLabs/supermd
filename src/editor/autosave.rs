@@ -243,6 +243,25 @@ mod tests {
     }
 
     #[test]
+    fn default_dir_is_under_home() {
+        let dir = BackupRegistry::default_dir();
+        assert!(
+            dir.ends_with(Path::new(".supermd").join("backups")),
+            "unexpected default dir: {dir:?}"
+        );
+    }
+
+    #[test]
+    fn unexpected_file_on_disk_is_a_conflict() {
+        // We never observed a file, but one exists now: saving would
+        // clobber it, so that's a conflict.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("new.md");
+        fs::write(&file, "surprise").unwrap();
+        assert!(has_conflict(None, &file));
+    }
+
+    #[test]
     fn conflict_detection() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("f.md");

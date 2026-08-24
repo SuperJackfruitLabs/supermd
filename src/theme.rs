@@ -462,6 +462,53 @@ attribute = "#d19a66"
         assert_eq!(themes.len(), 1);
         assert_eq!(themes[0].name, "My Paper");
     }
+
+    #[test]
+    fn custom_dir_ignores_non_toml_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not a theme").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# themes").unwrap();
+        std::fs::write(dir.path().join("noext"), "").unwrap();
+        assert!(load_custom_themes(dir.path()).is_empty());
+        // A valid .toml alongside them still loads.
+        std::fs::write(dir.path().join("ok.toml"), builtin_theme_sources()[0]).unwrap();
+        assert_eq!(load_custom_themes(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn heading_size_scale_descends_to_body_size() {
+        let t = Theme::light();
+        assert_eq!(t.heading_size(1), 28.0);
+        assert_eq!(t.heading_size(2), 23.0);
+        assert_eq!(t.heading_size(3), 19.0);
+        assert_eq!(t.heading_size(4), 17.0);
+        assert_eq!(t.heading_size(5), t.body_size);
+        assert_eq!(t.heading_size(6), t.body_size);
+        // Sizes strictly decrease from h1 to h4 and never go below body.
+        assert!(t.heading_size(1) > t.heading_size(2));
+        assert!(t.heading_size(4) >= t.body_size);
+    }
+
+    #[test]
+    fn bad_appearance_is_rejected() {
+        let toml_src = builtin_theme_sources()[0].replacen("light", "purple", 1);
+        let Err(err) = LoadedTheme::from_toml(&toml_src) else { panic!("expected error") };
+        assert!(err.contains("purple"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn all_diff_keys_override_defaults() {
+        // Inject all four diff keys at the end of [colors] in Jackfruit Dark.
+        let toml_src = builtin_theme_sources()[3].replace(
+            "[syntax]",
+            "diff_added_bg = \"#0a1a0a\"\ndiff_added_fg = \"#aaffaa\"\ndiff_deleted_bg = \"#1a0a0a\"\ndiff_deleted_fg = \"#ffaaaa\"\n[syntax]",
+        );
+        let loaded = LoadedTheme::from_toml(&toml_src).unwrap();
+        assert_eq!(loaded.theme.diff_added_bg, gpui::rgb(0x0a1a0a).into());
+        assert_eq!(loaded.theme.diff_added_fg, gpui::rgb(0xaaffaa).into());
+        assert_eq!(loaded.theme.diff_deleted_bg, gpui::rgb(0x1a0a0a).into());
+        assert_eq!(loaded.theme.diff_deleted_fg, gpui::rgb(0xffaaaa).into());
+    }
 }
 
 /// All known themes + the user's choices + current system appearance.
@@ -492,6 +539,67 @@ impl ThemeState {
             .unwrap_or_else(|| {
                 Arc::new(if self.system_dark { Theme::dark() } else { Theme::light() })
             })
+    }
+}
+
+#[cfg(test)]
+mod theme_state_tests {
+    use super::*;
+
+    fn state(light: &str, dark: &str, system_dark: bool) -> ThemeState {
+        ThemeState {
+            themes: builtin_themes(),
+            settings: crate::settings::Settings {
+                light_theme: light.into(),
+                dark_theme: dark.into(),
+                ..crate::settings::Settings::default()
+            },
+            system_dark,
+        }
+    }
+
+    #[test]
+    fn resolve_picks_named_theme_for_appearance() {
+        let s = state("Paper", "Nord", true);
+        let resolved = s.resolve();
+        assert!(resolved.is_dark);
+        let nord = s.themes.iter().find(|t| t.name == "Nord").unwrap();
+        assert_eq!(resolved.bg, nord.theme.bg);
+
+        let s = state("Solarized Light", "Nord", false);
+        let resolved = s.resolve();
+        assert!(!resolved.is_dark);
+        let sol = s.themes.iter().find(|t| t.name == "Solarized Light").unwrap();
+        assert_eq!(resolved.bg, sol.theme.bg);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_first_theme_of_appearance() {
+        // Unknown name: fall back to the first dark builtin (Jackfruit Dark).
+        let s = state("Paper", "No Such Theme", true);
+        let resolved = s.resolve();
+        assert!(resolved.is_dark);
+        assert_eq!(resolved.bg, Theme::dark().bg);
+
+        // Name exists but has the wrong appearance: same fallback applies.
+        let s = state("Nord", "Paper", false);
+        let resolved = s.resolve();
+        assert!(!resolved.is_dark);
+        assert_eq!(resolved.bg, Theme::light().bg); // Jackfruit Light
+    }
+
+    #[test]
+    fn resolve_with_no_themes_uses_hardcoded_defaults() {
+        let mut s = state("x", "y", true);
+        s.themes.clear();
+        let resolved = s.resolve();
+        assert!(resolved.is_dark);
+        assert_eq!(resolved.bg, Theme::dark().bg);
+
+        s.system_dark = false;
+        let resolved = s.resolve();
+        assert!(!resolved.is_dark);
+        assert_eq!(resolved.bg, Theme::light().bg);
     }
 }
 
