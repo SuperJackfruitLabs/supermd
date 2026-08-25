@@ -8,6 +8,7 @@ pub mod buffer;
 pub mod core;
 pub mod display;
 pub mod find;
+pub mod formatting;
 pub mod movement;
 pub mod projection;
 pub mod projector;
