@@ -118,6 +118,8 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("⌘ Z / ⌘ ⇧ Z", "Undo / redo"),
             ("⌘ B / ⌘ I", "Bold / italic selection"),
+            ("⏎ in a list", "Continue the list"),
+            ("Tab / ⇧ Tab", "Indent list item · hop table cells"),
             ("⌥ ← →", "Move by word"),
             ("⌘ ← →", "Line start / end"),
             ("⌘ ↑ ↓", "Document start / end"),

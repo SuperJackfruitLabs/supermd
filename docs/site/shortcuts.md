@@ -32,6 +32,8 @@ Every shortcut, as shown in-app with **⌘ /** (Ctrl+/). macOS keys on the left;
 | ----- | --------------- | ------ |
 | ⌘ Z / ⌘ ⇧ Z | Ctrl Z / Ctrl Shift Z | Undo / redo |
 | ⌘ B / ⌘ I | Ctrl B / Ctrl I | Bold / italic selection |
+| ⏎ in a list | ⏎ in a list | Continue the list |
+| Tab / ⇧ Tab | Tab / Shift Tab | Indent list item · hop table cells |
 | ⌥ ← → | Alt ← → | Move by word |
 | ⌘ ← → | Ctrl ← → | Line start / end |
 | ⌘ ↑ ↓ | Ctrl ↑ ↓ | Document start / end |
