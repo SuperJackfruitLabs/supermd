@@ -244,6 +244,10 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("cmd-c"), editor::Copy, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-x"), editor::Cut, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-v"), editor::Paste, Some("Editor")),
+            // With a selection cmd-b bolds; the handler propagates a
+            // cursor-only press so ToggleSidebar still fires.
+            KeyBinding::new(&platform::keybinding("cmd-b"), editor::ToggleBold, Some("Editor")),
+            KeyBinding::new(&platform::keybinding("cmd-i"), editor::ToggleItalic, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-s"), editor::SaveNow, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-f"), editor::OpenFind, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-g"), editor::FindNext, Some("Editor")),
@@ -562,7 +566,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 106);
+        assert_eq!(bindings.len(), 108);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));
