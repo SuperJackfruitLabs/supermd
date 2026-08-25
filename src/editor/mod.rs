@@ -49,7 +49,8 @@ actions!(
         SelectLineStart, SelectLineEnd, DocStart, DocEnd, PageUp, PageDown, Backspace, Delete,
         DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow,
         OpenFind, FindNext, FindPrev, CloseFind, ToggleBold, ToggleItalic, ToggleCode,
-        ToggleStrike, InsertLink, CycleHeading, ToggleQuote, Outdent
+        ToggleStrike, InsertLink, CycleHeading, ToggleQuote, Outdent, FollowLink,
+        DismissCompletion
     ]
 );
 
@@ -139,6 +140,8 @@ pub struct Editor {
     status_text: Option<SharedString>,
     /// Debounce handle: replacing it cancels the pending refresh.
     status_task: Option<gpui::Task<()>>,
+    /// `[[` wiki-link completion, refreshed on every edit.
+    completion: Option<CompletionState>,
     /// The floating format toolbar has been armed by a settled mouse
     /// selection. It only paints while the selection is still live.
     toolbar_visible: bool,
@@ -158,6 +161,16 @@ pub enum EditorEvent {
     /// A net-capable enricher needs a per-domain grant
     /// (cap is "net:<domain>").
     ConsentNeeded { plugin: String, cap: String },
+    /// A followed link wants this file opened in a tab.
+    OpenPath(PathBuf),
+}
+
+/// The `[[` completion popup: doc offset of the opener, the filtered
+/// candidates, and the highlighted row.
+struct CompletionState {
+    open: usize,
+    matches: Vec<(String, PathBuf)>,
+    selected: usize,
 }
 
 impl gpui::EventEmitter<EditorEvent> for Editor {}
@@ -258,6 +271,7 @@ impl Editor {
             pending_enrich: None,
             status_text: None,
             status_task: None,
+            completion: None,
             toolbar_visible: false,
             toolbar_task: None,
         };
@@ -268,6 +282,15 @@ impl Editor {
 
     pub fn text(&self) -> String {
         self.core.buffer.text()
+    }
+
+    /// Point the editor at a new path after a rename or move; buffer
+    /// and history stay put.
+    pub fn retarget(&mut self, path: PathBuf) {
+        self.disk_mtime = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        self.path = path;
     }
 
     pub fn path(&self) -> &Path {
@@ -534,7 +557,128 @@ impl Editor {
         }
         self.reveal_cursor();
         self.schedule_status(cx);
+        self.refresh_completion(cx);
         cx.notify();
+    }
+
+    /// Rebuild the `[[` completion for the text left of the cursor.
+    fn refresh_completion(&mut self, cx: &Context<Self>) {
+        self.completion = None;
+        if !self.can_format() || !self.core.selection.is_cursor() {
+            return;
+        }
+        let head = self.core.selection.head;
+        let line_ix = self.core.buffer.line_of_byte(head);
+        let line_start = self.core.buffer.line_range(line_ix).start;
+        let line = self.core.buffer.line_text(line_ix);
+        let upto = &line[..(head - line_start).min(line.len())];
+        let Some(open_rel) = upto.rfind("[[") else {
+            return;
+        };
+        let query = &upto[open_rel + 2..];
+        if query.contains(']') || query.contains('[') || query.contains('|') {
+            return;
+        }
+        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
+            return;
+        };
+        let q = query.to_lowercase();
+        let mut matches: Vec<(String, PathBuf)> = state
+            .0
+            .lock()
+            .unwrap()
+            .note_names()
+            .into_iter()
+            .filter(|(name, _)| name.to_lowercase().contains(&q))
+            .collect();
+        matches.sort_by_key(|(name, _)| (!name.to_lowercase().starts_with(&q), name.clone()));
+        matches.truncate(8);
+        if matches.is_empty() {
+            return;
+        }
+        let open = line_start + open_rel;
+        let selected = match &self.completion {
+            Some(prev) if prev.open == open => prev.selected.min(matches.len() - 1),
+            _ => 0,
+        };
+        self.completion = Some(CompletionState { open, matches, selected });
+    }
+
+    /// Steer the completion popup; true when the keystroke was ours.
+    fn completion_step(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let Some(comp) = &mut self.completion else {
+            return false;
+        };
+        let n = comp.matches.len() as isize;
+        comp.selected = ((comp.selected as isize + delta + n) % n) as usize;
+        cx.notify();
+        true
+    }
+
+    /// Replace `[[query` with the chosen `[[Name]]`.
+    fn confirm_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(comp) = &self.completion else {
+            return false;
+        };
+        let Some((name, _)) = comp.matches.get(comp.selected).cloned() else {
+            return false;
+        };
+        let range = comp.open..self.core.selection.head;
+        self.completion = None;
+        self.core.break_undo_group();
+        self.core
+            .replace_range(range, &format!("[[{name}]]"), Instant::now());
+        self.core.break_undo_group();
+        self.after_edit(cx);
+        true
+    }
+
+    fn dismiss_completion(&mut self, _: &DismissCompletion, _: &mut Window, cx: &mut Context<Self>) {
+        if self.completion.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn follow_link(&mut self, _: &FollowLink, _: &mut Window, cx: &mut Context<Self>) {
+        self.follow_link_at(self.core.selection.head, cx);
+    }
+
+    /// Open (or create, for unresolved wiki targets) the link under
+    /// `offset`. Returns true when a link was followed.
+    fn follow_link_at(&mut self, offset: usize, cx: &mut Context<Self>) -> bool {
+        if !self.can_format() {
+            return false;
+        }
+        let text = self.core.buffer.text();
+        let Some(link) = crate::knowledge::Index::link_at(&text, offset) else {
+            return false;
+        };
+        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
+            return false;
+        };
+        let resolved = state.0.lock().unwrap().resolve(&self.path, &link);
+        let target = match resolved {
+            Some(path) => path,
+            None if link.wiki => {
+                // Create the missing note beside this file.
+                let Some(dir) = self.path.parent() else {
+                    return false;
+                };
+                let path = dir.join(format!("{}.md", link.target));
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(err) = std::fs::write(&path, "") {
+                    eprintln!("supermd: cannot create {}: {err}", path.display());
+                    return false;
+                }
+                state.0.lock().unwrap().update_file(&path, "");
+                path
+            }
+            None => return false,
+        };
+        cx.emit(EditorEvent::OpenPath(target));
+        true
     }
 
     /// Latest widget status line, if any plugin produced one.
@@ -779,10 +923,16 @@ impl Editor {
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_step(-1, cx) {
+            return;
+        }
         self.vertical_move(-1, false, cx);
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_step(1, cx) {
+            return;
+        }
         self.vertical_move(1, false, cx);
     }
 
@@ -878,6 +1028,9 @@ impl Editor {
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_completion(cx) {
+            return;
+        }
         if self.is_code_mode() {
             self.core.insert_newline_auto_indent(Instant::now());
             self.after_edit(cx);
@@ -1505,6 +1658,14 @@ impl Editor {
         // any pending reveal.
         self.toolbar_visible = false;
         self.toolbar_task = None;
+        // ⌘-click follows the link under the pointer.
+        if event.modifiers.platform && !event.modifiers.shift {
+            if let Some(offset) = self.offset_at_point(event.position) {
+                if self.follow_link_at(offset, cx) {
+                    return;
+                }
+            }
+        }
         // Checkbox toggle: a plain click on a ✓/○ glyph flips the source
         // without moving the cursor into the line.
         if !event.modifiers.shift {
@@ -2729,6 +2890,82 @@ impl Render for Editor {
                 )
             });
 
+        // `[[` completion popup, anchored under the cursor.
+        let completion_el = self.completion.as_ref().and_then(|comp| {
+            let head = self.core.selection.head;
+            let line_ix = self.core.buffer.line_of_byte(head);
+            let entry = self.layout_cache.get(&line_ix)?;
+            let disp = display::src_to_disp(&entry.display, head);
+            let pos = entry.line.position_for_index(disp, entry.line_height)?;
+            let anchor = point(
+                entry.origin.x + pos.x,
+                entry.origin.y + pos.y + entry.line_height + px(4.),
+            );
+            let selected = comp.selected;
+            let rows = comp
+                .matches
+                .iter()
+                .enumerate()
+                .map(|(ix, (name, path))| {
+                    let rel = path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|d| format!("{}/", d.to_string_lossy()))
+                        .unwrap_or_default();
+                    div()
+                        .id(("completion-row", ix))
+                        .px_2()
+                        .py(px(3.))
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .cursor_pointer()
+                        .when(ix == selected, |d| d.bg(t.selected_bg))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(t.fg_strong)
+                                .child(SharedString::from(name.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(t.fg_muted)
+                                .child(SharedString::from(rel)),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |editor, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(comp) = &mut editor.completion {
+                                    comp.selected = ix;
+                                }
+                                editor.confirm_completion(cx);
+                            }),
+                        )
+                })
+                .collect::<Vec<_>>();
+            Some(deferred(
+                anchored()
+                    .position(anchor)
+                    .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        div()
+                            .w(px(280.))
+                            .bg(t.panel_bg)
+                            .border_1()
+                            .border_color(t.border)
+                            .rounded_lg()
+                            .shadow_lg()
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .children(rows),
+                    ),
+            ))
+        });
+
         let diffing = self.diff.is_some();
         let diff_header = self.diff.as_ref().map(|d| {
             div()
@@ -2826,6 +3063,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::follow_link))
+            .on_action(cx.listener(Self::dismiss_completion))
             .on_action(cx.listener(Self::toggle_bold))
             .on_action(cx.listener(Self::toggle_italic))
             .on_action(cx.listener(Self::toggle_code))
@@ -3011,6 +3250,7 @@ impl Render for Editor {
             )
                 .children(scrollbar)
                 .children(toolbar)
+                .children(completion_el)
                 .into_any_element()
             })
     }
@@ -3020,6 +3260,8 @@ impl Render for Editor {
 mod tests {
     use super::*;
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
     /// Everything an editor test touches on disk, rooted in tempdirs:
@@ -3948,6 +4190,111 @@ mod tests {
         cx.dispatch_action(DocEnd);
         cx.dispatch_action(InsertTab);
         assert_eq!(buffer_text(&editor, cx), "text\t");
+    }
+
+    /// A two-note knowledge workspace registered as the global index.
+    fn knowledge_fixture(cx: &mut TestAppContext) -> tempfile::TempDir {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("Roadmap.md"), "the plan\n").unwrap();
+        std::fs::write(ws.path().join("Recipes.md"), "the food\n").unwrap();
+        let index = crate::knowledge::Index::scan(ws.path());
+        cx.update(|cx| {
+            cx.set_global(crate::knowledge::KnowledgeState(Arc::new(Mutex::new(index))));
+        });
+        ws
+    }
+
+    #[gpui::test]
+    fn follow_link_opens_resolved_and_creates_unresolved(cx: &mut TestAppContext) {
+        let _ws = knowledge_fixture(cx);
+        let (fx, editor, cx) = open_editor(cx, "note.md", "go [[Roadmap]] or [[Ghost]] now");
+        let opened: Rc<RefCell<Vec<PathBuf>>> = Rc::default();
+        cx.update(|_, app| {
+            let sink = opened.clone();
+            app.subscribe(&editor, move |_, event: &EditorEvent, _| {
+                if let EditorEvent::OpenPath(p) = event {
+                    sink.borrow_mut().push(p.clone());
+                }
+            })
+            .detach();
+        });
+
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(7); // inside [[Roadmap]]
+            cx.notify();
+        });
+        cx.dispatch_action(FollowLink);
+        cx.run_until_parked();
+        assert!(opened.borrow()[0].ends_with("Roadmap.md"), "{opened:?}");
+
+        // Unresolved wiki target: the note is created beside this file.
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(21); // inside [[Ghost]]
+            cx.notify();
+        });
+        cx.dispatch_action(FollowLink);
+        cx.run_until_parked();
+        let ghost = fx.path.parent().unwrap().join("Ghost.md");
+        assert!(ghost.exists(), "unresolved link created the note");
+        assert!(opened.borrow()[1].ends_with("Ghost.md"));
+
+        // Cursor away from any link: nothing happens.
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(FollowLink);
+        cx.run_until_parked();
+        assert_eq!(opened.borrow().len(), 2);
+    }
+
+    #[gpui::test]
+    fn wiki_completion_filters_and_confirms(cx: &mut TestAppContext) {
+        let _ws = knowledge_fixture(cx);
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "");
+        cx.simulate_input("[[R");
+        cx.update(|_, app| {
+            let comp = editor.read(app).completion.as_ref().expect("popup open");
+            assert_eq!(comp.matches.len(), 2, "Roadmap and Recipes");
+        });
+        cx.simulate_input("oa");
+        cx.update(|_, app| {
+            let comp = editor.read(app).completion.as_ref().unwrap();
+            assert_eq!(comp.matches.len(), 1);
+            assert_eq!(comp.matches[0].0, "Roadmap");
+        });
+        // Enter confirms instead of inserting a newline.
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "[[Roadmap]]");
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.completion.is_none(), "popup closed");
+            assert_eq!(ed.core.selection.head, 11, "cursor after the link");
+        });
+    }
+
+    #[gpui::test]
+    fn completion_navigates_and_dismisses(cx: &mut TestAppContext) {
+        let _ws = knowledge_fixture(cx);
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "");
+        cx.simulate_input("[[");
+        cx.update(|_, app| {
+            let comp = editor.read(app).completion.as_ref().expect("popup on bare [[");
+            assert_eq!(comp.selected, 0);
+        });
+        // Arrows steer the popup, not the cursor.
+        cx.dispatch_action(MoveDown);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.completion.as_ref().unwrap().selected, 1);
+            assert_eq!(ed.core.selection.head, 2, "cursor pinned");
+        });
+        cx.dispatch_action(MoveDown);
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).completion.as_ref().unwrap().selected, 0, "wraps");
+        });
+        cx.dispatch_action(DismissCompletion);
+        cx.update(|_, app| assert!(editor.read(app).completion.is_none()));
+        // Typing the closing bracket keeps it closed.
+        cx.simulate_input("x]]");
+        cx.update(|_, app| assert!(editor.read(app).completion.is_none()));
     }
 
     #[gpui::test]

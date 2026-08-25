@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, uniform_list, AnyElement, App, ClickEvent, Entity, FocusHandle, Focusable,
-    IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Window,
+    actions, div, point, px, uniform_list, AnyElement, App, ClickEvent, Entity, FocusHandle,
+    Focusable, Hsla, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    PathPromptOptions, Render, SharedString, Styled, Window,
 };
 
 use crate::editor::Editor;
@@ -37,8 +38,17 @@ actions!(
         ShowChanges,
         ToggleFocusMode,
         FocusSidebar,
+        ToggleKnowledge,
+        GraphDismiss,
         SidebarUp,
         SidebarDown,
+        SidebarRename,
+        SidebarDelete,
+        SidebarNewFile,
+        SidebarNewFolder,
+        SidebarMoveTo,
+        SidebarEditCommit,
+        SidebarEditCancel,
         SidebarExpand,
         SidebarCollapse,
         SidebarOpen,
@@ -103,6 +113,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌃ ⌘ F", "Focus mode"),
             ("⌘ B", "Toggle sidebar"),
             ("⌘ ⇧ O", "Toggle outline"),
+            ("⌘ ⇧ K", "Knowledge panel (backlinks, tags, graph)"),
             ("⌘ 1", "Focus sidebar"),
             ("⌘ W", "Close tab"),
             ("⌃ Tab / ⌘ ⇧ ]", "Next tab"),
@@ -120,6 +131,8 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("⌘ B / ⌘ I", "Bold / italic selection"),
             ("⏎ in a list", "Continue the list"),
             ("Tab / ⇧ Tab", "Indent list item · hop table cells"),
+            ("⌘ ⏎ / ⌘ Click", "Follow link under cursor"),
+            ("[[", "Link to a note (completion)"),
             ("⌥ ← →", "Move by word"),
             ("⌘ ← →", "Line start / end"),
             ("⌘ ↑ ↓", "Document start / end"),
@@ -136,6 +149,10 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("→", "Expand folder"),
             ("←", "Collapse / to parent"),
             ("⏎", "Open"),
+            ("F2", "Rename"),
+            ("⌘ ⌫", "Delete (to trash)"),
+            ("⌘ N / ⌘ ⇧ N", "New file / folder here"),
+            ("⌘ ⇧ M", "Move to folder…"),
         ],
     ),
 ];
@@ -234,6 +251,8 @@ pub struct Workspace {
     active: usize,
     show_sidebar: bool,
     show_outline: bool,
+    /// Right-hand knowledge panel (backlinks, tags).
+    show_knowledge: bool,
     focus_mode: bool,
     pre_focus_panels: (bool, bool),
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
@@ -266,7 +285,39 @@ pub struct Workspace {
     last_title: String,
     /// Absolute paths of files with uncommitted git changes (sidebar dots).
     git_modified: std::collections::HashSet<PathBuf>,
+    /// Followed links waiting for a window to open them in.
+    pending_link_opens: Vec<PathBuf>,
+    /// Full-workspace graph overlay.
+    graph: Option<GraphViewState>,
+    graph_focus: FocusHandle,
+    /// Inline rename / create in progress in the sidebar.
+    sidebar_edit: Option<SidebarEdit>,
+    /// "Move to…" folder picker (a Palette over workspace folders).
+    move_picker: Option<(Entity<crate::palette::Palette>, gpui::Subscription)>,
     _watcher: Option<notify::RecommendedWatcher>,
+}
+
+enum SidebarEditKind {
+    Rename(PathBuf),
+    /// Payload is the directory the new entry lands in.
+    NewFile(PathBuf),
+    NewDir(PathBuf),
+}
+
+struct SidebarEdit {
+    kind: SidebarEditKind,
+    input: Entity<crate::input::TextInput>,
+    error: Option<SharedString>,
+}
+
+/// The full-workspace graph: laid-out nodes plus view transform.
+struct GraphViewState {
+    nodes: Vec<crate::graph::GraphNode>,
+    edges: Vec<crate::graph::GraphEdge>,
+    pan: (f32, f32),
+    zoom: f32,
+    /// Last mouse position while panning.
+    drag: Option<(f32, f32)>,
 }
 
 /// Create an editor and subscribe the workspace to its events
@@ -283,6 +334,11 @@ fn make_editor(
             this.consent_request = Some((plugin.clone(), cap.clone()));
             cx.notify();
         }
+        // No window here; render drains the queue with one in hand.
+        EditorEvent::OpenPath(path) => {
+            this.pending_link_opens.push(path.clone());
+            cx.notify();
+        }
     })
     .detach();
     editor
@@ -296,6 +352,9 @@ impl Workspace {
         match arg {
             Some(path) if path.is_dir() => {
                 record_recent(&path);
+                cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
+                    std::sync::Mutex::new(crate::knowledge::Index::scan(&path)),
+                )));
                 tree = Some(FileTree::new(path));
             }
             Some(path) => match Editor::read_file(&path) {
@@ -332,6 +391,7 @@ impl Workspace {
             active: 0,
             show_sidebar: true,
             show_outline: true,
+            show_knowledge: false,
             focus_mode: false,
             pre_focus_panels: (true, true),
             finder: None,
@@ -356,6 +416,11 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
+            pending_link_opens: Vec::new(),
+            graph: None,
+            graph_focus: cx.focus_handle(),
+            sidebar_edit: None,
+            move_picker: None,
             shortcuts_focus: cx.focus_handle(),
             show_shortcuts: false,
             theme_picker: None,
@@ -473,6 +538,19 @@ impl Workspace {
             tree.refresh();
         }
         self.refresh_git_status();
+        // Keep the knowledge index warm: saves re-index, deletions drop.
+        if let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() {
+            let mut index = state.0.lock().unwrap();
+            for path in paths {
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                match std::fs::read_to_string(path) {
+                    Ok(text) => index.update_file(path, &text),
+                    Err(_) => index.remove_file(path),
+                }
+            }
+        }
         let langs = languages(cx);
         for tab in &self.tabs {
             if let Tab::Editor { editor, .. } = tab {
@@ -695,6 +773,9 @@ impl Workspace {
             if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
                 state.0.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
             }
+            cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
+                std::sync::Mutex::new(crate::knowledge::Index::scan(path)),
+            )));
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
@@ -1013,6 +1094,22 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Open the workspace search pre-seeded with `#tag`.
+    fn open_tag_search(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            self.toggle_search(&ToggleSearch, window, cx);
+        }
+        if let Some((overlay, _)) = &self.search {
+            let query = format!("#{tag}");
+            let input = overlay.read(cx).input.clone();
+            input.update(cx, |input, cx| {
+                let end = query.len();
+                input.seed(query, end..end);
+                cx.notify();
+            });
+        }
+    }
+
     fn dismiss_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search = None;
         self.focus_active(window, cx);
@@ -1077,6 +1174,11 @@ impl Workspace {
         };
         // App-level commands exist with or without plugins.
         let mut entries = entries;
+        entries.push(crate::palette::PaletteEntry {
+            plugin: "supermd".into(),
+            id: "__graph".into(),
+            title: "Graph View".into(),
+        });
         entries.push(crate::palette::PaletteEntry {
             plugin: "supermd".into(),
             id: "__flux".into(),
@@ -1225,6 +1327,10 @@ impl Workspace {
     ) {
         if id == "__install" {
             self.open_install_overlay(window, cx);
+            return;
+        }
+        if id == "__graph" {
+            self.open_graph_view(window, cx);
             return;
         }
         if id == "__flux" {
@@ -1596,6 +1702,329 @@ impl Workspace {
             self.sidebar_selected = parent;
             cx.notify();
         }
+    }
+
+    // ── sidebar file operations ──
+
+    fn selected_entry(&mut self) -> Option<crate::files::FsEntry> {
+        let ix = self.sidebar_selected;
+        self.sidebar_rows().get(ix).map(|(_, e)| e.clone())
+    }
+
+    /// Where new entries land: the selected folder itself, a selected
+    /// file's parent, or the workspace root.
+    fn creation_dir(&mut self) -> Option<PathBuf> {
+        let root = self.tree.as_ref()?.root.clone();
+        Some(match self.selected_entry() {
+            Some(e) if e.is_dir => e.path,
+            Some(e) => e.path.parent().map(|p| p.to_path_buf()).unwrap_or(root),
+            None => root,
+        })
+    }
+
+    fn start_sidebar_edit(
+        &mut self,
+        kind: SidebarEditKind,
+        seed_text: String,
+        select: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            let mut input = crate::input::TextInput::new("name", cx);
+            input.seed(seed_text, select);
+            input
+        });
+        window.focus(&input.read(cx).focus_handle);
+        self.sidebar_edit = Some(SidebarEdit { kind, input, error: None });
+        cx.notify();
+    }
+
+    fn sidebar_rename(&mut self, _: &SidebarRename, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let name = entry.name.clone();
+        // Pre-select the stem so typing replaces the name, not the
+        // extension. Folders select whole.
+        let stem = if entry.is_dir {
+            name.len()
+        } else {
+            name.rfind('.').filter(|&i| i > 0).unwrap_or(name.len())
+        };
+        self.start_sidebar_edit(SidebarEditKind::Rename(entry.path), name, 0..stem, window, cx);
+    }
+
+    fn sidebar_new_file(&mut self, _: &SidebarNewFile, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.creation_dir() else {
+            return;
+        };
+        if let Some(tree) = self.tree.as_mut() {
+            tree.expand_to(&dir.join("·"));
+        }
+        self.start_sidebar_edit(SidebarEditKind::NewFile(dir), String::new(), 0..0, window, cx);
+    }
+
+    fn sidebar_new_folder(
+        &mut self,
+        _: &SidebarNewFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = self.creation_dir() else {
+            return;
+        };
+        if let Some(tree) = self.tree.as_mut() {
+            tree.expand_to(&dir.join("·"));
+        }
+        self.start_sidebar_edit(SidebarEditKind::NewDir(dir), String::new(), 0..0, window, cx);
+    }
+
+    fn sidebar_edit_cancel(
+        &mut self,
+        _: &SidebarEditCancel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_edit = None;
+        window.focus(&self.sidebar_focus);
+        cx.notify();
+    }
+
+    fn sidebar_edit_commit(
+        &mut self,
+        _: &SidebarEditCommit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edit) = self.sidebar_edit.as_ref() else {
+            return;
+        };
+        let name = edit.input.read(cx).content.to_string();
+        if name.trim().is_empty() {
+            return self.sidebar_edit_cancel(&SidebarEditCancel, window, cx);
+        }
+        // (old path when this was a rename, resulting path, open it?)
+        let result = match &edit.kind {
+            SidebarEditKind::Rename(path) => {
+                crate::fileops::rename(path, &name).map(|new| (Some(path.clone()), new, false))
+            }
+            SidebarEditKind::NewFile(dir) => {
+                crate::fileops::create_file(dir, &name).map(|new| (None, new, true))
+            }
+            SidebarEditKind::NewDir(dir) => {
+                crate::fileops::create_dir(dir, &name).map(|new| (None, new, false))
+            }
+        };
+        match result {
+            Err(err) => {
+                if let Some(edit) = self.sidebar_edit.as_mut() {
+                    edit.error = Some(err.into());
+                }
+                cx.notify();
+            }
+            Ok((old, new, open)) => {
+                self.sidebar_edit = None;
+                if let Some(old) = &old {
+                    self.after_path_change(old, &new, cx);
+                }
+                self.refresh_tree_and_select(&new, cx);
+                window.focus(&self.sidebar_focus);
+                if open {
+                    self.open_path(&new, window, cx);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn refresh_tree_and_select(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Some(tree) = self.tree.as_mut() {
+            tree.refresh();
+            tree.expand_to(path);
+        }
+        let rows = self.sidebar_rows();
+        if let Some(ix) = rows.iter().position(|(_, e)| e.path == path) {
+            self.sidebar_selected = ix;
+        }
+        cx.notify();
+    }
+
+    /// Everything that must happen when a path moves. Today: retarget
+    /// open tabs (files and whole folders). Milestone 2 adds link
+    /// rewriting here.
+    fn after_path_change(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            match tab {
+                Tab::Editor { editor, .. } => {
+                    let cur = editor.read(cx).path().to_path_buf();
+                    if let Some(p) = crate::fileops::retarget(&cur, old, new) {
+                        editor.update(cx, |editor, _| editor.retarget(p));
+                    }
+                }
+                Tab::Reader(reader) => {
+                    if let Some(cur) = reader.read(cx).path.clone() {
+                        if let Some(p) = crate::fileops::retarget(&cur, old, new) {
+                            reader.update(cx, |reader, _| reader.path = Some(p));
+                        }
+                    }
+                }
+                Tab::Image { .. } => {}
+            }
+        }
+        for tab in &mut self.tabs {
+            if let Tab::Image { path, .. } = tab {
+                if let Some(p) = crate::fileops::retarget(path, old, new) {
+                    *path = p;
+                }
+            }
+        }
+        self.rewrite_knowledge_links(old, new, cx);
+        cx.notify();
+    }
+
+    /// Milestone-2 half of a rename/move: every note pointing at the
+    /// moved path gets its links rewritten, on disk and in open tabs.
+    fn rewrite_knowledge_links(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
+            return;
+        };
+        // Disk is the rewrite source: flush dirty buffers first.
+        for tab in &self.tabs {
+            if let Tab::Editor { editor, .. } = tab {
+                if editor.read(cx).save.is_dirty() {
+                    editor.update(cx, |editor, cx| editor.flush(cx));
+                }
+            }
+        }
+        let mut index = state.0.lock().unwrap();
+        // A moved folder renames every note under it.
+        let moved: Vec<(PathBuf, PathBuf)> = if new.is_dir() {
+            index
+                .note_names()
+                .iter()
+                .filter_map(|(_, p)| {
+                    // Note paths are still keyed under `old` here.
+                    crate::fileops::retarget(p, old, new).map(|to| (p.clone(), to))
+                })
+                .collect()
+        } else {
+            vec![(old.to_path_buf(), new.to_path_buf())]
+        };
+        let mut changed: Vec<(PathBuf, String)> = Vec::new();
+        for (from, to) in moved {
+            changed.extend(index.rename_note(&from, &to, |p| std::fs::read_to_string(p).ok()));
+        }
+        drop(index);
+        for (path, text) in changed {
+            if let Err(err) = std::fs::write(&path, &text) {
+                eprintln!("supermd: cannot rewrite links in {}: {err}", path.display());
+                continue;
+            }
+            for tab in &self.tabs {
+                if let Tab::Editor { editor, .. } = tab {
+                    if editor.read(cx).path() == path {
+                        editor.update(cx, |editor, cx| editor.reload_from_disk(cx));
+                    }
+                }
+            }
+        }
+    }
+
+    fn sidebar_delete(&mut self, _: &SidebarDelete, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let path = entry.path;
+        // Flush dirty buffers under the path first: the trashed copy
+        // must be complete.
+        for tab in &self.tabs {
+            if let Tab::Editor { editor, .. } = tab {
+                if editor.read(cx).path().starts_with(&path) {
+                    editor.update(cx, |editor, cx| editor.flush(cx));
+                }
+            }
+        }
+        let result = match cx.try_global::<crate::fileops::TrashFn>() {
+            Some(t) => (t.0.clone())(&path),
+            None => crate::fileops::delete(&path),
+        };
+        if let Err(err) = result {
+            self.show_command_error(err, cx);
+            return;
+        }
+        let doomed: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, tab)| tab.path(cx).filter(|p| p.starts_with(&path)).map(|_| ix))
+            .collect();
+        for ix in doomed.into_iter().rev() {
+            self.close_tab_at(ix, window, cx);
+        }
+        if let Some(tree) = self.tree.as_mut() {
+            tree.refresh();
+        }
+        let last = self.sidebar_rows().len().saturating_sub(1);
+        self.sidebar_selected = self.sidebar_selected.min(last);
+        cx.notify();
+    }
+
+    fn sidebar_move_to(&mut self, _: &SidebarMoveTo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let Some(root) = self.tree.as_ref().map(|t| t.root.clone()) else {
+            return;
+        };
+        let mut folders = vec![root.clone()];
+        for item in crate::files::workspace_walk(&root).flatten() {
+            let p = item.path();
+            if p != root && item.file_type().is_some_and(|t| t.is_dir()) {
+                folders.push(p.to_path_buf());
+            }
+        }
+        let entries: Vec<crate::palette::PaletteEntry> = folders
+            .iter()
+            .map(|dir| crate::palette::PaletteEntry {
+                plugin: "move".into(),
+                id: dir.to_string_lossy().into_owned(),
+                title: if dir == &root {
+                    "/".to_string()
+                } else {
+                    format!("/{}", dir.strip_prefix(&root).unwrap_or(dir).display())
+                },
+            })
+            .collect();
+        let source = entry.path;
+        let picker = cx.new(|cx| crate::palette::Palette::new(entries, Vec::new(), cx));
+        let subscription = cx.subscribe_in(
+            &picker,
+            window,
+            move |this, _p, event, window, cx| match event {
+                crate::palette::PaletteEvent::Run { id, .. } => {
+                    let dest = PathBuf::from(id);
+                    this.dismiss_move_picker(window, cx);
+                    match crate::fileops::move_entry(&source, &dest) {
+                        Ok(new) => {
+                            this.after_path_change(&source.clone(), &new, cx);
+                            this.refresh_tree_and_select(&new, cx);
+                        }
+                        Err(err) => this.show_command_error(err, cx),
+                    }
+                }
+                crate::palette::PaletteEvent::Dismissed => this.dismiss_move_picker(window, cx),
+            },
+        );
+        window.focus(&picker.focus_handle(cx));
+        self.move_picker = Some((picker, subscription));
+        cx.notify();
+    }
+
+    fn dismiss_move_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_picker = None;
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     fn sidebar_open(&mut self, _: &SidebarOpen, window: &mut Window, cx: &mut Context<Self>) {
@@ -1987,6 +2416,102 @@ impl Workspace {
 
     // ── Rendering ───────────────────────────────────────────────────────
 
+
+    /// One plain file/folder row of the sidebar list.
+    #[allow(clippy::too_many_arguments)]
+    fn sidebar_file_row(
+        &self,
+        row_ix: usize,
+        depth: usize,
+        entry: crate::files::FsEntry,
+        kb_selected: usize,
+        git_modified: &std::collections::HashSet<PathBuf>,
+        active_path: Option<&Path>,
+        t: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+                let is_active = active_path == Some(entry.path.as_path());
+                let is_kb_selected = row_ix == kb_selected;
+                let id = SharedString::from(format!("file-{}", entry.path.display()));
+                let path = entry.path.clone();
+                let is_dir = entry.is_dir;
+                let expanded = is_dir && self.tree.as_ref().is_some_and(|t| t.is_expanded(&path));
+                let is_modified = !is_dir && git_modified.contains(&entry.path);
+
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py(px(3.))
+                    .ml(px(depth as f32 * 12.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover_bg))
+                    .when(is_kb_selected, |d| d.bg(t.hover_bg))
+                    .when(is_active, |d| d.bg(t.selected_bg))
+                    .child(
+                        // Fixed chevron slot on every row so icons align in a
+                        // column whether or not the row is a directory.
+                        div()
+                            .w(px(10.))
+                            .flex_none()
+                            .text_size(px(9.))
+                            .text_color(t.fg_muted)
+                            .when(is_dir, |d| d.child(if expanded { "▼" } else { "▶" })),
+                    )
+                    .child({
+                        let (icon, tint) = if is_dir {
+                            ("folder", t.fg_muted)
+                        } else {
+                            let (icon, color) = seti::icon_for(&entry.name);
+                            (icon, seti_tint(color, &t))
+                        };
+                        // Seti glyphs carry ~30% internal padding, so the box
+                        // runs larger than the text for a matched visual size.
+                        gpui::svg()
+                            .path(SharedString::from(format!("icons/seti/{icon}.svg")))
+                            .size(px(20.))
+                            .flex_none()
+                            .text_color(tint)
+                    })
+                    .child(
+                        div()
+                            .text_size(px(t.ui_size))
+                            .text_color(if is_dir { t.fg_strong } else { t.fg })
+                            .overflow_hidden()
+                            .child(SharedString::from(entry.name.clone())),
+                    )
+                    .child(div().flex_1())
+                    .when(is_modified, |d| {
+                        d.child(
+                            div()
+                                .size(px(5.))
+                                .flex_none()
+                                .mr(px(2.))
+                                .rounded_full()
+                                .bg(t.accent),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.sidebar_selected = row_ix;
+                        if is_dir {
+                            if let Some(tree) = this.tree.as_mut() {
+                                tree.toggle(&path);
+                            }
+                            window.focus(&this.sidebar_focus);
+                            cx.notify();
+                        } else if event.click_count() >= 2 {
+                            this.open_path(&path, window, cx);
+                        } else {
+                            this.open_path_preview(&path, true, window, cx);
+                        }
+                    }))
+                    .into_any_element()
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_sidebar {
             return None;
@@ -2124,87 +2649,61 @@ impl Workspace {
 
         let kb_selected = self.sidebar_selected;
         let git_modified = self.git_modified.clone();
-        let items = rows.into_iter().enumerate().map(|(row_ix, (depth, entry))| {
-            let is_active = active_path.as_deref() == Some(entry.path.as_path());
-            let is_kb_selected = row_ix == kb_selected;
-            let id = SharedString::from(format!("file-{}", entry.path.display()));
-            let path = entry.path.clone();
-            let is_dir = entry.is_dir;
-            let expanded = is_dir && self.tree.as_ref().is_some_and(|t| t.is_expanded(&path));
-            let is_modified = !is_dir && git_modified.contains(&entry.path);
 
-            div()
-                .id(id)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py(px(3.))
-                .ml(px(depth as f32 * 12.))
-                .rounded_md()
-                .cursor_pointer()
-                .hover(|s| s.bg(t.hover_bg))
-                .when(is_kb_selected, |d| d.bg(t.hover_bg))
-                .when(is_active, |d| d.bg(t.selected_bg))
-                .child(
-                    // Fixed chevron slot on every row so icons align in a
-                    // column whether or not the row is a directory.
-                    div()
-                        .w(px(10.))
-                        .flex_none()
-                        .text_size(px(9.))
-                        .text_color(t.fg_muted)
-                        .when(is_dir, |d| d.child(if expanded { "▼" } else { "▶" })),
-                )
-                .child({
-                    let (icon, tint) = if is_dir {
-                        ("folder", t.fg_muted)
-                    } else {
-                        let (icon, color) = seti::icon_for(&entry.name);
-                        (icon, seti_tint(color, &t))
-                    };
-                    // Seti glyphs carry ~30% internal padding, so the box
-                    // runs larger than the text for a matched visual size.
-                    gpui::svg()
-                        .path(SharedString::from(format!("icons/seti/{icon}.svg")))
-                        .size(px(20.))
-                        .flex_none()
-                        .text_color(tint)
-                })
-                .child(
-                    div()
-                        .text_size(px(t.ui_size))
-                        .text_color(if is_dir { t.fg_strong } else { t.fg })
-                        .overflow_hidden()
-                        .child(SharedString::from(entry.name.clone())),
-                )
-                .child(div().flex_1())
-                .when(is_modified, |d| {
-                    d.child(
-                        div()
-                            .size(px(5.))
-                            .flex_none()
-                            .mr(px(2.))
-                            .rounded_full()
-                            .bg(t.accent),
-                    )
-                })
-                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    this.sidebar_selected = row_ix;
-                    if is_dir {
-                        if let Some(tree) = this.tree.as_mut() {
-                            tree.toggle(&path);
-                        }
-                        window.focus(&this.sidebar_focus);
-                        cx.notify();
-                    } else if event.click_count() >= 2 {
-                        this.open_path(&path, window, cx);
-                    } else {
-                        this.open_path_preview(&path, true, window, cx);
-                    }
-                }))
+        // Inline rename / create rows swap in a text input.
+        let edit_state = self.sidebar_edit.as_ref().map(|e| {
+            let target = match &e.kind {
+                SidebarEditKind::Rename(p) => p.clone(),
+                SidebarEditKind::NewFile(d) | SidebarEditKind::NewDir(d) => d.clone(),
+            };
+            let renaming = matches!(e.kind, SidebarEditKind::Rename(_));
+            (target, renaming, e.input.clone(), e.error.clone())
         });
+        let edit_row = |input: &Entity<crate::input::TextInput>,
+                        error: &Option<SharedString>,
+                        depth: usize,
+                        cx: &mut Context<Self>| {
+            div()
+                .key_context("SidebarEdit")
+                .on_action(cx.listener(Self::sidebar_edit_commit))
+                .on_action(cx.listener(Self::sidebar_edit_cancel))
+                .ml(px(depth as f32 * 12. + 12.))
+                .mr_2()
+                .flex()
+                .flex_col()
+                .child(input.clone())
+                .children(error.clone().map(|err| {
+                    div()
+                        .text_size(px(11.))
+                        .text_color(t.diff_deleted_fg)
+                        .child(err)
+                }))
+                .into_any_element()
+        };
+
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
+        if let Some((target, renaming, input, error)) = &edit_state {
+            // Creating at the workspace root: the edit row leads.
+            if !renaming && Some(target.as_path()) == self.tree.as_ref().map(|t| t.root.as_path())
+            {
+                items.push(edit_row(input, error, 0, cx));
+            }
+        }
+        for (row_ix, (depth, entry)) in rows.into_iter().enumerate() {
+            if let Some((target, renaming, input, error)) = &edit_state {
+                if *renaming && *target == entry.path {
+                    items.push(edit_row(input, error, depth, cx));
+                    continue;
+                }
+            }
+            items.push(self.sidebar_file_row(row_ix, depth, entry.clone(), kb_selected, &git_modified, active_path.as_deref(), &t, cx));
+            if let Some((target, renaming, input, error)) = &edit_state {
+                if !renaming && *target == entry.path && entry.is_dir {
+                    items.push(edit_row(input, error, depth + 1, cx));
+                }
+            }
+        }
+        let items = items;
 
         Some(
             div()
@@ -2221,6 +2720,11 @@ impl Workspace {
                 .on_action(cx.listener(Self::sidebar_expand))
                 .on_action(cx.listener(Self::sidebar_collapse))
                 .on_action(cx.listener(Self::sidebar_open))
+                .on_action(cx.listener(Self::sidebar_rename))
+                .on_action(cx.listener(Self::sidebar_delete))
+                .on_action(cx.listener(Self::sidebar_new_file))
+                .on_action(cx.listener(Self::sidebar_new_folder))
+                .on_action(cx.listener(Self::sidebar_move_to))
                 .flex()
                 .flex_col()
                 .child(
@@ -2469,6 +2973,383 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// Build, lay out, and show the full-workspace graph.
+    fn open_graph_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
+            self.show_command_error("Open a folder to see its graph".to_string(), cx);
+            return;
+        };
+        let (mut nodes, edges) = {
+            let index = state.0.lock().unwrap();
+            crate::graph::build(&index)
+        };
+        crate::graph::layout(&mut nodes, &edges, 150);
+        self.graph = Some(GraphViewState { nodes, edges, pan: (0.0, 0.0), zoom: 1.0, drag: None });
+        window.focus(&self.graph_focus);
+        cx.notify();
+    }
+
+    fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
+        self.graph = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Open the note behind a graph node and close the overlay.
+    fn open_graph_node(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.graph.as_ref().and_then(|g| g.nodes.get(ix)).map(|n| n.path.clone())
+        else {
+            return;
+        };
+        self.graph = None;
+        self.open_path(&path, window, cx);
+    }
+
+    fn render_graph(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.graph.as_ref()?;
+        let t = theme(cx);
+        // World transform: unit square → an 900px board, panned/zoomed.
+        let base = 900.0 * state.zoom;
+        let (pan_x, pan_y) = state.pan;
+        let at = |n: &crate::graph::GraphNode| (pan_x + n.x * base + 60.0, pan_y + n.y * base + 60.0);
+
+        let edge_px: Vec<((f32, f32), (f32, f32))> = state
+            .edges
+            .iter()
+            .map(|&(a, b)| (at(&state.nodes[a]), at(&state.nodes[b])))
+            .collect();
+        let edge_color = Hsla { a: 0.35, ..t.fg_muted };
+        let edges_canvas = gpui::canvas(
+            move |bounds, _, _| bounds,
+            move |bounds, _, window, _| {
+                for (a, b) in &edge_px {
+                    let pa = point(bounds.origin.x + px(a.0), bounds.origin.y + px(a.1));
+                    let pb = point(bounds.origin.x + px(b.0), bounds.origin.y + px(b.1));
+                    window.paint_path(crate::graph::line_path(pa, pb, 1.5), edge_color);
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+
+        let mut board = div().absolute().inset_0().child(edges_canvas);
+        for (ix, node) in state.nodes.iter().enumerate() {
+            let (x, y) = at(node);
+            let r = (5.0 + (node.degree as f32).sqrt() * 3.0) * state.zoom.sqrt();
+            let name = node
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            board = board.child(
+                div()
+                    .id(("graph-node", ix))
+                    .absolute()
+                    .left(px(x - r))
+                    .top(px(y - r))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .size(px(r * 2.0))
+                            .rounded_full()
+                            .bg(if node.degree > 0 { t.accent } else { t.fg_muted })
+                            .hover(|s| s.bg(t.link)),
+                    )
+                    .child(
+                        div()
+                            .mt(px(2.))
+                            .text_size(px(11.))
+                            .text_color(t.fg)
+                            .child(SharedString::from(name)),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_graph_node(ix, window, cx);
+                    })),
+            );
+        }
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(t.bg)
+                .key_context("GraphView")
+                .track_focus(&self.graph_focus)
+                .on_action(cx.listener(Self::graph_dismiss))
+                .overflow_hidden()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        if let Some(graph) = &mut this.graph {
+                            graph.drag =
+                                Some((f32::from(event.position.x), f32::from(event.position.y)));
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if let Some(graph) = &mut this.graph {
+                        if let Some((lx, ly)) = graph.drag {
+                            let (x, y) =
+                                (f32::from(event.position.x), f32::from(event.position.y));
+                            graph.pan.0 += x - lx;
+                            graph.pan.1 += y - ly;
+                            graph.drag = Some((x, y));
+                            cx.notify();
+                        }
+                    }
+                }))
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                        if let Some(graph) = &mut this.graph {
+                            graph.drag = None;
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    if let Some(graph) = &mut this.graph {
+                        let delta = match event.delta {
+                            gpui::ScrollDelta::Pixels(p) => f32::from(p.y),
+                            gpui::ScrollDelta::Lines(l) => l.y * 20.0,
+                        };
+                        graph.zoom = (graph.zoom * (1.0 + delta * 0.002)).clamp(0.3, 3.0);
+                        cx.notify();
+                    }
+                }))
+                .child(board)
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(40.))
+                        .left(px(16.))
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .items_center()
+                        .text_size(px(13.))
+                        .child(div().text_color(t.fg_strong).child("Workspace graph"))
+                        .child(
+                            div()
+                                .text_color(t.fg_muted)
+                                .child("drag to pan · scroll to zoom · esc to close"),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn toggle_knowledge(&mut self, _: &ToggleKnowledge, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_knowledge = !self.show_knowledge;
+        cx.notify();
+    }
+
+    /// Backlinks of the active tab's file, from the knowledge index.
+    fn active_backlinks(&self, cx: &App) -> Vec<(PathBuf, Vec<String>)> {
+        let Some(path) = self.tabs.get(self.active).and_then(|t| t.path(cx)) else {
+            return Vec::new();
+        };
+        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
+            return Vec::new();
+        };
+        let index = state.0.lock().unwrap();
+        index.backlinks(&path)
+    }
+
+    /// All workspace tags with counts, for the knowledge panel.
+    fn all_tags(&self, cx: &App) -> Vec<(String, usize)> {
+        cx.try_global::<crate::knowledge::KnowledgeState>()
+            .map(|state| state.0.lock().unwrap().tags())
+            .unwrap_or_default()
+    }
+
+    fn render_knowledge(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.show_knowledge {
+            return None;
+        }
+        let t = theme(cx);
+        let backlinks = self.active_backlinks(cx);
+        let tags = self.all_tags(cx);
+
+        let section = |title: &'static str| {
+            div()
+                .px_3()
+                .pt_3()
+                .pb_1()
+                .text_size(px(11.))
+                .text_color(t.fg_muted)
+                .child(title)
+        };
+        let mut panel = div()
+            .w(px(240.))
+            .h_full()
+            .flex_none()
+            .bg(t.panel_bg)
+            .border_l_1()
+            .border_color(t.border)
+            .flex()
+            .flex_col()
+            .overflow_hidden();
+
+        // Local graph: the active note and its one-hop neighborhood.
+        let local = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.path(cx))
+            .zip(cx.try_global::<crate::knowledge::KnowledgeState>())
+            .map(|(path, state)| crate::graph::local(&state.0.lock().unwrap(), &path))
+            .filter(|(nodes, _)| nodes.len() > 1);
+        if let Some((nodes, edges)) = local {
+            let (w, h) = (216.0f32, 140.0f32);
+            let at = |n: &crate::graph::GraphNode| (12.0 + n.x * w, n.y * h);
+            let edge_px: Vec<((f32, f32), (f32, f32))> = edges
+                .iter()
+                .map(|&(a, b)| (at(&nodes[a]), at(&nodes[b])))
+                .collect();
+            let edge_color = Hsla { a: 0.3, ..t.fg_muted };
+            let canvas_el = gpui::canvas(
+                move |bounds, _, _| bounds,
+                move |bounds, _, window, _| {
+                    for (a, b) in &edge_px {
+                        let pa = point(bounds.origin.x + px(a.0), bounds.origin.y + px(a.1));
+                        let pb = point(bounds.origin.x + px(b.0), bounds.origin.y + px(b.1));
+                        window.paint_path(crate::graph::line_path(pa, pb, 1.0), edge_color);
+                    }
+                },
+            )
+            .absolute()
+            .size_full();
+            let mut board = div().relative().h(px(h + 10.0)).w_full().child(canvas_el);
+            for (ix, node) in nodes.iter().enumerate() {
+                let (x, y) = at(node);
+                let r = if ix == 0 { 6.0 } else { 4.0 };
+                let name = node
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let path = node.path.clone();
+                board = board.child(
+                    div()
+                        .id(("local-node", ix))
+                        .absolute()
+                        .left(px(x - 30.0))
+                        .top(px(y - r))
+                        .w(px(60.))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .size(px(r * 2.0))
+                                .rounded_full()
+                                .bg(if ix == 0 { t.accent } else { t.fg_muted }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(t.fg_muted)
+                                .overflow_hidden()
+                                .truncate()
+                                .child(SharedString::from(name)),
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_path(&path.clone(), window, cx);
+                        })),
+                );
+            }
+            panel = panel.child(section("GRAPH")).child(board).child(
+                div()
+                    .id("open-graph")
+                    .px_3()
+                    .py(px(2.))
+                    .text_size(px(t.ui_size - 2.))
+                    .text_color(t.link)
+                    .cursor_pointer()
+                    .child("Open workspace graph →")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_graph_view(window, cx);
+                    })),
+            );
+        }
+
+        panel = panel.child(section("BACKLINKS"));
+        if backlinks.is_empty() {
+            panel = panel.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(t.ui_size - 1.))
+                    .text_color(t.fg_muted)
+                    .child("Nothing links here yet"),
+            );
+        }
+        for (ix, (path, contexts)) in backlinks.into_iter().enumerate() {
+            let name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let context = contexts.first().cloned().unwrap_or_default();
+            panel = panel.child(
+                div()
+                    .id(("backlink", ix))
+                    .px_3()
+                    .py(px(4.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover_bg))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg_strong)
+                            .child(SharedString::from(name)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(t.ui_size - 2.))
+                            .text_color(t.fg_muted)
+                            .overflow_hidden()
+                            .truncate()
+                            .child(SharedString::from(context)),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_path(&path.clone(), window, cx);
+                    })),
+            );
+        }
+        if !tags.is_empty() {
+            panel = panel.child(section("TAGS"));
+            let mut wrap = div().px_3().py_1().flex().flex_row().flex_wrap().gap_1();
+            for (ix, (tag, count)) in tags.into_iter().enumerate() {
+                wrap = wrap.child(
+                    div()
+                        .id(("tag", ix))
+                        .px_2()
+                        .py(px(2.))
+                        .rounded_md()
+                        .bg(t.hover_bg)
+                        .cursor_pointer()
+                        .text_size(px(t.ui_size - 2.))
+                        .text_color(t.fg)
+                        .child(SharedString::from(format!("#{tag} {count}")))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_tag_search(&tag.clone(), window, cx);
+                        })),
+                );
+            }
+            panel = panel.child(wrap);
+        }
+        Some(panel.into_any_element())
+    }
+
     fn render_outline(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_outline {
             return None;
@@ -2613,6 +3494,10 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_title(window, cx);
+        // Followed links queued by editors (which have no window).
+        for path in std::mem::take(&mut self.pending_link_opens) {
+            self.open_path(&path, window, cx);
+        }
         // Editing a previewed buffer pins its tab.
         if let Some(ix) = self.preview_tab {
             if let Some(Tab::Editor { editor, .. }) = self.tabs.get(ix) {
@@ -2625,6 +3510,7 @@ impl Render for Workspace {
         let sidebar = self.render_sidebar(cx);
         let titlebar = self.render_titlebar(window, cx);
         let outline = self.render_outline(cx);
+        let knowledge = self.render_knowledge(cx);
         let content: AnyElement = match self.tabs.get(self.active) {
             Some(Tab::Reader(reader)) => reader.clone().into_any_element(),
             Some(Tab::Editor { view: EditorView::Preview(preview), .. }) => {
@@ -2671,6 +3557,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_outline))
+            .on_action(cx.listener(Self::toggle_knowledge))
             .on_action(cx.listener(Self::toggle_finder))
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(Self::toggle_palette))
@@ -2792,7 +3679,8 @@ impl Render for Workspace {
                                     .flex_col()
                                     .child(div().flex_1().min_h_0().child(content)),
                             )
-                            .children(outline),
+                            .children(outline)
+                            .children(knowledge),
                     ),
             )
             .children(self.render_shortcuts(cx))
@@ -2993,6 +3881,27 @@ impl Render for Workspace {
                                 })
                                 .child(overlay),
                         ),
+                )
+            })
+            .children(self.render_graph(cx))
+            .when_some(self.move_picker.as_ref(), |root, (picker, _)| {
+                let picker = picker.clone();
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .pt(px(110.))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.dismiss_move_picker(window, cx);
+                            }),
+                        )
+                        .child(picker),
                 )
             })
             .when_some(self.palette.as_ref(), |root, (palette, _)| {
@@ -3266,6 +4175,302 @@ mod tests {
 
     fn tab_paths(ws: &Workspace, cx: &App) -> Vec<Option<PathBuf>> {
         ws.tabs.iter().map(|t| t.path(cx)).collect()
+    }
+
+    /// Select the sidebar row whose entry name matches, focusing the
+    /// sidebar first so Sidebar-context actions dispatch.
+    fn select_sidebar_row(ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext, name: &str) {
+        ws.update_in(cx, |ws, window, cx| {
+            window.focus(&ws.sidebar_focus);
+            let rows = ws.sidebar_rows();
+            let ix = rows
+                .iter()
+                .position(|(_, e)| e.name == name)
+                .unwrap_or_else(|| panic!("row {name:?} not found"));
+            ws.sidebar_selected = ix;
+            cx.notify();
+        });
+    }
+
+    #[gpui::test]
+    fn rename_rewrites_links_in_other_notes(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Roadmap.md"), "The plan.\n").unwrap();
+        std::fs::write(root.path().join("Ideas.md"), "See [[Roadmap]] often.\n").unwrap();
+        std::fs::write(
+            root.path().join("Log.md"),
+            "Daily [note](Roadmap.md) link.\n",
+        )
+        .unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        select_sidebar_row(&ws, cx, "Roadmap.md");
+        cx.dispatch_action(SidebarRename);
+        cx.run_until_parked();
+        cx.simulate_input("Vision");
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+
+        let ideas = std::fs::read_to_string(root.path().join("Ideas.md")).unwrap();
+        assert_eq!(ideas, "See [[Vision]] often.\n");
+        let log = std::fs::read_to_string(root.path().join("Log.md")).unwrap();
+        assert_eq!(log, "Daily [note](Vision.md) link.\n");
+    }
+
+    #[gpui::test]
+    fn knowledge_index_tracks_saves_through_the_watcher(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        std::fs::write(root.path().join("B.md"), "plain\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let b = root.path().join("B.md");
+        std::fs::write(&b, "now links [[A]]\n").unwrap();
+        // Deterministic: feed the drain loop's callback directly.
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&b), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let state = app.global::<crate::knowledge::KnowledgeState>();
+            let index = state.0.lock().unwrap();
+            let back = index.backlinks(&root.path().join("A.md"));
+            assert!(
+                back.iter().any(|(p, _)| p.ends_with("B.md")),
+                "index saw the save"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn knowledge_panel_lists_backlinks_of_the_active_note(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Roadmap.md"), "the plan\n").unwrap();
+        std::fs::write(root.path().join("Ideas.md"), "see [[Roadmap]] here\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path(&root.path().join("Roadmap.md"), window, cx)
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| assert!(!ws.read(app).show_knowledge, "off by default"));
+        cx.dispatch_action(ToggleKnowledge);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.show_knowledge);
+            let back = w.active_backlinks(app);
+            assert_eq!(back.len(), 1);
+            assert!(back[0].0.ends_with("Ideas.md"));
+            assert!(back[0].1[0].contains("see [[Roadmap]]"));
+        });
+        // The panel follows the active tab: a file nobody links to.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path(&root.path().join("Ideas.md"), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(ws.read(app).active_backlinks(app).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn tag_chips_surface_counts_and_seed_the_search(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "alpha #planning #q3\n").unwrap();
+        std::fs::write(root.path().join("B.md"), "beta #planning\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        cx.update(|_, app| {
+            let tags = ws.read(app).all_tags(app);
+            assert_eq!(tags[0], ("planning".to_string(), 2));
+            assert!(tags.contains(&("q3".to_string(), 1)));
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.open_tag_search("planning", window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ws = ws.read(app);
+            let (overlay, _) = ws.search.as_ref().expect("search overlay open");
+            assert_eq!(overlay.read(app).input.read(app).content.to_string(), "#planning");
+        });
+    }
+
+    #[gpui::test]
+    fn graph_view_opens_navigates_and_dismisses(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Hub.md"), "to [[SpokeA]] and [[SpokeB]]\n").unwrap();
+        std::fs::write(root.path().join("SpokeA.md"), "back [[Hub]]\n").unwrap();
+        std::fs::write(root.path().join("SpokeB.md"), "quiet\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("supermd".into(), "__graph".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let state = ws.read(app).graph.as_ref().expect("graph open");
+            assert_eq!(state.nodes.len(), 3);
+            assert_eq!(state.edges.len(), 2);
+        });
+
+        // Clicking a node opens its note and closes the graph.
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.graph.is_none(), "closed after navigation");
+            assert!(w.tabs.iter().any(|t| {
+                t.path(app).is_some_and(|p| p.extension().is_some_and(|e| e == "md"))
+            }));
+        });
+
+        // Esc path: reopen, dismiss.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("supermd".into(), "__graph".into(), window, cx)
+        });
+        cx.dispatch_action(GraphDismiss);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).graph.is_none()));
+    }
+
+    #[gpui::test]
+    fn sidebar_rename_updates_disk_and_open_tab(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarRename);
+        cx.run_until_parked();
+        // The stem is pre-selected: typing replaces it, extension stays.
+        cx.simulate_input("renamed");
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+
+        assert!(root.path().join("renamed.md").exists());
+        assert!(!a.exists());
+        cx.update(|_, app| {
+            let ws = ws.read(app);
+            assert!(ws.sidebar_edit.is_none(), "edit row closed");
+            let paths = tab_paths(ws, app);
+            assert!(
+                paths.iter().flatten().any(|p| p.ends_with("renamed.md")),
+                "open tab retargeted: {paths:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_rename_to_duplicate_stays_editing_with_error(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarRename);
+        cx.run_until_parked();
+        cx.simulate_input("b"); // stem selected → becomes "b.md"
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ws = ws.read(app);
+            let edit = ws.sidebar_edit.as_ref().expect("still editing");
+            assert!(edit.error.as_ref().unwrap().contains("already exists"));
+        });
+        cx.dispatch_action(SidebarEditCancel);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).sidebar_edit.is_none()));
+        assert!(root.path().join("a.md").exists(), "cancel leaves disk alone");
+    }
+
+    #[gpui::test]
+    fn sidebar_new_file_and_folder_target_the_selection(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _, _) = workspace_fixture();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // New folder beside a selected file lands in the root.
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarNewFolder);
+        cx.run_until_parked();
+        cx.simulate_input("ideas");
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+        assert!(root.path().join("ideas").is_dir());
+
+        // New file inside a selected folder lands in that folder and opens.
+        select_sidebar_row(&ws, cx, "sub");
+        cx.dispatch_action(SidebarNewFile);
+        cx.run_until_parked();
+        cx.simulate_input("inner.md");
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+        assert!(root.path().join("sub/inner.md").exists());
+        cx.update(|_, app| {
+            let paths = tab_paths(ws.read(app), app);
+            assert!(paths.iter().flatten().any(|p| p.ends_with("sub/inner.md")), "{paths:?}");
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_delete_trashes_and_closes_the_tab(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _) = workspace_fixture();
+        let trashed: std::sync::Arc<Mutex<Vec<PathBuf>>> = Default::default();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|_, app| {
+            let sink = trashed.clone();
+            app.set_global(crate::fileops::TrashFn(std::sync::Arc::new(move |p| {
+                sink.lock().unwrap().push(p.to_path_buf());
+                std::fs::remove_file(p).map_err(|e| e.to_string())
+            })));
+        });
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarDelete);
+        cx.run_until_parked();
+        assert_eq!(trashed.lock().unwrap().as_slice(), &[a.clone()]);
+        assert!(!a.exists());
+        cx.update(|_, app| {
+            let paths = tab_paths(ws.read(app), app);
+            assert!(!paths.iter().flatten().any(|p| p == &a), "tab closed: {paths:?}");
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_move_picker_relocates_and_retargets(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _) = workspace_fixture();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarMoveTo);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).move_picker.is_some(), "picker open"));
+        cx.simulate_input("sub");
+        cx.run_until_parked();
+        cx.dispatch_action(crate::palette::PaletteConfirm);
+        cx.run_until_parked();
+
+        assert!(root.path().join("sub/a.md").exists());
+        assert!(!a.exists());
+        cx.update(|_, app| {
+            let ws = ws.read(app);
+            assert!(ws.move_picker.is_none(), "picker closed");
+            let paths = tab_paths(ws, app);
+            assert!(paths.iter().flatten().any(|p| p.ends_with("sub/a.md")), "{paths:?}");
+        });
     }
 
     #[gpui::test]

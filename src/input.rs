@@ -62,6 +62,14 @@ impl TextInput {
         }
     }
 
+    /// Seed the input with `content` and select `select` — rename-style
+    /// prefills where typing replaces the selected part.
+    pub fn seed(&mut self, content: impl Into<SharedString>, select: Range<usize>) {
+        self.content = content.into();
+        let len = self.content.len();
+        self.selected_range = select.start.min(len)..select.end.min(len);
+    }
+
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);

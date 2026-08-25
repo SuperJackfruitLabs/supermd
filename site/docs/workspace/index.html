@@ -128,6 +128,7 @@
 <li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
 <li><a href="/docs/diagrams/">Diagrams</a></li>
 <li class="current"><a href="/docs/workspace/">Working with a Folder</a></li>
+<li><a href="/docs/knowledge/">Links, Tags & Graph</a></li>
 <li><a href="/docs/themes/">Themes</a></li>
 </ul>
 <h4>Extending SuperMD</h4>
@@ -149,6 +150,15 @@
 <li><strong>Outline</strong> — <strong>⌘ ⇧ O</strong> shows the current document's headings; click one to jump.</li>
 <li><strong>Recents</strong> — SuperMD remembers your recent workspaces (File → Open Recent), and can reopen the last one automatically on launch.</li>
 </ul>
+<h2>Managing files</h2>
+<p>The sidebar is a real file manager, keyboard-first — every operation works on the selected row:</p>
+<ul>
+<li><strong>F2</strong> renames in place, with the name pre-selected so you just type (the extension stays put).</li>
+<li><strong>⌘ N</strong> creates a file in the selected folder (or beside the selected file); <strong>⌘ ⇧ N</strong> creates a folder. Type the name, ⏎ confirms, esc cancels.</li>
+<li><strong>⌘ ⇧ M</strong> opens a fuzzy folder picker and moves the selection there.</li>
+<li><strong>⌘ ⌫</strong> deletes — to the OS trash, always recoverable, so there's no confirmation dialog to click through.</li>
+</ul>
+<p>Open tabs follow along: rename or move a file (or a whole folder) and its tabs retarget; unsaved edits are never lost. And if the workspace uses <a href="/docs/knowledge/">wiki links</a>, every link pointing at the moved file is rewritten too.</p>
 <h2>Search the whole workspace</h2>
 <p><strong>⌘ ⇧ F</strong> searches every file, streaming results as they're found. The search is smart-case: all-lowercase queries match case-insensitively, and any capital letter makes the match exact. Results are grouped by file; ⏎ jumps to the hit. Files ignored by <code>.gitignore</code> are skipped.</p>
 <h2>Git awareness</h2>
@@ -161,7 +171,7 @@
 <h2>Non-Markdown files</h2>
 <p>The workspace isn't Markdown-only: source files open with syntax highlighting, images open in a zoomable viewer, and CSV files render as tables (see <a href="/docs/plugins/">Plugins</a> — the CSV viewer is one, and you can add more).</p>
 
-<div class="pager"><a class="prev-link" href="/docs/diagrams/">&larr; Diagrams</a><span class="pager-gap"></span><a class="next-link" href="/docs/themes/">Themes &rarr;</a></div>
+<div class="pager"><a class="prev-link" href="/docs/diagrams/">&larr; Diagrams</a><span class="pager-gap"></span><a class="next-link" href="/docs/knowledge/">Links, Tags & Graph &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

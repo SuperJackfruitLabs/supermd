@@ -26,6 +26,11 @@ title = "Working with a Folder"
 group = "Using SuperMD"
 
 [[pages]]
+file = "knowledge.md"
+title = "Links, Tags & Graph"
+group = "Using SuperMD"
+
+[[pages]]
 file = "themes.md"
 title = "Themes"
 group = "Using SuperMD"

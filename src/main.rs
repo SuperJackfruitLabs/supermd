@@ -6,11 +6,14 @@ mod diff;
 mod editor;
 mod extensions;
 mod files;
+mod fileops;
 mod flux;
 mod finder;
 mod git;
+mod graph;
 mod highlight;
 mod input;
+mod knowledge;
 mod install;
 mod install_ui;
 mod markdown;
@@ -159,6 +162,7 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("cmd-shift-["), PrevTab, None),
             KeyBinding::new(&platform::keybinding("cmd-b"), ToggleSidebar, None),
             KeyBinding::new(&platform::keybinding("cmd-shift-o"), ToggleOutline, None),
+            KeyBinding::new(&platform::keybinding("cmd-shift-k"), workspace::ToggleKnowledge, None),
             KeyBinding::new(&platform::keybinding("cmd-p"), ToggleFinder, None),
             KeyBinding::new(&platform::keybinding("cmd-e"), TogglePreview, None),
             KeyBinding::new(&platform::keybinding("cmd-shift-d"), workspace::ShowChanges, None),
@@ -189,6 +193,15 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("cmd--"), workspace::ZoomOut, None),
             KeyBinding::new(&platform::keybinding("cmd-0"), workspace::ZoomReset, None),
             KeyBinding::new(&platform::keybinding("escape"), workspace::ToggleShortcuts, Some("Shortcuts")),
+            // Sidebar file operations (while the sidebar is focused)
+            KeyBinding::new(&platform::keybinding("f2"), workspace::SidebarRename, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("cmd-backspace"), workspace::SidebarDelete, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("cmd-n"), workspace::SidebarNewFile, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("cmd-shift-n"), workspace::SidebarNewFolder, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("cmd-shift-m"), workspace::SidebarMoveTo, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("enter"), workspace::SidebarEditCommit, Some("SidebarEdit")),
+            KeyBinding::new(&platform::keybinding("escape"), workspace::SidebarEditCancel, Some("SidebarEdit")),
+            KeyBinding::new(&platform::keybinding("escape"), workspace::GraphDismiss, Some("GraphView")),
             // Sidebar navigation (while the sidebar is focused)
             KeyBinding::new(&platform::keybinding("up"), workspace::SidebarUp, Some("Sidebar")),
             KeyBinding::new(&platform::keybinding("down"), workspace::SidebarDown, Some("Sidebar")),
@@ -250,6 +263,8 @@ fn app_keybindings() -> Vec<KeyBinding> {
             // cursor-only press so ToggleSidebar still fires.
             KeyBinding::new(&platform::keybinding("cmd-b"), editor::ToggleBold, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-i"), editor::ToggleItalic, Some("Editor")),
+            KeyBinding::new(&platform::keybinding("cmd-enter"), editor::FollowLink, Some("Editor")),
+            KeyBinding::new(&platform::keybinding("escape"), editor::DismissCompletion, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-s"), editor::SaveNow, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-f"), editor::OpenFind, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-g"), editor::FindNext, Some("Editor")),
@@ -597,7 +612,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 109);
+        assert_eq!(bindings.len(), 120);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));
