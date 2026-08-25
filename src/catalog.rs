@@ -371,7 +371,8 @@ mod tests {
         // dist set = build_plugins.sh CRATES + the graphql grammar copy
         let dist = [
             "dot", "toc", "emoji", "tidy", "todo-marks", "url-title", "html-export",
-            "word-count", "csv-view", "daily-note", "graphql",
+            "word-count", "csv-view", "daily-note", "graphql", "calc", "chart",
+            "ipynb-view",
         ];
         for name in dist {
             assert!(entries.iter().any(|e| e.name == name), "catalog missing {name}");

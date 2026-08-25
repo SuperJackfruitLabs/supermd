@@ -1,0 +1,6 @@
+name = "ipynb-view"
+version = "0.1.0"
+description = "Open Jupyter notebooks as rendered documents"
+
+[[viewers]]
+extensions = ["ipynb"]
