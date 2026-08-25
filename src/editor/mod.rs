@@ -10,6 +10,7 @@ pub mod display;
 pub mod find;
 pub mod formatting;
 pub mod lists;
+pub mod table_edit;
 pub mod movement;
 pub mod projection;
 pub mod projector;
