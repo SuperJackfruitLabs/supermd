@@ -6,40 +6,40 @@
       "description": "Graphviz DOT diagrams as live blocks (pure Rust)",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-dot.zip",
-      "sha256": "0bdfde84a3888479bb76bc4cb9c0c920190d4e4a11bdeaaf7b29632e06621a52"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-dot.zip",
+      "sha256": "60272fca058b52bafd64acd5a8a7881c3e9d2b9ed7019ddd3bfc69a7cfa52b80"
     },
     {
       "name": "toc",
       "description": "Table of contents: insert, update, and auto-refresh on save",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-toc.zip",
-      "sha256": "956c008273e0205759d34a7aba9e30f8eba120bdbd684ad750b4d357c281bd08"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-toc.zip",
+      "sha256": "699501dc6a0c31bcbaadc6572c403602dc3b34d31f4de45bee011a4c2ab6a9a2"
     },
     {
       "name": "emoji",
       "description": "Emoji shortcodes rendered inline",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-emoji.zip",
-      "sha256": "d239d7926afe98832e67ccbc55269ef9b3d9fa70604578c232ab6b8380744d4b"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-emoji.zip",
+      "sha256": "3eb09b4d17baf939390f3cc83d6f851bc5b21e62cdbf729e72e13aa74c6d758c"
     },
     {
       "name": "tidy",
       "description": "Smart punctuation formatter and CSV-paste-to-table",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-tidy.zip",
-      "sha256": "303fb8dc7a32e3740741db30629092a73d96f97bacec6b7682abb388b4f3af26"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-tidy.zip",
+      "sha256": "cf1b4a16a157b2a406aefa40805cc23127a871f6d5d3daaa501f0d5d0d19ce71"
     },
     {
       "name": "todo-marks",
       "description": "Highlight TODO / FIXME / NOTE in prose",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-todo-marks.zip",
-      "sha256": "f4309d80b8b78ef2c86e367b152d56c384f967c764f82a90511245e7bf474324"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-todo-marks.zip",
+      "sha256": "854ef10bef65585b5f0230c825bab0e19813d2c3f4eb4de4c9984aebadac43c3"
     },
     {
       "name": "url-title",
@@ -48,48 +48,48 @@
       "capabilities": [
         "net"
       ],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-url-title.zip",
-      "sha256": "f0c37115d0b0ea49ba5d250b8868e5a47b84e90e84c3ef94b0ec45058aba26af"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-url-title.zip",
+      "sha256": "72e881be7992347af41381c6ba48cac28bb754f96f7998f53a459b4a3850cc67"
     },
     {
       "name": "html-export",
       "description": "Export the document as a self-contained themed HTML file",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-html-export.zip",
-      "sha256": "3d66ecc9013bb52d7362a5120836a3a406d41e226295c3529e8e4b2ed7f52cc9"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-html-export.zip",
+      "sha256": "8f1474a121629c75fa37a130eefa6fece5145dea3d66c5f08957a95e5e876b6f"
     },
     {
       "name": "word-count",
       "description": "Word count and reading time in the status strip",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-word-count.zip",
-      "sha256": "e545dedda0395b32a790be2a06510a813a710de3b0048d604846fcbbe423826e"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-word-count.zip",
+      "sha256": "4086ca7d8181baf4b2a1f8f01f2d7cec3bf14dd4c0fffdee866fb06ba1388385"
     },
     {
       "name": "csv-view",
       "description": "Open CSV/TSV files as rendered tables",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-csv-view.zip",
-      "sha256": "742c587c672d01eb2ddf54b2c57eb684b7ba63e6da1587758e9c2bb3f5514e31"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-csv-view.zip",
+      "sha256": "47cbf0409e6ec4ea30684866946d17c13c9d1da4475bfae273f8f90ec428576e"
     },
     {
       "name": "daily-note",
       "description": "Create today's journal note from the palette",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-daily-note.zip",
-      "sha256": "7519c9c99decdda5f3e764f2ef200319a48caa1702546ec1d18093af6af33a35"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-daily-note.zip",
+      "sha256": "1b6335fd3c914aa222d0285b73ee1f645c15df821328b63e2fe8a918f3321af0"
     },
     {
       "name": "graphql",
       "description": "GraphQL syntax highlighting for fences and files",
       "version": "0.1.0",
       "capabilities": [],
-      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-graphql.zip",
-      "sha256": "9298bcbb56f93565caeeed1d83a0a1fe848cdfccc13d3ac21b0944a15a3e6b06"
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-graphql.zip",
+      "sha256": "58f730148d2bbcddc75b253441ab87c2e3288e3065ed314b8897f0b4b48c70e7"
     },
     {
       "name": "calc",
@@ -97,7 +97,7 @@
       "version": "0.1.0",
       "capabilities": [],
       "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-calc.zip",
-      "sha256": "pending"
+      "sha256": "691b8ddc840ee3440903e59abc51b16468c3ef421e9bf05097b4f91dc3b81769"
     },
     {
       "name": "chart",
@@ -105,7 +105,7 @@
       "version": "0.1.0",
       "capabilities": [],
       "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-chart.zip",
-      "sha256": "pending"
+      "sha256": "52988afd328a8d83b444933971db13e4a416c699fa559e6b304cbb9bc9858c71"
     },
     {
       "name": "ipynb-view",
@@ -113,7 +113,7 @@
       "version": "0.1.0",
       "capabilities": [],
       "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-ipynb-view.zip",
-      "sha256": "pending"
+      "sha256": "5c15523915fb451c771c5bd5bea16033b45f1003bbb440ddf508dbdaf2826670"
     }
   ]
 }
