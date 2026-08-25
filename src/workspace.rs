@@ -320,6 +320,9 @@ impl Workspace {
         match arg {
             Some(path) if path.is_dir() => {
                 record_recent(&path);
+                cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
+                    std::sync::Mutex::new(crate::knowledge::Index::scan(&path)),
+                )));
                 tree = Some(FileTree::new(path));
             }
             Some(path) => match Editor::read_file(&path) {
@@ -499,6 +502,19 @@ impl Workspace {
             tree.refresh();
         }
         self.refresh_git_status();
+        // Keep the knowledge index warm: saves re-index, deletions drop.
+        if let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() {
+            let mut index = state.0.lock().unwrap();
+            for path in paths {
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                match std::fs::read_to_string(path) {
+                    Ok(text) => index.update_file(path, &text),
+                    Err(_) => index.remove_file(path),
+                }
+            }
+        }
         let langs = languages(cx);
         for tab in &self.tabs {
             if let Tab::Editor { editor, .. } = tab {
@@ -721,6 +737,9 @@ impl Workspace {
             if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
                 state.0.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
             }
+            cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
+                std::sync::Mutex::new(crate::knowledge::Index::scan(path)),
+            )));
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
@@ -1799,7 +1818,56 @@ impl Workspace {
                 }
             }
         }
+        self.rewrite_knowledge_links(old, new, cx);
         cx.notify();
+    }
+
+    /// Milestone-2 half of a rename/move: every note pointing at the
+    /// moved path gets its links rewritten, on disk and in open tabs.
+    fn rewrite_knowledge_links(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
+            return;
+        };
+        // Disk is the rewrite source: flush dirty buffers first.
+        for tab in &self.tabs {
+            if let Tab::Editor { editor, .. } = tab {
+                if editor.read(cx).save.is_dirty() {
+                    editor.update(cx, |editor, cx| editor.flush(cx));
+                }
+            }
+        }
+        let mut index = state.0.lock().unwrap();
+        // A moved folder renames every note under it.
+        let moved: Vec<(PathBuf, PathBuf)> = if new.is_dir() {
+            index
+                .note_names()
+                .iter()
+                .filter_map(|(_, p)| {
+                    // Note paths are still keyed under `old` here.
+                    crate::fileops::retarget(p, old, new).map(|to| (p.clone(), to))
+                })
+                .collect()
+        } else {
+            vec![(old.to_path_buf(), new.to_path_buf())]
+        };
+        let mut changed: Vec<(PathBuf, String)> = Vec::new();
+        for (from, to) in moved {
+            changed.extend(index.rename_note(&from, &to, |p| std::fs::read_to_string(p).ok()));
+        }
+        drop(index);
+        for (path, text) in changed {
+            if let Err(err) = std::fs::write(&path, &text) {
+                eprintln!("supermd: cannot rewrite links in {}: {err}", path.display());
+                continue;
+            }
+            for tab in &self.tabs {
+                if let Tab::Editor { editor, .. } = tab {
+                    if editor.read(cx).path() == path {
+                        editor.update(cx, |editor, cx| editor.reload_from_disk(cx));
+                    }
+                }
+            }
+        }
     }
 
     fn sidebar_delete(&mut self, _: &SidebarDelete, window: &mut Window, cx: &mut Context<Self>) {
@@ -3675,6 +3743,56 @@ mod tests {
                 .unwrap_or_else(|| panic!("row {name:?} not found"));
             ws.sidebar_selected = ix;
             cx.notify();
+        });
+    }
+
+    #[gpui::test]
+    fn rename_rewrites_links_in_other_notes(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Roadmap.md"), "The plan.\n").unwrap();
+        std::fs::write(root.path().join("Ideas.md"), "See [[Roadmap]] often.\n").unwrap();
+        std::fs::write(
+            root.path().join("Log.md"),
+            "Daily [note](Roadmap.md) link.\n",
+        )
+        .unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        select_sidebar_row(&ws, cx, "Roadmap.md");
+        cx.dispatch_action(SidebarRename);
+        cx.run_until_parked();
+        cx.simulate_input("Vision");
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+
+        let ideas = std::fs::read_to_string(root.path().join("Ideas.md")).unwrap();
+        assert_eq!(ideas, "See [[Vision]] often.\n");
+        let log = std::fs::read_to_string(root.path().join("Log.md")).unwrap();
+        assert_eq!(log, "Daily [note](Vision.md) link.\n");
+    }
+
+    #[gpui::test]
+    fn knowledge_index_tracks_saves_through_the_watcher(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        std::fs::write(root.path().join("B.md"), "plain\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let b = root.path().join("B.md");
+        std::fs::write(&b, "now links [[A]]\n").unwrap();
+        // Deterministic: feed the drain loop's callback directly.
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&b), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let state = app.global::<crate::knowledge::KnowledgeState>();
+            let index = state.0.lock().unwrap();
+            let back = index.backlinks(&root.path().join("A.md"));
+            assert!(
+                back.iter().any(|(p, _)| p.ends_with("B.md")),
+                "index saw the save"
+            );
         });
     }
 

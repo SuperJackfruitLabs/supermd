@@ -32,6 +32,11 @@ pub struct Index {
     notes: BTreeMap<PathBuf, NoteData>,
 }
 
+/// The workspace's shared index. Absent until a folder is open.
+#[derive(Clone)]
+pub struct KnowledgeState(pub std::sync::Arc<std::sync::Mutex<Index>>);
+impl gpui::Global for KnowledgeState {}
+
 /// Extract wiki + markdown links. Fenced code blocks and inline code
 /// are skipped; `[[Target|label]]` yields `Target`; only relative
 /// `.md` targets count for standard links.
