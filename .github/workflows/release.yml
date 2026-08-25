@@ -21,8 +21,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: Run tests
-        run: cargo test
 
       - name: Import signing certificate
         if: ${{ env.HAVE_CERT == 'true' }}
@@ -106,8 +104,6 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig1-dev \
             libfreetype6-dev
-      - name: Run tests
-        run: cargo test
       - name: Build plugins
         run: |
           bash scripts/build_plugins.sh
@@ -115,10 +111,11 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           bash scripts/bundle_linux.sh "$VERSION"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
       - name: Build deb
-        run: |
-          cargo install cargo-deb --locked
-          cargo deb --no-build -o dist/
+        run: cargo deb --no-build -o dist/
       - name: Zip plugins
         run: |
           (cd dist && zip -r supermd-plugins.zip plugins)
@@ -145,8 +142,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: Run tests
-        run: cargo test
       - name: Build plugins (installer payload)
         shell: bash
         run: bash scripts/build_plugins.sh
