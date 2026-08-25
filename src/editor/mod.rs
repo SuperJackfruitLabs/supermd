@@ -44,7 +44,8 @@ actions!(
         MoveWordLeft, MoveWordRight, SelectWordLeft, SelectWordRight, LineStart, LineEnd,
         SelectLineStart, SelectLineEnd, DocStart, DocEnd, PageUp, PageDown, Backspace, Delete,
         DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow,
-        OpenFind, FindNext, FindPrev, CloseFind
+        OpenFind, FindNext, FindPrev, CloseFind, ToggleBold, ToggleItalic, ToggleCode,
+        ToggleStrike, InsertLink, CycleHeading, ToggleQuote
     ]
 );
 
@@ -888,6 +889,85 @@ impl Editor {
         if self.core.redo() {
             self.after_edit(cx);
         }
+    }
+
+    // ── formatting toggles (floating toolbar + ⌘B/⌘I) ──
+
+    /// Formatting only makes sense on an editable markdown buffer.
+    fn can_format(&self) -> bool {
+        matches!(self.provider, Provider::Markdown) && self.diff.is_none()
+    }
+
+    /// Apply a formatting edit as its own undo group and keep the
+    /// content selected so toggles can repeat.
+    fn apply_fmt(&mut self, edit: formatting::FmtEdit, cx: &mut Context<Self>) {
+        self.core.break_undo_group();
+        self.core
+            .replace_range(edit.range, &edit.replacement, Instant::now());
+        self.core.selection = Selection { anchor: edit.select.start, head: edit.select.end };
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    fn inline_fmt(&mut self, marker: &str, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let text = self.core.buffer.text();
+        self.apply_fmt(
+            formatting::toggle_inline(&text, self.core.selection.range(), marker),
+            cx,
+        );
+    }
+
+    fn toggle_bold(&mut self, _: &ToggleBold, _: &mut Window, cx: &mut Context<Self>) {
+        // Cursor-only ⌘B falls through to the app's next binding
+        // (sidebar toggle) — bold needs a selection.
+        if self.core.selection.is_cursor() {
+            cx.propagate();
+            return;
+        }
+        self.inline_fmt("**", cx);
+    }
+
+    fn toggle_italic(&mut self, _: &ToggleItalic, _: &mut Window, cx: &mut Context<Self>) {
+        self.inline_fmt("*", cx);
+    }
+
+    fn toggle_code(&mut self, _: &ToggleCode, _: &mut Window, cx: &mut Context<Self>) {
+        self.inline_fmt("`", cx);
+    }
+
+    fn toggle_strike(&mut self, _: &ToggleStrike, _: &mut Window, cx: &mut Context<Self>) {
+        self.inline_fmt("~~", cx);
+    }
+
+    fn insert_link(&mut self, _: &InsertLink, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let text = self.core.buffer.text();
+        self.apply_fmt(formatting::toggle_link(&text, self.core.selection.range()), cx);
+    }
+
+    fn cycle_heading(&mut self, _: &CycleHeading, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let text = self.core.buffer.text();
+        self.apply_fmt(formatting::cycle_heading(&text, self.core.selection.range()), cx);
+    }
+
+    fn toggle_quote(&mut self, _: &ToggleQuote, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let text = self.core.buffer.text();
+        self.apply_fmt(formatting::toggle_quote(&text, self.core.selection.range()), cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -2372,6 +2452,13 @@ impl Render for Editor {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::toggle_bold))
+            .on_action(cx.listener(Self::toggle_italic))
+            .on_action(cx.listener(Self::toggle_code))
+            .on_action(cx.listener(Self::toggle_strike))
+            .on_action(cx.listener(Self::insert_link))
+            .on_action(cx.listener(Self::cycle_heading))
+            .on_action(cx.listener(Self::toggle_quote))
             .on_action(cx.listener(Self::save_now))
             .on_action(cx.listener(Self::open_find))
             .on_action(cx.listener(Self::find_next))
@@ -2884,6 +2971,79 @@ mod tests {
         assert_eq!(buffer_text(&editor, cx), "hi\n");
         cx.simulate_keystrokes("backspace backspace");
         assert_eq!(buffer_text(&editor, cx), "h");
+    }
+
+    fn select(editor: &Entity<Editor>, cx: &mut VisualTestContext, range: Range<usize>) {
+        editor.update_in(cx, |editor, _, cx| {
+            editor.core.set_cursor(range.start);
+            editor.core.select_to(range.end);
+            cx.notify();
+        });
+    }
+
+    #[gpui::test]
+    fn bold_toggles_round_trip_and_undo_as_one_group(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "fmt.md", "say hello now");
+        select(&editor, cx, 4..9);
+        cx.dispatch_action(ToggleBold);
+        assert_eq!(buffer_text(&editor, cx), "say **hello** now");
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), 6..11, "word stays selected");
+        });
+        cx.dispatch_action(ToggleBold);
+        assert_eq!(buffer_text(&editor, cx), "say hello now");
+        cx.dispatch_action(Undo);
+        assert_eq!(buffer_text(&editor, cx), "say **hello** now", "one group per toggle");
+        cx.dispatch_action(Undo);
+        assert_eq!(buffer_text(&editor, cx), "say hello now");
+    }
+
+    #[gpui::test]
+    fn every_toolbar_action_edits_the_document(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "fmt.md", "alpha beta");
+        let cases: Vec<(Box<dyn Fn(&mut VisualTestContext)>, &str)> = vec![
+            (Box::new(|cx| cx.dispatch_action(ToggleItalic)), "*alpha* beta"),
+            (Box::new(|cx| cx.dispatch_action(ToggleCode)), "`alpha` beta"),
+            (Box::new(|cx| cx.dispatch_action(ToggleStrike)), "~~alpha~~ beta"),
+            (Box::new(|cx| cx.dispatch_action(InsertLink)), "[alpha](url) beta"),
+            (Box::new(|cx| cx.dispatch_action(CycleHeading)), "# alpha beta"),
+            (Box::new(|cx| cx.dispatch_action(ToggleQuote)), "> alpha beta"),
+        ];
+        for (fire, expect) in cases {
+            select(&editor, cx, 0..5);
+            fire(cx);
+            assert_eq!(buffer_text(&editor, cx), expect);
+            cx.dispatch_action(Undo);
+            assert_eq!(buffer_text(&editor, cx), "alpha beta");
+        }
+    }
+
+    #[gpui::test]
+    fn bold_needs_a_selection_and_falls_through_to_the_next_binding(cx: &mut TestAppContext) {
+        // Newline stands in for the app's global cmd-b (sidebar toggle):
+        // with no selection the keystroke must reach the next binding.
+        let (_fx, editor, cx) = open_editor(cx, "fmt.md", "hello");
+        cx.update(|_, app| {
+            app.bind_keys([
+                KeyBinding::new("cmd-b", Newline, None),
+                KeyBinding::new("cmd-b", ToggleBold, Some("Editor")),
+            ]);
+        });
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(buffer_text(&editor, cx), "\nhello", "cursor-only cmd-b fell through");
+        select(&editor, cx, 1..6);
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(buffer_text(&editor, cx), "\n**hello**", "selection cmd-b bolds");
+    }
+
+    #[gpui::test]
+    fn formatting_is_inert_outside_markdown(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "code.rs", "let x = 1;");
+        select(&editor, cx, 0..3);
+        cx.dispatch_action(ToggleBold);
+        cx.dispatch_action(CycleHeading);
+        cx.dispatch_action(ToggleQuote);
+        assert_eq!(buffer_text(&editor, cx), "let x = 1;");
     }
 
     #[gpui::test]
