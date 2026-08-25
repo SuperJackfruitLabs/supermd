@@ -37,6 +37,7 @@ actions!(
         ShowChanges,
         ToggleFocusMode,
         FocusSidebar,
+        ToggleKnowledge,
         SidebarUp,
         SidebarDown,
         SidebarRename,
@@ -241,6 +242,8 @@ pub struct Workspace {
     active: usize,
     show_sidebar: bool,
     show_outline: bool,
+    /// Right-hand knowledge panel (backlinks, tags).
+    show_knowledge: bool,
     focus_mode: bool,
     pre_focus_panels: (bool, bool),
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
@@ -273,6 +276,8 @@ pub struct Workspace {
     last_title: String,
     /// Absolute paths of files with uncommitted git changes (sidebar dots).
     git_modified: std::collections::HashSet<PathBuf>,
+    /// Followed links waiting for a window to open them in.
+    pending_link_opens: Vec<PathBuf>,
     /// Inline rename / create in progress in the sidebar.
     sidebar_edit: Option<SidebarEdit>,
     /// "Move to…" folder picker (a Palette over workspace folders).
@@ -305,6 +310,11 @@ fn make_editor(
     cx.subscribe(&editor, |this, _editor, event, cx| match event {
         EditorEvent::ConsentNeeded { plugin, cap } => {
             this.consent_request = Some((plugin.clone(), cap.clone()));
+            cx.notify();
+        }
+        // No window here; render drains the queue with one in hand.
+        EditorEvent::OpenPath(path) => {
+            this.pending_link_opens.push(path.clone());
             cx.notify();
         }
     })
@@ -359,6 +369,7 @@ impl Workspace {
             active: 0,
             show_sidebar: true,
             show_outline: true,
+            show_knowledge: false,
             focus_mode: false,
             pre_focus_panels: (true, true),
             finder: None,
@@ -383,6 +394,7 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
+            pending_link_opens: Vec::new(),
             sidebar_edit: None,
             move_picker: None,
             shortcuts_focus: cx.focus_handle(),
@@ -1056,6 +1068,22 @@ impl Workspace {
         window.focus(&overlay.focus_handle(cx));
         self.search = Some((overlay, subscription));
         cx.notify();
+    }
+
+    /// Open the workspace search pre-seeded with `#tag`.
+    fn open_tag_search(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            self.toggle_search(&ToggleSearch, window, cx);
+        }
+        if let Some((overlay, _)) = &self.search {
+            let query = format!("#{tag}");
+            let input = overlay.read(cx).input.clone();
+            input.update(cx, |input, cx| {
+                let end = query.len();
+                input.seed(query, end..end);
+                cx.notify();
+            });
+        }
     }
 
     fn dismiss_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2912,6 +2940,127 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn toggle_knowledge(&mut self, _: &ToggleKnowledge, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_knowledge = !self.show_knowledge;
+        cx.notify();
+    }
+
+    /// Backlinks of the active tab's file, from the knowledge index.
+    fn active_backlinks(&self, cx: &App) -> Vec<(PathBuf, Vec<String>)> {
+        let Some(path) = self.tabs.get(self.active).and_then(|t| t.path(cx)) else {
+            return Vec::new();
+        };
+        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
+            return Vec::new();
+        };
+        let index = state.0.lock().unwrap();
+        index.backlinks(&path)
+    }
+
+    /// All workspace tags with counts, for the knowledge panel.
+    fn all_tags(&self, cx: &App) -> Vec<(String, usize)> {
+        cx.try_global::<crate::knowledge::KnowledgeState>()
+            .map(|state| state.0.lock().unwrap().tags())
+            .unwrap_or_default()
+    }
+
+    fn render_knowledge(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.show_knowledge {
+            return None;
+        }
+        let t = theme(cx);
+        let backlinks = self.active_backlinks(cx);
+        let tags = self.all_tags(cx);
+
+        let section = |title: &'static str| {
+            div()
+                .px_3()
+                .pt_3()
+                .pb_1()
+                .text_size(px(11.))
+                .text_color(t.fg_muted)
+                .child(title)
+        };
+        let mut panel = div()
+            .w(px(240.))
+            .h_full()
+            .flex_none()
+            .bg(t.panel_bg)
+            .border_l_1()
+            .border_color(t.border)
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(section("BACKLINKS"));
+        if backlinks.is_empty() {
+            panel = panel.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(t.ui_size - 1.))
+                    .text_color(t.fg_muted)
+                    .child("Nothing links here yet"),
+            );
+        }
+        for (ix, (path, contexts)) in backlinks.into_iter().enumerate() {
+            let name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let context = contexts.first().cloned().unwrap_or_default();
+            panel = panel.child(
+                div()
+                    .id(("backlink", ix))
+                    .px_3()
+                    .py(px(4.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover_bg))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg_strong)
+                            .child(SharedString::from(name)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(t.ui_size - 2.))
+                            .text_color(t.fg_muted)
+                            .overflow_hidden()
+                            .truncate()
+                            .child(SharedString::from(context)),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_path(&path.clone(), window, cx);
+                    })),
+            );
+        }
+        if !tags.is_empty() {
+            panel = panel.child(section("TAGS"));
+            let mut wrap = div().px_3().py_1().flex().flex_row().flex_wrap().gap_1();
+            for (ix, (tag, count)) in tags.into_iter().enumerate() {
+                wrap = wrap.child(
+                    div()
+                        .id(("tag", ix))
+                        .px_2()
+                        .py(px(2.))
+                        .rounded_md()
+                        .bg(t.hover_bg)
+                        .cursor_pointer()
+                        .text_size(px(t.ui_size - 2.))
+                        .text_color(t.fg)
+                        .child(SharedString::from(format!("#{tag} {count}")))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_tag_search(&tag.clone(), window, cx);
+                        })),
+                );
+            }
+            panel = panel.child(wrap);
+        }
+        Some(panel.into_any_element())
+    }
+
     fn render_outline(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_outline {
             return None;
@@ -3056,6 +3205,10 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_title(window, cx);
+        // Followed links queued by editors (which have no window).
+        for path in std::mem::take(&mut self.pending_link_opens) {
+            self.open_path(&path, window, cx);
+        }
         // Editing a previewed buffer pins its tab.
         if let Some(ix) = self.preview_tab {
             if let Some(Tab::Editor { editor, .. }) = self.tabs.get(ix) {
@@ -3068,6 +3221,7 @@ impl Render for Workspace {
         let sidebar = self.render_sidebar(cx);
         let titlebar = self.render_titlebar(window, cx);
         let outline = self.render_outline(cx);
+        let knowledge = self.render_knowledge(cx);
         let content: AnyElement = match self.tabs.get(self.active) {
             Some(Tab::Reader(reader)) => reader.clone().into_any_element(),
             Some(Tab::Editor { view: EditorView::Preview(preview), .. }) => {
@@ -3114,6 +3268,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_outline))
+            .on_action(cx.listener(Self::toggle_knowledge))
             .on_action(cx.listener(Self::toggle_finder))
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(Self::toggle_palette))
@@ -3235,7 +3390,8 @@ impl Render for Workspace {
                                     .flex_col()
                                     .child(div().flex_1().min_h_0().child(content)),
                             )
-                            .children(outline),
+                            .children(outline)
+                            .children(knowledge),
                     ),
             )
             .children(self.render_shortcuts(cx))
@@ -3793,6 +3949,39 @@ mod tests {
                 back.iter().any(|(p, _)| p.ends_with("B.md")),
                 "index saw the save"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn knowledge_panel_lists_backlinks_of_the_active_note(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Roadmap.md"), "the plan\n").unwrap();
+        std::fs::write(root.path().join("Ideas.md"), "see [[Roadmap]] here\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path(&root.path().join("Roadmap.md"), window, cx)
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| assert!(!ws.read(app).show_knowledge, "off by default"));
+        cx.dispatch_action(ToggleKnowledge);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.show_knowledge);
+            let back = w.active_backlinks(app);
+            assert_eq!(back.len(), 1);
+            assert!(back[0].0.ends_with("Ideas.md"));
+            assert!(back[0].1[0].contains("see [[Roadmap]]"));
+        });
+        // The panel follows the active tab: a file nobody links to.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path(&root.path().join("Ideas.md"), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(ws.read(app).active_backlinks(app).is_empty());
         });
     }
 

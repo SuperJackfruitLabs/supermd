@@ -161,6 +161,7 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("cmd-shift-["), PrevTab, None),
             KeyBinding::new(&platform::keybinding("cmd-b"), ToggleSidebar, None),
             KeyBinding::new(&platform::keybinding("cmd-shift-o"), ToggleOutline, None),
+            KeyBinding::new(&platform::keybinding("cmd-shift-k"), workspace::ToggleKnowledge, None),
             KeyBinding::new(&platform::keybinding("cmd-p"), ToggleFinder, None),
             KeyBinding::new(&platform::keybinding("cmd-e"), TogglePreview, None),
             KeyBinding::new(&platform::keybinding("cmd-shift-d"), workspace::ShowChanges, None),
@@ -260,6 +261,8 @@ fn app_keybindings() -> Vec<KeyBinding> {
             // cursor-only press so ToggleSidebar still fires.
             KeyBinding::new(&platform::keybinding("cmd-b"), editor::ToggleBold, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-i"), editor::ToggleItalic, Some("Editor")),
+            KeyBinding::new(&platform::keybinding("cmd-enter"), editor::FollowLink, Some("Editor")),
+            KeyBinding::new(&platform::keybinding("escape"), editor::DismissCompletion, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-s"), editor::SaveNow, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-f"), editor::OpenFind, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-g"), editor::FindNext, Some("Editor")),
@@ -607,7 +610,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 116);
+        assert_eq!(bindings.len(), 119);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));
