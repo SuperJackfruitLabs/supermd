@@ -3986,6 +3986,29 @@ mod tests {
     }
 
     #[gpui::test]
+    fn tag_chips_surface_counts_and_seed_the_search(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "alpha #planning #q3\n").unwrap();
+        std::fs::write(root.path().join("B.md"), "beta #planning\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        cx.update(|_, app| {
+            let tags = ws.read(app).all_tags(app);
+            assert_eq!(tags[0], ("planning".to_string(), 2));
+            assert!(tags.contains(&("q3".to_string(), 1)));
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.open_tag_search("planning", window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ws = ws.read(app);
+            let (overlay, _) = ws.search.as_ref().expect("search overlay open");
+            assert_eq!(overlay.read(app).input.read(app).content.to_string(), "#planning");
+        });
+    }
+
+    #[gpui::test]
     fn sidebar_rename_updates_disk_and_open_tab(cx: &mut TestAppContext) {
         let _home = temp_home();
         let (root, a, _) = workspace_fixture();
