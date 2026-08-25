@@ -24,6 +24,19 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   elsewhere and reveal in place when you touch them: `**bold**`,
   headings, lists (`•`), quotes, links, task checkboxes (click to
   toggle).
+- **Notes that know each other** — type `[[` and complete to any note
+  in the workspace; follow links with ⌘-click (unresolved links create
+  the note); backlinks with context and `#tags` in the knowledge panel
+  (⌘⇧K); a native force-directed **graph view** of the whole
+  workspace. Renaming or moving a note rewrites every link pointing at
+  it — the graph never breaks. All computed from your plain files: no
+  database.
+- **Writing that keeps up** — select text and a floating toolbar
+  appears (bold, italic, code, strike, link, heading, quote — every
+  action a toggle, ⌘B/⌘I from the keyboard); lists continue on Enter
+  and indent with Tab; Tab hops table cells while the pipes align
+  themselves; paste an image and it lands in `assets/` with the link
+  inserted.
 - **Live blocks** — tables render as real tables and whole-line images
   render inline while you edit; touch them and they dissolve back into
   raw source. Code fences read as clean panels with tree-sitter
@@ -33,11 +46,13 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   to edit its source; click away and it's a picture again. All 35
   mermaid diagram families.
 - **A real workspace** — folder sidebar with Seti UI file icons
-  (gitignore-aware: no `node_modules`/`target` noise), tabs with
-  VS Code-style preview behavior (arrow through files in the sidebar,
-  pin with Enter or a double-click), outline panel, fuzzy file finder
-  (nucleo-scored with match highlighting), find in file, pretty
-  preview toggle, image viewer tabs, light/dark following the system.
+  (gitignore-aware: no `node_modules`/`target` noise) and full
+  keyboard file management (rename, create, move via fuzzy picker,
+  delete to trash — open tabs follow along), tabs with VS Code-style
+  preview behavior (arrow through files in the sidebar, pin with Enter
+  or a double-click), outline panel, fuzzy file finder (nucleo-scored
+  with match highlighting), find in file, pretty preview toggle, image
+  viewer tabs, light/dark following the system.
 - **Search in workspace** — ⌘⇧F streams ripgrep-powered results into a
   two-pane overlay: matches grouped by file, live preview centered on
   the hit, Enter jumps straight to the line.
@@ -54,16 +69,22 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
 - **Themes** — eight built-in (Jackfruit ×2, Paper, Graphite,
   Solarized ×2, Nord, Gruvbox Dark), live picker, custom themes as
   TOML files in `~/.supermd/themes/`. Your light and dark picks follow
-  the system appearance automatically.
-- **Extensible** — plugins are WebAssembly components dropped into
-  `~/.supermd/plugins/`: block renderers (` ```dot ` graphviz),
-  palette commands (⌘⇧P), inline renderers (`:tada:` → 🎉),
+  the system appearance automatically — and **flux** (opt-in) follows
+  the sun: crossfade to your dark theme at sunset and warm every color
+  toward candle-light, sunrise/sunset computed offline from the NOAA
+  solar equations. No location permission, no network.
+- **Extensible** — plugins are WebAssembly components: block renderers
+  (` ```dot ` graphviz, ` ```chart `), palette commands (⌘⇧P), inline
+  renderers (`:tada:` → 🎉, `{{2 km + 300 m}}` calculated in place),
   decoration rules (TODO highlighting needs zero code — just a
-  manifest), formatters, and paste processors (CSV → table).
-  Sandboxed hard: no filesystem without per-plugin consent, no
-  network, no processes; a hung plugin is cut off in 2 s. Author one
-  from `plugins/template/` in ~20 lines of Rust; five ship
-  first-party (dot, toc, emoji, tidy, todo-marks).
+  manifest), formatters, paste processors (CSV → table), exporters,
+  file viewers (CSV tables, Jupyter notebooks), status widgets,
+  templates, save hooks, and tree-sitter grammars. Sandboxed hard: no
+  filesystem or network without explicit per-plugin (and per-domain)
+  consent, no processes; a hung plugin is cut off in 2 s. Fourteen
+  ship first-party — eight pre-installed, the rest one **Install
+  Plugins…** away — and each doubles as a working example. Author your
+  own from `plugins/template/` in ~20 lines of Rust.
 - **Update aware** — a quiet launch-time check against GitHub releases
   shows an "update available" pill in the titlebar when a newer version
   ships; clicking opens the download page. Nothing phones home beyond
@@ -77,13 +98,14 @@ The editing core (buffer, selection, undo, styling spans, display
 transform, projection) is pure Rust under a test suite; the GPU shell
 stays thin.
 
-### The five shortcuts worth learning first
+### The six shortcuts worth learning first
 
 | Shortcut | Does |
 | -------- | ---- |
 | ⌘O | open a file or folder |
 | ⌘P | jump to any file by fuzzy name |
 | ⌘⇧F | search inside every file in the workspace |
+| ⌘⇧K | backlinks, tags, and the local graph for the open note |
 | ⌘⇧D | see what you've changed since your last git commit |
 | ⌘T | pick a theme |
 

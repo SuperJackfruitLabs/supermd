@@ -1,6 +1,6 @@
 # Getting Started
 
-SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Your files stay plain CommonMark on disk: no database, no proprietary format, no lock-in.
+SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Open a folder and your notes [know each other](knowledge.md): wiki links with completion, backlinks, tags, and a graph — all computed from your files. Which stay plain CommonMark on disk: no database, no proprietary format, no lock-in.
 
 ## Install
 

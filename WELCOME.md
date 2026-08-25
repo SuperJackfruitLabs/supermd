@@ -13,6 +13,19 @@ appear under your cursor; click away and they fold up again. That's
 how all of SuperMD works: clean typography until the moment you're
 editing the thing itself.
 
+Select a few words with the mouse and a small toolbar appears —
+bold, italic, code, and friends, each a single click. **⌘B** and
+**⌘I** work on selections too.
+
+## Link your notes
+
+Open a folder and type `[[` — every note in it is a completion away.
+**⌘-click** a link to follow it (linking to a note that doesn't exist
+yet creates it), and **⌘⇧K** shows what links *back* to the note
+you're reading, its `#tags`, and a live graph of the neighborhood.
+Rename a note and every link to it is rewritten. No database — just
+your Markdown files, indexed.
+
 ## Tables and code are live too
 
 | Try | This |
@@ -36,11 +49,12 @@ flowchart LR
     see --> ship[Ship plain .md]
 ```
 
-## The five shortcuts worth learning first
+## The six shortcuts worth learning first
 
 - **⌘O** — open a file or folder
 - **⌘P** — jump to any file by fuzzy name
 - **⌘⇧F** — search inside every file in the workspace
+- **⌘⇧K** — backlinks, tags, and the graph for the open note
 - **⌘⇧D** — see what you've changed since your last git commit
 - **⌘T** — pick a theme (your light/dark choices follow the system)
 
