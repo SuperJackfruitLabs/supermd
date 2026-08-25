@@ -47,7 +47,7 @@ actions!(
         SelectLineStart, SelectLineEnd, DocStart, DocEnd, PageUp, PageDown, Backspace, Delete,
         DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow,
         OpenFind, FindNext, FindPrev, CloseFind, ToggleBold, ToggleItalic, ToggleCode,
-        ToggleStrike, InsertLink, CycleHeading, ToggleQuote
+        ToggleStrike, InsertLink, CycleHeading, ToggleQuote, Outdent
     ]
 );
 
@@ -879,13 +879,75 @@ impl Editor {
         if self.is_code_mode() {
             self.core.insert_newline_auto_indent(Instant::now());
             self.after_edit(cx);
-        } else {
-            self.insert_str("\n", cx);
+            return;
         }
+        if self.core.selection.is_cursor() {
+            let head = self.core.selection.head;
+            let line_ix = self.core.buffer.line_of_byte(head);
+            let line_start = self.core.buffer.line_range(line_ix).start;
+            if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
+                if item.content_empty {
+                    // Enter on a bare marker ends the list instead of
+                    // spawning another empty item.
+                    self.core.replace_range(
+                        line_start..line_start + item.indent + item.marker_len,
+                        "",
+                        Instant::now(),
+                    );
+                    self.core.break_undo_group();
+                    self.after_edit(cx);
+                    return;
+                }
+                let line = self.core.buffer.line_text(line_ix);
+                let indent = &line[..item.indent];
+                self.insert_str(&format!("\n{indent}{}", item.next_marker), cx);
+                return;
+            }
+        }
+        self.insert_str("\n", cx);
     }
 
     fn insert_tab(&mut self, _: &InsertTab, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_code_mode() && self.core.selection.is_cursor() {
+            let line_ix = self.core.buffer.line_of_byte(self.core.selection.head);
+            if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
+                self.reindent_line(line_ix, item.indent_step as isize, cx);
+                return;
+            }
+        }
         self.insert_str("\t", cx);
+    }
+
+    fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_code_mode() && self.core.selection.is_cursor() {
+            let line_ix = self.core.buffer.line_of_byte(self.core.selection.head);
+            if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
+                let step = (item.indent_step.min(item.indent)) as isize;
+                if step > 0 {
+                    self.reindent_line(line_ix, -step, cx);
+                }
+            }
+        }
+    }
+
+    /// Add (or remove, when negative) leading spaces on a line while
+    /// keeping the cursor over the same character.
+    fn reindent_line(&mut self, line_ix: usize, delta: isize, cx: &mut Context<Self>) {
+        let line_start = self.core.buffer.line_range(line_ix).start;
+        let saved = self.core.selection;
+        if delta >= 0 {
+            self.core
+                .replace_range(line_start..line_start, &" ".repeat(delta as usize), Instant::now());
+        } else {
+            self.core
+                .replace_range(line_start..line_start + (-delta) as usize, "", Instant::now());
+        }
+        self.core.break_undo_group();
+        let shift = |offset: usize| {
+            (offset as isize + delta).max(line_start as isize) as usize
+        };
+        self.core.selection = Selection { anchor: shift(saved.anchor), head: shift(saved.head) };
+        self.after_edit(cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -2575,6 +2637,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::delete_word_left))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::insert_tab))
+            .on_action(cx.listener(Self::outdent))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::select_all))
@@ -3644,6 +3707,65 @@ mod tests {
             );
         });
         cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::shift());
+    }
+
+    #[gpui::test]
+    fn enter_continues_lists_and_empty_items_end_them(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "list.md", "- milk");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "- milk\n- ");
+        cx.simulate_input("eggs");
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "- milk\n- eggs\n- ");
+        // Enter on the empty item removes the marker and ends the list.
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "- milk\n- eggs\n");
+
+        // Numbers increment; tasks continue unchecked; indent carries.
+        let (_fx2, editor, cx) = open_editor(cx, "more.md", "  3. three");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "  3. three\n  4. ");
+        let (_fx3, editor, cx) = open_editor(cx, "task.md", "- [x] done");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "- [x] done\n- [ ] ");
+    }
+
+    #[gpui::test]
+    fn enter_off_lists_and_in_code_keeps_old_behavior(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "plain.md", "hello");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "hello\n");
+        // Code mode still auto-indents instead of continuing lists.
+        let (_fx2, editor, cx) = open_editor(cx, "code.rs", "    - x");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "    - x\n    ");
+    }
+
+    #[gpui::test]
+    fn tab_indents_list_items_and_shift_tab_outdents(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "list.md", "- a\n- bike");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), "- a\n  - bike");
+        assert_eq!(head(&editor, cx), 12, "cursor rides the shifted line");
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), "- a\n    - bike");
+        cx.dispatch_action(Outdent);
+        cx.dispatch_action(Outdent);
+        assert_eq!(buffer_text(&editor, cx), "- a\n- bike");
+        cx.dispatch_action(Outdent);
+        assert_eq!(buffer_text(&editor, cx), "- a\n- bike", "flat items stay put");
+
+        // Outside a list, Tab still types a literal tab.
+        let (_fx2, editor, cx) = open_editor(cx, "plain.md", "text");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), "text\t");
     }
 
     #[gpui::test]
