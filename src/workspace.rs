@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, uniform_list, AnyElement, App, ClickEvent, Entity, FocusHandle, Focusable,
-    IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Window,
+    actions, div, point, px, uniform_list, AnyElement, App, ClickEvent, Entity, FocusHandle,
+    Focusable, Hsla, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    PathPromptOptions, Render, SharedString, Styled, Window,
 };
 
 use crate::editor::Editor;
@@ -38,6 +39,7 @@ actions!(
         ToggleFocusMode,
         FocusSidebar,
         ToggleKnowledge,
+        GraphDismiss,
         SidebarUp,
         SidebarDown,
         SidebarRename,
@@ -278,6 +280,9 @@ pub struct Workspace {
     git_modified: std::collections::HashSet<PathBuf>,
     /// Followed links waiting for a window to open them in.
     pending_link_opens: Vec<PathBuf>,
+    /// Full-workspace graph overlay.
+    graph: Option<GraphViewState>,
+    graph_focus: FocusHandle,
     /// Inline rename / create in progress in the sidebar.
     sidebar_edit: Option<SidebarEdit>,
     /// "Move to…" folder picker (a Palette over workspace folders).
@@ -296,6 +301,16 @@ struct SidebarEdit {
     kind: SidebarEditKind,
     input: Entity<crate::input::TextInput>,
     error: Option<SharedString>,
+}
+
+/// The full-workspace graph: laid-out nodes plus view transform.
+struct GraphViewState {
+    nodes: Vec<crate::graph::GraphNode>,
+    edges: Vec<crate::graph::GraphEdge>,
+    pan: (f32, f32),
+    zoom: f32,
+    /// Last mouse position while panning.
+    drag: Option<(f32, f32)>,
 }
 
 /// Create an editor and subscribe the workspace to its events
@@ -395,6 +410,8 @@ impl Workspace {
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
             pending_link_opens: Vec::new(),
+            graph: None,
+            graph_focus: cx.focus_handle(),
             sidebar_edit: None,
             move_picker: None,
             shortcuts_focus: cx.focus_handle(),
@@ -1152,6 +1169,11 @@ impl Workspace {
         let mut entries = entries;
         entries.push(crate::palette::PaletteEntry {
             plugin: "supermd".into(),
+            id: "__graph".into(),
+            title: "Graph View".into(),
+        });
+        entries.push(crate::palette::PaletteEntry {
+            plugin: "supermd".into(),
             id: "__flux".into(),
             title: if cx.global::<crate::theme::ThemeState>().settings.flux.enabled {
                 "Flux: Disable Adaptive Theme".into()
@@ -1298,6 +1320,10 @@ impl Workspace {
     ) {
         if id == "__install" {
             self.open_install_overlay(window, cx);
+            return;
+        }
+        if id == "__graph" {
+            self.open_graph_view(window, cx);
             return;
         }
         if id == "__flux" {
@@ -2940,6 +2966,178 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// Build, lay out, and show the full-workspace graph.
+    fn open_graph_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
+            self.show_command_error("Open a folder to see its graph".to_string(), cx);
+            return;
+        };
+        let (mut nodes, edges) = {
+            let index = state.0.lock().unwrap();
+            crate::graph::build(&index)
+        };
+        crate::graph::layout(&mut nodes, &edges, 150);
+        self.graph = Some(GraphViewState { nodes, edges, pan: (0.0, 0.0), zoom: 1.0, drag: None });
+        window.focus(&self.graph_focus);
+        cx.notify();
+    }
+
+    fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
+        self.graph = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Open the note behind a graph node and close the overlay.
+    fn open_graph_node(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.graph.as_ref().and_then(|g| g.nodes.get(ix)).map(|n| n.path.clone())
+        else {
+            return;
+        };
+        self.graph = None;
+        self.open_path(&path, window, cx);
+    }
+
+    fn render_graph(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.graph.as_ref()?;
+        let t = theme(cx);
+        // World transform: unit square → an 900px board, panned/zoomed.
+        let base = 900.0 * state.zoom;
+        let (pan_x, pan_y) = state.pan;
+        let at = |n: &crate::graph::GraphNode| (pan_x + n.x * base + 60.0, pan_y + n.y * base + 60.0);
+
+        let edge_px: Vec<((f32, f32), (f32, f32))> = state
+            .edges
+            .iter()
+            .map(|&(a, b)| (at(&state.nodes[a]), at(&state.nodes[b])))
+            .collect();
+        let edge_color = Hsla { a: 0.35, ..t.fg_muted };
+        let edges_canvas = gpui::canvas(
+            move |bounds, _, _| bounds,
+            move |bounds, _, window, _| {
+                for (a, b) in &edge_px {
+                    let pa = point(bounds.origin.x + px(a.0), bounds.origin.y + px(a.1));
+                    let pb = point(bounds.origin.x + px(b.0), bounds.origin.y + px(b.1));
+                    window.paint_path(crate::graph::line_path(pa, pb, 1.5), edge_color);
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+
+        let mut board = div().absolute().inset_0().child(edges_canvas);
+        for (ix, node) in state.nodes.iter().enumerate() {
+            let (x, y) = at(node);
+            let r = (5.0 + (node.degree as f32).sqrt() * 3.0) * state.zoom.sqrt();
+            let name = node
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            board = board.child(
+                div()
+                    .id(("graph-node", ix))
+                    .absolute()
+                    .left(px(x - r))
+                    .top(px(y - r))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .size(px(r * 2.0))
+                            .rounded_full()
+                            .bg(if node.degree > 0 { t.accent } else { t.fg_muted })
+                            .hover(|s| s.bg(t.link)),
+                    )
+                    .child(
+                        div()
+                            .mt(px(2.))
+                            .text_size(px(11.))
+                            .text_color(t.fg)
+                            .child(SharedString::from(name)),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_graph_node(ix, window, cx);
+                    })),
+            );
+        }
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(t.bg)
+                .key_context("GraphView")
+                .track_focus(&self.graph_focus)
+                .on_action(cx.listener(Self::graph_dismiss))
+                .overflow_hidden()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        if let Some(graph) = &mut this.graph {
+                            graph.drag =
+                                Some((f32::from(event.position.x), f32::from(event.position.y)));
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    if let Some(graph) = &mut this.graph {
+                        if let Some((lx, ly)) = graph.drag {
+                            let (x, y) =
+                                (f32::from(event.position.x), f32::from(event.position.y));
+                            graph.pan.0 += x - lx;
+                            graph.pan.1 += y - ly;
+                            graph.drag = Some((x, y));
+                            cx.notify();
+                        }
+                    }
+                }))
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                        if let Some(graph) = &mut this.graph {
+                            graph.drag = None;
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    if let Some(graph) = &mut this.graph {
+                        let delta = match event.delta {
+                            gpui::ScrollDelta::Pixels(p) => f32::from(p.y),
+                            gpui::ScrollDelta::Lines(l) => l.y * 20.0,
+                        };
+                        graph.zoom = (graph.zoom * (1.0 + delta * 0.002)).clamp(0.3, 3.0);
+                        cx.notify();
+                    }
+                }))
+                .child(board)
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(40.))
+                        .left(px(16.))
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .items_center()
+                        .text_size(px(13.))
+                        .child(div().text_color(t.fg_strong).child("Workspace graph"))
+                        .child(
+                            div()
+                                .text_color(t.fg_muted)
+                                .child("drag to pan · scroll to zoom · esc to close"),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn toggle_knowledge(&mut self, _: &ToggleKnowledge, _: &mut Window, cx: &mut Context<Self>) {
         self.show_knowledge = !self.show_knowledge;
         cx.notify();
@@ -2990,8 +3188,92 @@ impl Workspace {
             .border_color(t.border)
             .flex()
             .flex_col()
-            .overflow_hidden()
-            .child(section("BACKLINKS"));
+            .overflow_hidden();
+
+        // Local graph: the active note and its one-hop neighborhood.
+        let local = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.path(cx))
+            .zip(cx.try_global::<crate::knowledge::KnowledgeState>())
+            .map(|(path, state)| crate::graph::local(&state.0.lock().unwrap(), &path))
+            .filter(|(nodes, _)| nodes.len() > 1);
+        if let Some((nodes, edges)) = local {
+            let (w, h) = (216.0f32, 140.0f32);
+            let at = |n: &crate::graph::GraphNode| (12.0 + n.x * w, n.y * h);
+            let edge_px: Vec<((f32, f32), (f32, f32))> = edges
+                .iter()
+                .map(|&(a, b)| (at(&nodes[a]), at(&nodes[b])))
+                .collect();
+            let edge_color = Hsla { a: 0.3, ..t.fg_muted };
+            let canvas_el = gpui::canvas(
+                move |bounds, _, _| bounds,
+                move |bounds, _, window, _| {
+                    for (a, b) in &edge_px {
+                        let pa = point(bounds.origin.x + px(a.0), bounds.origin.y + px(a.1));
+                        let pb = point(bounds.origin.x + px(b.0), bounds.origin.y + px(b.1));
+                        window.paint_path(crate::graph::line_path(pa, pb, 1.0), edge_color);
+                    }
+                },
+            )
+            .absolute()
+            .size_full();
+            let mut board = div().relative().h(px(h + 10.0)).w_full().child(canvas_el);
+            for (ix, node) in nodes.iter().enumerate() {
+                let (x, y) = at(node);
+                let r = if ix == 0 { 6.0 } else { 4.0 };
+                let name = node
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let path = node.path.clone();
+                board = board.child(
+                    div()
+                        .id(("local-node", ix))
+                        .absolute()
+                        .left(px(x - 30.0))
+                        .top(px(y - r))
+                        .w(px(60.))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .size(px(r * 2.0))
+                                .rounded_full()
+                                .bg(if ix == 0 { t.accent } else { t.fg_muted }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(t.fg_muted)
+                                .overflow_hidden()
+                                .truncate()
+                                .child(SharedString::from(name)),
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_path(&path.clone(), window, cx);
+                        })),
+                );
+            }
+            panel = panel.child(section("GRAPH")).child(board).child(
+                div()
+                    .id("open-graph")
+                    .px_3()
+                    .py(px(2.))
+                    .text_size(px(t.ui_size - 2.))
+                    .text_color(t.link)
+                    .cursor_pointer()
+                    .child("Open workspace graph →")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_graph_view(window, cx);
+                    })),
+            );
+        }
+
+        panel = panel.child(section("BACKLINKS"));
         if backlinks.is_empty() {
             panel = panel.child(
                 div()
@@ -3594,6 +3876,7 @@ impl Render for Workspace {
                         ),
                 )
             })
+            .children(self.render_graph(cx))
             .when_some(self.move_picker.as_ref(), |root, (picker, _)| {
                 let picker = picker.clone();
                 root.child(
@@ -4006,6 +4289,45 @@ mod tests {
             let (overlay, _) = ws.search.as_ref().expect("search overlay open");
             assert_eq!(overlay.read(app).input.read(app).content.to_string(), "#planning");
         });
+    }
+
+    #[gpui::test]
+    fn graph_view_opens_navigates_and_dismisses(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Hub.md"), "to [[SpokeA]] and [[SpokeB]]\n").unwrap();
+        std::fs::write(root.path().join("SpokeA.md"), "back [[Hub]]\n").unwrap();
+        std::fs::write(root.path().join("SpokeB.md"), "quiet\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("supermd".into(), "__graph".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let state = ws.read(app).graph.as_ref().expect("graph open");
+            assert_eq!(state.nodes.len(), 3);
+            assert_eq!(state.edges.len(), 2);
+        });
+
+        // Clicking a node opens its note and closes the graph.
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.graph.is_none(), "closed after navigation");
+            assert!(w.tabs.iter().any(|t| {
+                t.path(app).is_some_and(|p| p.extension().is_some_and(|e| e == "md"))
+            }));
+        });
+
+        // Esc path: reopen, dismiss.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("supermd".into(), "__graph".into(), window, cx)
+        });
+        cx.dispatch_action(GraphDismiss);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).graph.is_none()));
     }
 
     #[gpui::test]

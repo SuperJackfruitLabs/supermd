@@ -349,6 +349,21 @@ impl Index {
         changed
     }
 
+    /// Every resolved (source, target) link pair in the workspace.
+    pub fn edges(&self) -> Vec<(PathBuf, PathBuf)> {
+        let mut out = Vec::new();
+        for (path, data) in &self.notes {
+            for link in &data.links {
+                if let Some(target) = self.resolve(path, link) {
+                    if &target != path {
+                        out.push((path.clone(), target));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The link (if any) whose range contains `offset` in `text`.
     pub fn link_at(text: &str, offset: usize) -> Option<RawLink> {
         extract_links(text)

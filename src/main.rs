@@ -10,6 +10,7 @@ mod fileops;
 mod flux;
 mod finder;
 mod git;
+mod graph;
 mod highlight;
 mod input;
 mod knowledge;
@@ -200,6 +201,7 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("cmd-shift-m"), workspace::SidebarMoveTo, Some("Sidebar")),
             KeyBinding::new(&platform::keybinding("enter"), workspace::SidebarEditCommit, Some("SidebarEdit")),
             KeyBinding::new(&platform::keybinding("escape"), workspace::SidebarEditCancel, Some("SidebarEdit")),
+            KeyBinding::new(&platform::keybinding("escape"), workspace::GraphDismiss, Some("GraphView")),
             // Sidebar navigation (while the sidebar is focused)
             KeyBinding::new(&platform::keybinding("up"), workspace::SidebarUp, Some("Sidebar")),
             KeyBinding::new(&platform::keybinding("down"), workspace::SidebarDown, Some("Sidebar")),
@@ -610,7 +612,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 119);
+        assert_eq!(bindings.len(), 120);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));
