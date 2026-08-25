@@ -90,6 +90,30 @@
       "capabilities": [],
       "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-graphql.zip",
       "sha256": "9298bcbb56f93565caeeed1d83a0a1fe848cdfccc13d3ac21b0944a15a3e6b06"
+    },
+    {
+      "name": "calc",
+      "description": "Calculations in prose: {{2 km + 300 m}} shows its result inline",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-calc.zip",
+      "sha256": "pending"
+    },
+    {
+      "name": "chart",
+      "description": "Bar and line charts from simple label: value fences",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-chart.zip",
+      "sha256": "pending"
+    },
+    {
+      "name": "ipynb-view",
+      "description": "Open Jupyter notebooks as rendered documents",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-ipynb-view.zip",
+      "sha256": "pending"
     }
   ]
 }

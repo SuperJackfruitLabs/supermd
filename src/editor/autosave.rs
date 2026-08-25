@@ -50,9 +50,77 @@ pub struct BackupRegistry {
     counter: u64,
 }
 
+/// Backups older than this are pruned at session start.
+const GC_MAX_AGE_SECS: u64 = 30 * 86_400;
+/// At most this many backup files are kept.
+const GC_MAX_FILES: usize = 200;
+
+/// Which backup files to delete: everything older than `max_age`,
+/// then the oldest beyond `max_files`. Entries are (name, stamp).
+pub fn plan_gc(
+    entries: &[(String, u64)],
+    now: u64,
+    max_files: usize,
+    max_age: u64,
+) -> Vec<String> {
+    let mut doomed: Vec<String> = Vec::new();
+    let mut survivors: Vec<(String, u64)> = Vec::new();
+    for (name, stamp) in entries {
+        if now.saturating_sub(*stamp) > max_age {
+            doomed.push(name.clone());
+        } else {
+            survivors.push((name.clone(), *stamp));
+        }
+    }
+    if survivors.len() > max_files {
+        survivors.sort_by_key(|(_, stamp)| *stamp); // oldest first
+        for (name, _) in survivors.iter().take(survivors.len() - max_files) {
+            doomed.push(name.clone());
+        }
+    }
+    doomed
+}
+
 impl BackupRegistry {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, seen: HashSet::new(), counter: 0 }
+        let registry = Self { dir, seen: HashSet::new(), counter: 0 };
+        registry.gc();
+        registry
+    }
+
+    /// Prune old backups once per session; failures are ignored (a GC
+    /// problem must never affect saving).
+    fn gc(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else { return };
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let listed: Vec<(String, u64)> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.to_string();
+                // Backup names start with the unix stamp; fall back to
+                // the file's mtime for anything else in the directory.
+                let stamp = name
+                    .split('-')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| {
+                        e.metadata()
+                            .ok()?
+                            .modified()
+                            .ok()?
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs())
+                    })?;
+                Some((name, stamp))
+            })
+            .collect();
+        for name in plan_gc(&listed, now, GC_MAX_FILES, GC_MAX_AGE_SECS) {
+            let _ = std::fs::remove_file(self.dir.join(name));
+        }
     }
 
     /// Default location: ~/.supermd/backups
@@ -81,6 +149,13 @@ impl BackupRegistry {
     fn copy_backup(&mut self, source: &Path) -> io::Result<Option<PathBuf>> {
         if !source.exists() {
             return Ok(None);
+        }
+        // Git already preserves committed content: when the file is
+        // byte-identical to HEAD, a backup adds nothing.
+        if let crate::git::Baseline::Text(head) = crate::git::head_text(source) {
+            if std::fs::read_to_string(source).map(|now| now == head).unwrap_or(false) {
+                return Ok(None);
+            }
         }
         std::fs::create_dir_all(&self.dir)?;
         let stamp = SystemTime::now()
@@ -279,5 +354,91 @@ mod tests {
 
         // missing file, expected mtime => no conflict (nothing to clobber)
         assert!(!has_conflict(mtime, Path::new("/nonexistent/y.md")));
+    }
+fn sh_git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn backup_skipped_when_git_head_has_identical_content() {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        let file = repo.path().join("notes.md");
+        std::fs::write(&file, "committed\n").unwrap();
+        sh_git(repo.path(), &["add", "-A"]);
+        sh_git(repo.path(), &["commit", "-qm", "c"]);
+
+        let backups = tempfile::tempdir().unwrap();
+        let mut registry = BackupRegistry::new(backups.path().to_path_buf());
+        // Content matches HEAD: git already preserves it, no copy.
+        assert!(registry.backup_if_needed(&file).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(backups.path()).unwrap().count(), 0);
+
+        // Dirty vs HEAD: a real backup is made (a fresh registry, since
+        // backup_if_needed is once-per-session per file).
+        std::fs::write(&file, "edited\n").unwrap();
+        let mut registry = BackupRegistry::new(backups.path().to_path_buf());
+        assert!(registry.backup_if_needed(&file).unwrap().is_some());
+        assert_eq!(std::fs::read_dir(backups.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn backup_still_made_outside_repos_and_for_untracked_files() {
+        let plain = tempfile::tempdir().unwrap();
+        let file = plain.path().join("free.md");
+        std::fs::write(&file, "text\n").unwrap();
+        let backups = tempfile::tempdir().unwrap();
+        let mut registry = BackupRegistry::new(backups.path().to_path_buf());
+        assert!(registry.backup_if_needed(&file).unwrap().is_some());
+    }
+
+    #[test]
+    fn gc_plan_prunes_by_age_and_count() {
+        let now = 100_000_000u64;
+        let day = 86_400u64;
+        // (name, stamp): two ancient, three recent
+        let entries = vec![
+            ("old-a".to_string(), now - 40 * day),
+            ("old-b".to_string(), now - 31 * day),
+            ("new-a".to_string(), now - day),
+            ("new-b".to_string(), now - 2 * day),
+            ("new-c".to_string(), now - 3 * day),
+        ];
+        // age rule alone
+        let doomed = plan_gc(&entries, now, 10, 30 * day);
+        assert_eq!(doomed, vec!["old-a".to_string(), "old-b".to_string()]);
+        // count rule: keep the 2 newest of the survivors
+        let doomed = plan_gc(&entries, now, 2, 30 * day);
+        assert!(doomed.contains(&"old-a".to_string()) && doomed.contains(&"old-b".to_string()));
+        assert!(doomed.contains(&"new-c".to_string()), "oldest survivor beyond cap");
+        assert_eq!(doomed.len(), 3);
+    }
+
+    #[test]
+    fn gc_runs_at_registry_creation() {
+        let backups = tempfile::tempdir().unwrap();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let old = now - 60 * 86_400;
+        std::fs::write(backups.path().join(format!("{old}-001-ancient.md")), "x").unwrap();
+        std::fs::write(backups.path().join(format!("{now}-002-fresh.md")), "y").unwrap();
+        let _registry = BackupRegistry::new(backups.path().to_path_buf());
+        let names: Vec<String> = std::fs::read_dir(backups.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(names[0].contains("fresh"));
     }
 }

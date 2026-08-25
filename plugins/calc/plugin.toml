@@ -1,0 +1,7 @@
+name = "calc"
+version = "0.1.0"
+description = "Calculations in prose: {{2 km + 300 m}} shows its result inline"
+
+[[inline]]
+id = "expr"
+pattern = "\\{\\{([^{}\\n]+)\\}\\}"

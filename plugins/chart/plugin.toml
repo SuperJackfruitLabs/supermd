@@ -1,0 +1,4 @@
+name = "chart"
+version = "0.1.0"
+description = "Bar and line charts from simple label: value fences"
+fences = ["chart"]

@@ -1,6 +1,6 @@
 # Plugins
 
-SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-installed, three more are one keystroke away, and anyone can [write their own](writing-plugins.md).
+SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-installed, and the rest are one keystroke away, and anyone can [write their own](writing-plugins.md).
 
 ## What plugins can add
 
@@ -31,6 +31,9 @@ SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-install
 | **csv-view** | Opens `.csv` / `.tsv` files as rendered tables; **⌘ E** switches to the raw text |
 | **daily-note** | *New: Daily Note* — creates (or reopens) `journal/<today>.md` in your workspace |
 | **graphql** | Syntax highlighting for ` ```graphql ` fences and `.graphql` / `.gql` files — a [grammar plugin](grammars.md) |
+| **calc** | Calculations in prose — `{{2 km + 300 m}}` shows its result inline, raw on touch |
+| **chart** | ` ```chart ` fences with `label: value` lines render as themed bar/line charts |
+| **ipynb-view** | Opens Jupyter notebooks (`.ipynb`) as rendered documents — code, outputs, and prose |
 
 These live in [`plugins/`](https://github.com/SuperJackfruitLabs/supermd/tree/master/plugins) in the repo — each one doubles as a working example for the surface it uses.
 

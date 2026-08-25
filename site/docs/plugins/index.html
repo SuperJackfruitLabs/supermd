@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Plugins — SuperMD Docs</title>
-<meta name="description" content="SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-installed, three more are one keystroke away, and anyone can write their own.">
+<meta name="description" content="SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-installed, and the rest are one keystroke away, and anyone can write their own.">
 <link rel="canonical" href="https://supermd.app/docs/plugins/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
@@ -141,7 +141,7 @@
 </aside>
 <main class="doc">
 <h1>Plugins</h1>
-<p>SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-installed, three more are one keystroke away, and anyone can <a href="/docs/writing-plugins/">write their own</a>.</p>
+<p>SuperMD is extensible with sandboxed WebAssembly plugins. Eight come pre-installed, and the rest are one keystroke away, and anyone can <a href="/docs/writing-plugins/">write their own</a>.</p>
 <h2>What plugins can add</h2>
 <ul>
 <li><strong>Rendered blocks</strong> — claim a fence language and draw it (the Graphviz plugin renders <code>```dot</code> fences).</li>
@@ -169,6 +169,9 @@
 <tr><td><strong>csv-view</strong></td><td>Opens <code>.csv</code> / <code>.tsv</code> files as rendered tables; <strong>⌘ E</strong> switches to the raw text</td></tr>
 <tr><td><strong>daily-note</strong></td><td><em>New: Daily Note</em> — creates (or reopens) <code>journal/&lt;today&gt;.md</code> in your workspace</td></tr>
 <tr><td><strong>graphql</strong></td><td>Syntax highlighting for <code>```graphql</code> fences and <code>.graphql</code> / <code>.gql</code> files — a <a href="/docs/grammars/">grammar plugin</a></td></tr>
+<tr><td><strong>calc</strong></td><td>Calculations in prose — <code>{{2 km + 300 m}}</code> shows its result inline, raw on touch</td></tr>
+<tr><td><strong>chart</strong></td><td><code>```chart</code> fences with <code>label: value</code> lines render as themed bar/line charts</td></tr>
+<tr><td><strong>ipynb-view</strong></td><td>Opens Jupyter notebooks (<code>.ipynb</code>) as rendered documents — code, outputs, and prose</td></tr>
 </tbody></table>
 <p>These live in <a href="https://github.com/SuperJackfruitLabs/supermd/tree/master/plugins"><code>plugins/</code></a> in the repo — each one doubles as a working example for the surface it uses.</p>
 <h2>Installing plugins</h2>
