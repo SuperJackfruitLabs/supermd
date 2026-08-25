@@ -6,6 +6,7 @@ mod diff;
 mod editor;
 mod extensions;
 mod files;
+mod fileops;
 mod flux;
 mod finder;
 mod git;
