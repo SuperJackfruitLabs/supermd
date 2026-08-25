@@ -12,6 +12,7 @@ mod finder;
 mod git;
 mod highlight;
 mod input;
+mod knowledge;
 mod install;
 mod install_ui;
 mod markdown;
