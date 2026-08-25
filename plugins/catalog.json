@@ -1,16 +1,95 @@
 {
   "catalog_version": 1,
   "plugins": [
-    { "name": "dot", "description": "Graphviz DOT diagrams as live blocks (pure Rust)", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-dot.zip", "sha256": "pending" },
-    { "name": "toc", "description": "Table of contents: insert, update, and auto-refresh on save", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-toc.zip", "sha256": "pending" },
-    { "name": "emoji", "description": "Emoji shortcodes rendered inline", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-emoji.zip", "sha256": "pending" },
-    { "name": "tidy", "description": "Smart punctuation formatter and CSV-paste-to-table", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-tidy.zip", "sha256": "pending" },
-    { "name": "todo-marks", "description": "Highlight TODO / FIXME / NOTE in prose", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-todo-marks.zip", "sha256": "pending" },
-    { "name": "url-title", "description": "Pasted links gain their page title (asks per-site consent)", "version": "0.1.0", "capabilities": ["net"], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-url-title.zip", "sha256": "pending" },
-    { "name": "html-export", "description": "Export the document as a self-contained themed HTML file", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-html-export.zip", "sha256": "pending" },
-    { "name": "word-count", "description": "Word count and reading time in the status strip", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-word-count.zip", "sha256": "pending" },
-    { "name": "csv-view", "description": "Open CSV/TSV files as rendered tables", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-csv-view.zip", "sha256": "pending" },
-    { "name": "daily-note", "description": "Create today's journal note from the palette", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-daily-note.zip", "sha256": "pending" },
-    { "name": "graphql", "description": "GraphQL syntax highlighting for fences and files", "version": "0.1.0", "capabilities": [], "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-graphql.zip", "sha256": "pending" }
+    {
+      "name": "dot",
+      "description": "Graphviz DOT diagrams as live blocks (pure Rust)",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-dot.zip",
+      "sha256": "0bdfde84a3888479bb76bc4cb9c0c920190d4e4a11bdeaaf7b29632e06621a52"
+    },
+    {
+      "name": "toc",
+      "description": "Table of contents: insert, update, and auto-refresh on save",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-toc.zip",
+      "sha256": "956c008273e0205759d34a7aba9e30f8eba120bdbd684ad750b4d357c281bd08"
+    },
+    {
+      "name": "emoji",
+      "description": "Emoji shortcodes rendered inline",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-emoji.zip",
+      "sha256": "d239d7926afe98832e67ccbc55269ef9b3d9fa70604578c232ab6b8380744d4b"
+    },
+    {
+      "name": "tidy",
+      "description": "Smart punctuation formatter and CSV-paste-to-table",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-tidy.zip",
+      "sha256": "303fb8dc7a32e3740741db30629092a73d96f97bacec6b7682abb388b4f3af26"
+    },
+    {
+      "name": "todo-marks",
+      "description": "Highlight TODO / FIXME / NOTE in prose",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-todo-marks.zip",
+      "sha256": "f4309d80b8b78ef2c86e367b152d56c384f967c764f82a90511245e7bf474324"
+    },
+    {
+      "name": "url-title",
+      "description": "Pasted links gain their page title (asks per-site consent)",
+      "version": "0.1.0",
+      "capabilities": [
+        "net"
+      ],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-url-title.zip",
+      "sha256": "f0c37115d0b0ea49ba5d250b8868e5a47b84e90e84c3ef94b0ec45058aba26af"
+    },
+    {
+      "name": "html-export",
+      "description": "Export the document as a self-contained themed HTML file",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-html-export.zip",
+      "sha256": "3d66ecc9013bb52d7362a5120836a3a406d41e226295c3529e8e4b2ed7f52cc9"
+    },
+    {
+      "name": "word-count",
+      "description": "Word count and reading time in the status strip",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-word-count.zip",
+      "sha256": "e545dedda0395b32a790be2a06510a813a710de3b0048d604846fcbbe423826e"
+    },
+    {
+      "name": "csv-view",
+      "description": "Open CSV/TSV files as rendered tables",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-csv-view.zip",
+      "sha256": "742c587c672d01eb2ddf54b2c57eb684b7ba63e6da1587758e9c2bb3f5514e31"
+    },
+    {
+      "name": "daily-note",
+      "description": "Create today's journal note from the palette",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-daily-note.zip",
+      "sha256": "7519c9c99decdda5f3e764f2ef200319a48caa1702546ec1d18093af6af33a35"
+    },
+    {
+      "name": "graphql",
+      "description": "GraphQL syntax highlighting for fences and files",
+      "version": "0.1.0",
+      "capabilities": [],
+      "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.9/plugin-graphql.zip",
+      "sha256": "9298bcbb56f93565caeeed1d83a0a1fe848cdfccc13d3ac21b0944a15a3e6b06"
+    }
   ]
 }
