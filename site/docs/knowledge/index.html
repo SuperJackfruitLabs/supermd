@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Grammar Plugins — SuperMD Docs</title>
-<meta name="description" content="Grammar plugins add syntax highlighting for new languages — in fenced code blocks and in standalone files — with no Rust code at all. A grammar plugin is three files:">
-<link rel="canonical" href="https://supermd.app/docs/grammars/">
+<title>Links, Tags & Graph — SuperMD Docs</title>
+<meta name="description" content="Open a folder and SuperMD quietly indexes every markdown file in it — links, backlinks, and tags, all computed locally and kept fresh as you type. Your files stay plain CommonMark on disk; the index is just a cache that rebuilds itself.">
+<link rel="canonical" href="https://supermd.app/docs/knowledge/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -128,7 +128,7 @@
 <li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
 <li><a href="/docs/diagrams/">Diagrams</a></li>
 <li><a href="/docs/workspace/">Working with a Folder</a></li>
-<li><a href="/docs/knowledge/">Links, Tags & Graph</a></li>
+<li class="current"><a href="/docs/knowledge/">Links, Tags & Graph</a></li>
 <li><a href="/docs/themes/">Themes</a></li>
 </ul>
 <h4>Extending SuperMD</h4>
@@ -136,42 +136,36 @@
 <li><a href="/docs/plugins/">Plugins</a></li>
 <li><a href="/docs/writing-plugins/">Writing a Plugin</a></li>
 <li><a href="/docs/capabilities/">Capabilities</a></li>
-<li class="current"><a href="/docs/grammars/">Grammar Plugins</a></li>
+<li><a href="/docs/grammars/">Grammar Plugins</a></li>
 </ul>
 
 </aside>
 <main class="doc">
-<h1>Grammar Plugins</h1>
-<p>Grammar plugins add syntax highlighting for new languages — in fenced code blocks and in standalone files — with <strong>no Rust code at all</strong>. A grammar plugin is three files:</p>
-<pre><code>my-grammar/
-  plugin.toml
-  grammar.wasm      # a compiled tree-sitter parser
-  highlights.scm    # tree-sitter highlight queries
-</code></pre>
-<h2>The manifest</h2>
-<pre><code class="language-toml">name = "graphql"
-version = "0.1.0"
-
-[[grammars]]
-name = "graphql"                  # the fence language token
-extensions = ["graphql", "gql"]   # file extensions to claim
-</code></pre>
-<p>With this installed, <code>```graphql</code> fences highlight, and opening <code>schema.graphql</code> highlights the whole file. The bundled GraphQL plugin is exactly this shape — <a href="https://github.com/SuperJackfruitLabs/supermd/tree/master/plugins/graphql">see it in the repo</a>.</p>
-<h2>Building <code>grammar.wasm</code></h2>
-<p>The parser comes from any tree-sitter grammar repository, compiled once with the tree-sitter CLI (0.23.x) and Emscripten:</p>
-<pre><code class="language-sh">scripts/build_grammar_wasm.sh &lt;grammar-repo-dir&gt; &lt;out-dir&gt;
-</code></pre>
-<p>This regenerates the parser at a compatible ABI and produces <code>grammar.wasm</code> (~40–300 KB). Users never need these tools — you build once and ship the file. One requirement: the wasm's exported symbol must match your grammar <code>name</code> (a grammar generated as <code>tree_sitter_graphql</code> must be named <code>graphql</code>).</p>
-<h2><code>highlights.scm</code></h2>
-<p>Standard tree-sitter highlight queries, using the Helix capture vocabulary (<code>@keyword</code>, <code>@type</code>, <code>@string</code>, <code>@comment</code>, <code>@function</code>, <code>@constant</code>, …). If the grammar you're wrapping is used by the Helix editor, its <code>runtime/queries/&lt;lang&gt;/highlights.scm</code> usually works as-is — check the node names match your parser's version.</p>
-<h2>Rules</h2>
+<h1>Notes that Know Each Other</h1>
+<p>Open a folder and SuperMD quietly indexes every markdown file in it — links, backlinks, and tags, all computed locally and kept fresh as you type. Your files stay plain CommonMark on disk; the index is just a cache that rebuilds itself.</p>
+<h2>Wiki links</h2>
+<p>Type <code>[[</code> and a completion popup lists every note in the workspace, filtered as you type. Confirm with ⏎ and you get a <code>[[Note]]</code> link. Standard <code>[text](note.md)</code> links work everywhere wiki links do — both styles resolve, complete the graph, and count as backlinks.</p>
 <ul>
-<li><strong>Built-ins win</strong>: a grammar named <code>rust</code> cannot shadow SuperMD's bundled Rust highlighting.</li>
-<li><strong>Several grammars per plugin</strong>: give each <code>[[grammars]]</code> entry a <code>files = "&lt;stem&gt;"</code>, and ship <code>&lt;stem&gt;.wasm</code> + <code>&lt;stem&gt;.scm</code> per grammar.</li>
-<li><strong>Failures are contained</strong>: a broken query or incompatible wasm marks the plugin failed in the load report; a grammar that misbehaves at parse time degrades that language to plain text. The editor never crashes over a grammar.</li>
+<li><strong>Follow a link</strong> with <strong>⌘ click</strong> or <strong>⌘ ⏎</strong> with the cursor on it.</li>
+<li><strong>Link to a note that doesn't exist yet</strong> and following it creates the note beside the current file — write first, organize later.</li>
+<li><code>[[Note|label]]</code> shows the label but links to the note.</li>
+<li>Wiki targets match by file name anywhere in the workspace (case-insensitive); use <code>folder/Note</code> to disambiguate duplicates.</li>
 </ul>
+<h2>Renames never break the graph</h2>
+<p>Rename or move a note — or a whole folder — in the sidebar, and every link pointing at it is rewritten across the workspace: wiki links get the new name, standard links get the recomputed relative path, labels survive. Open tabs follow along too.</p>
+<h2>Backlinks and tags</h2>
+<p><strong>⌘ ⇧ K</strong> opens the knowledge panel:</p>
+<ul>
+<li><strong>Backlinks</strong> — every note linking to the one you're reading, each with the line of context it links from. Click to jump there.</li>
+<li><strong>Tags</strong> — write <code>#tag</code> (or nested <code>#area/subtopic</code>) anywhere in a note. The panel shows every workspace tag with its count; click one to search for it.</li>
+</ul>
+<h2>The graph</h2>
+<p>The knowledge panel starts with a <strong>local graph</strong>: the current note and its immediate neighbors. Click any node to navigate.</p>
+<p><strong>Graph View</strong> in the command palette (⌘ ⇧ P) opens the full workspace graph — every note, every link, laid out by a force simulation and rendered natively. Drag to pan, scroll to zoom, click a note to open it, esc to close. Connected clusters pull together; orphan notes drift to the edges, which is exactly how you find them.</p>
+<h2>Where's the database?</h2>
+<p>There isn't one. Everything above is computed from your markdown files at open time and kept current by the file watcher. Delete <code>.md</code> files, edit them in another app, sync them however you like — the knowledge features follow the files.</p>
 
-<div class="pager"><a class="prev-link" href="/docs/capabilities/">&larr; Capabilities</a><span class="pager-gap"></span></div>
+<div class="pager"><a class="prev-link" href="/docs/workspace/">&larr; Working with a Folder</a><span class="pager-gap"></span><a class="next-link" href="/docs/themes/">Themes &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

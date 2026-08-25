@@ -17,6 +17,7 @@ Every shortcut, as shown in-app with **⌘ /** (Ctrl+/). macOS keys on the left;
 | ⌃ ⌘ F | Ctrl Alt F | Focus mode |
 | ⌘ B | Ctrl B | Toggle sidebar |
 | ⌘ ⇧ O | Ctrl Shift O | Toggle outline |
+| ⌘ ⇧ K | Ctrl Shift K | Knowledge panel (backlinks, tags, graph) |
 | ⌘ 1 | Ctrl 1 | Focus sidebar |
 | ⌘ W | Ctrl W | Close tab |
 | ⌃ Tab / ⌘ ⇧ ] | Ctrl Tab / Ctrl Shift ] | Next tab |
@@ -34,6 +35,8 @@ Every shortcut, as shown in-app with **⌘ /** (Ctrl+/). macOS keys on the left;
 | ⌘ B / ⌘ I | Ctrl B / Ctrl I | Bold / italic selection |
 | ⏎ in a list | ⏎ in a list | Continue the list |
 | Tab / ⇧ Tab | Tab / Shift Tab | Indent list item · hop table cells |
+| ⌘ ⏎ / ⌘ Click | Ctrl ⏎ / Ctrl Click | Follow link under cursor |
+| `[[` | `[[` | Link to a note (completion) |
 | ⌥ ← → | Alt ← → | Move by word |
 | ⌘ ← → | Ctrl ← → | Line start / end |
 | ⌘ ↑ ↓ | Ctrl ↑ ↓ | Document start / end |
@@ -50,5 +53,9 @@ Every shortcut, as shown in-app with **⌘ /** (Ctrl+/). macOS keys on the left;
 | → | Expand folder |
 | ← | Collapse / go to parent |
 | ⏎ | Open |
+| F2 | Rename |
+| ⌘ ⌫ (Ctrl Backspace) | Delete to trash |
+| ⌘ N / ⌘ ⇧ N | New file / folder here |
+| ⌘ ⇧ M | Move to folder… |
 
 While browsing with the arrow keys, files open in a single reusable preview tab; press ⏎ or double-click to pin a file in its own tab.
