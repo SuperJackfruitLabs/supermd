@@ -56,6 +56,51 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// A copy with every color passed through `f`; fonts, sizes, and
+    /// flags unchanged. New color fields must be threaded through here
+    /// — flux warming relies on full coverage.
+    pub fn map_colors(&self, f: impl Fn(Hsla) -> Hsla) -> Self {
+        Self {
+            is_dark: self.is_dark,
+            bg: f(self.bg),
+            fg: f(self.fg),
+            fg_strong: f(self.fg_strong),
+            fg_muted: f(self.fg_muted),
+            accent: f(self.accent),
+            link: f(self.link),
+            code_bg: f(self.code_bg),
+            code_fg: f(self.code_fg),
+            border: f(self.border),
+            panel_bg: f(self.panel_bg),
+            hover_bg: f(self.hover_bg),
+            selected_bg: f(self.selected_bg),
+            find_match_bg: f(self.find_match_bg),
+            find_active_bg: f(self.find_active_bg),
+            diff_added_bg: f(self.diff_added_bg),
+            diff_added_fg: f(self.diff_added_fg),
+            diff_deleted_bg: f(self.diff_deleted_bg),
+            diff_deleted_fg: f(self.diff_deleted_fg),
+            syntax: SyntaxColors {
+                keyword: f(self.syntax.keyword),
+                function: f(self.syntax.function),
+                kind: f(self.syntax.kind),
+                string: f(self.syntax.string),
+                comment: f(self.syntax.comment),
+                constant: f(self.syntax.constant),
+                property: f(self.syntax.property),
+                operator: f(self.syntax.operator),
+                tag: f(self.syntax.tag),
+                attribute: f(self.syntax.attribute),
+            },
+            body_family: self.body_family.clone(),
+            mono_family: self.mono_family.clone(),
+            body_size: self.body_size,
+            body_line_height: self.body_line_height,
+            code_size: self.code_size,
+            ui_size: self.ui_size,
+        }
+    }
+
     pub fn light() -> Self {
         Self {
             is_dark: false,
