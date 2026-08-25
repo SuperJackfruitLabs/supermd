@@ -31,6 +31,7 @@ Every shortcut, as shown in-app with **⌘ /** (Ctrl+/). macOS keys on the left;
 | macOS | Windows / Linux | Action |
 | ----- | --------------- | ------ |
 | ⌘ Z / ⌘ ⇧ Z | Ctrl Z / Ctrl Shift Z | Undo / redo |
+| ⌘ B / ⌘ I | Ctrl B / Ctrl I | Bold / italic selection |
 | ⌥ ← → | Alt ← → | Move by word |
 | ⌘ ← → | Ctrl ← → | Line start / end |
 | ⌘ ↑ ↓ | Ctrl ↑ ↓ | Document start / end |

@@ -8,6 +8,7 @@ pub mod buffer;
 pub mod core;
 pub mod display;
 pub mod find;
+pub mod formatting;
 pub mod movement;
 pub mod projection;
 pub mod projector;
@@ -21,7 +22,8 @@ use std::time::{Instant, SystemTime};
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, fill, list, point, px, relative, size, App, AvailableSpace, Bounds,
+    actions, anchored, deferred, div, fill, list, point, px, relative, size, App, AvailableSpace,
+    Bounds, Corner,
     ClipboardItem, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
     Focusable, Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, Hsla, IntoElement,
     LayoutId, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -43,7 +45,8 @@ actions!(
         MoveWordLeft, MoveWordRight, SelectWordLeft, SelectWordRight, LineStart, LineEnd,
         SelectLineStart, SelectLineEnd, DocStart, DocEnd, PageUp, PageDown, Backspace, Delete,
         DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow,
-        OpenFind, FindNext, FindPrev, CloseFind
+        OpenFind, FindNext, FindPrev, CloseFind, ToggleBold, ToggleItalic, ToggleCode,
+        ToggleStrike, InsertLink, CycleHeading, ToggleQuote
     ]
 );
 
@@ -133,6 +136,11 @@ pub struct Editor {
     status_text: Option<SharedString>,
     /// Debounce handle: replacing it cancels the pending refresh.
     status_task: Option<gpui::Task<()>>,
+    /// The floating format toolbar has been armed by a settled mouse
+    /// selection. It only paints while the selection is still live.
+    toolbar_visible: bool,
+    /// Settle timer; replacing it cancels the pending reveal.
+    toolbar_task: Option<gpui::Task<()>>,
 }
 
 /// Snapshot taken right after a paste lands, so a background enricher
@@ -247,6 +255,8 @@ impl Editor {
             pending_enrich: None,
             status_text: None,
             status_task: None,
+            toolbar_visible: false,
+            toolbar_task: None,
         };
         editor.restyle(langs);
         editor.schedule_status(cx);
@@ -889,6 +899,85 @@ impl Editor {
         }
     }
 
+    // ── formatting toggles (floating toolbar + ⌘B/⌘I) ──
+
+    /// Formatting only makes sense on an editable markdown buffer.
+    fn can_format(&self) -> bool {
+        matches!(self.provider, Provider::Markdown) && self.diff.is_none()
+    }
+
+    /// Apply a formatting edit as its own undo group and keep the
+    /// content selected so toggles can repeat.
+    fn apply_fmt(&mut self, edit: formatting::FmtEdit, cx: &mut Context<Self>) {
+        self.core.break_undo_group();
+        self.core
+            .replace_range(edit.range, &edit.replacement, Instant::now());
+        self.core.selection = Selection { anchor: edit.select.start, head: edit.select.end };
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    fn inline_fmt(&mut self, marker: &str, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let text = self.core.buffer.text();
+        self.apply_fmt(
+            formatting::toggle_inline(&text, self.core.selection.range(), marker),
+            cx,
+        );
+    }
+
+    fn toggle_bold(&mut self, _: &ToggleBold, _: &mut Window, cx: &mut Context<Self>) {
+        // Cursor-only ⌘B falls through to the app's next binding
+        // (sidebar toggle) — bold needs a selection.
+        if self.core.selection.is_cursor() {
+            cx.propagate();
+            return;
+        }
+        self.inline_fmt("**", cx);
+    }
+
+    fn toggle_italic(&mut self, _: &ToggleItalic, _: &mut Window, cx: &mut Context<Self>) {
+        self.inline_fmt("*", cx);
+    }
+
+    fn toggle_code(&mut self, _: &ToggleCode, _: &mut Window, cx: &mut Context<Self>) {
+        self.inline_fmt("`", cx);
+    }
+
+    fn toggle_strike(&mut self, _: &ToggleStrike, _: &mut Window, cx: &mut Context<Self>) {
+        self.inline_fmt("~~", cx);
+    }
+
+    fn insert_link(&mut self, _: &InsertLink, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let text = self.core.buffer.text();
+        self.apply_fmt(formatting::toggle_link(&text, self.core.selection.range()), cx);
+    }
+
+    fn cycle_heading(&mut self, _: &CycleHeading, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let text = self.core.buffer.text();
+        self.apply_fmt(formatting::cycle_heading(&text, self.core.selection.range()), cx);
+    }
+
+    fn toggle_quote(&mut self, _: &ToggleQuote, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let text = self.core.buffer.text();
+        self.apply_fmt(formatting::toggle_quote(&text, self.core.selection.range()), cx);
+    }
+
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.core.select_all();
         self.core.break_undo_group();
@@ -1192,6 +1281,10 @@ impl Editor {
         if self.diff.is_some() {
             return; // diff view is read-only; merged offsets never touch the buffer
         }
+        // A fresh press starts a new interaction: drop the toolbar and
+        // any pending reveal.
+        self.toolbar_visible = false;
+        self.toolbar_task = None;
         // Checkbox toggle: a plain click on a ✓/○ glyph flips the source
         // without moving the cursor into the line.
         if !event.modifiers.shift {
@@ -1265,12 +1358,42 @@ impl Editor {
     }
 
     fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let selection_drag_ended = self.dragging && !self.scrollbar_dragging;
         self.dragging = false;
         if self.scrollbar_dragging {
             self.scrollbar_dragging = false;
             self.list_state.scrollbar_drag_ended();
             cx.notify();
         }
+        if selection_drag_ended && !self.core.selection.is_cursor() && self.can_format() {
+            // Let the selection settle before the toolbar pops in.
+            self.toolbar_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                this.update(cx, |editor, cx| {
+                    editor.toolbar_visible = true;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
+    }
+
+    /// Whether the floating format toolbar should paint right now.
+    fn toolbar_showing(&self) -> bool {
+        self.toolbar_visible && self.can_format() && !self.core.selection.is_cursor()
+    }
+
+    /// Window point just above the selection start, if that line is
+    /// currently laid out.
+    fn toolbar_anchor(&self) -> Option<Point<Pixels>> {
+        let start = self.core.selection.range().start;
+        let line_ix = self.core.buffer.line_of_byte(start);
+        let entry = self.layout_cache.get(&line_ix)?;
+        let disp = display::src_to_disp(&entry.display, start);
+        let pos = entry.line.position_for_index(disp, entry.line_height)?;
+        Some(point(entry.origin.x + pos.x, entry.origin.y + pos.y - px(6.)))
     }
 
     /// Map a window-space y position on the scrollbar track to a scroll
@@ -2275,6 +2398,92 @@ impl Render for Editor {
             }
         };
 
+        let toolbar = self
+            .toolbar_showing()
+            .then(|| self.toolbar_anchor())
+            .flatten()
+            .map(|pos| {
+                let button = |ix: usize, label: &'static str| {
+                    div()
+                        .id(("fmt-btn", ix))
+                        .px(px(7.))
+                        .py(px(3.))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_size(px(12.))
+                        .text_color(t.fg)
+                        .hover(|d| d.bg(t.hover_bg))
+                        .child(label)
+                };
+                let bar = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.))
+                    .p(px(3.))
+                    .bg(t.panel_bg)
+                    .border_1()
+                    .border_color(t.border)
+                    .rounded_lg()
+                    .shadow_lg()
+                    .child(button(0, "B").font_weight(FontWeight::BOLD).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ed, _, w, cx| {
+                            cx.stop_propagation();
+                            ed.toggle_bold(&ToggleBold, w, cx);
+                        }),
+                    ))
+                    .child(button(1, "I").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ed, _, w, cx| {
+                            cx.stop_propagation();
+                            ed.toggle_italic(&ToggleItalic, w, cx);
+                        }),
+                    ))
+                    .child(button(2, "<>").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ed, _, w, cx| {
+                            cx.stop_propagation();
+                            ed.toggle_code(&ToggleCode, w, cx);
+                        }),
+                    ))
+                    .child(button(3, "S̶").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ed, _, w, cx| {
+                            cx.stop_propagation();
+                            ed.toggle_strike(&ToggleStrike, w, cx);
+                        }),
+                    ))
+                    .child(button(4, "[⌁]").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ed, _, w, cx| {
+                            cx.stop_propagation();
+                            ed.insert_link(&InsertLink, w, cx);
+                        }),
+                    ))
+                    .child(button(5, "H").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ed, _, w, cx| {
+                            cx.stop_propagation();
+                            ed.cycle_heading(&CycleHeading, w, cx);
+                        }),
+                    ))
+                    .child(button(6, "❝").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|ed, _, w, cx| {
+                            cx.stop_propagation();
+                            ed.toggle_quote(&ToggleQuote, w, cx);
+                        }),
+                    ));
+                deferred(
+                    anchored()
+                        .position(pos)
+                        .anchor(Corner::BottomLeft)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(bar),
+                )
+            });
+
         let diffing = self.diff.is_some();
         let diff_header = self.diff.as_ref().map(|d| {
             div()
@@ -2371,6 +2580,13 @@ impl Render for Editor {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::toggle_bold))
+            .on_action(cx.listener(Self::toggle_italic))
+            .on_action(cx.listener(Self::toggle_code))
+            .on_action(cx.listener(Self::toggle_strike))
+            .on_action(cx.listener(Self::insert_link))
+            .on_action(cx.listener(Self::cycle_heading))
+            .on_action(cx.listener(Self::toggle_quote))
             .on_action(cx.listener(Self::save_now))
             .on_action(cx.listener(Self::open_find))
             .on_action(cx.listener(Self::find_next))
@@ -2548,6 +2764,7 @@ impl Render for Editor {
                 .size_full(),
             )
                 .children(scrollbar)
+                .children(toolbar)
                 .into_any_element()
             })
     }
@@ -2883,6 +3100,79 @@ mod tests {
         assert_eq!(buffer_text(&editor, cx), "hi\n");
         cx.simulate_keystrokes("backspace backspace");
         assert_eq!(buffer_text(&editor, cx), "h");
+    }
+
+    fn select(editor: &Entity<Editor>, cx: &mut VisualTestContext, range: Range<usize>) {
+        editor.update_in(cx, |editor, _, cx| {
+            editor.core.set_cursor(range.start);
+            editor.core.select_to(range.end);
+            cx.notify();
+        });
+    }
+
+    #[gpui::test]
+    fn bold_toggles_round_trip_and_undo_as_one_group(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "fmt.md", "say hello now");
+        select(&editor, cx, 4..9);
+        cx.dispatch_action(ToggleBold);
+        assert_eq!(buffer_text(&editor, cx), "say **hello** now");
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).core.selection.range(), 6..11, "word stays selected");
+        });
+        cx.dispatch_action(ToggleBold);
+        assert_eq!(buffer_text(&editor, cx), "say hello now");
+        cx.dispatch_action(Undo);
+        assert_eq!(buffer_text(&editor, cx), "say **hello** now", "one group per toggle");
+        cx.dispatch_action(Undo);
+        assert_eq!(buffer_text(&editor, cx), "say hello now");
+    }
+
+    #[gpui::test]
+    fn every_toolbar_action_edits_the_document(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "fmt.md", "alpha beta");
+        let cases: Vec<(Box<dyn Fn(&mut VisualTestContext)>, &str)> = vec![
+            (Box::new(|cx| cx.dispatch_action(ToggleItalic)), "*alpha* beta"),
+            (Box::new(|cx| cx.dispatch_action(ToggleCode)), "`alpha` beta"),
+            (Box::new(|cx| cx.dispatch_action(ToggleStrike)), "~~alpha~~ beta"),
+            (Box::new(|cx| cx.dispatch_action(InsertLink)), "[alpha](url) beta"),
+            (Box::new(|cx| cx.dispatch_action(CycleHeading)), "# alpha beta"),
+            (Box::new(|cx| cx.dispatch_action(ToggleQuote)), "> alpha beta"),
+        ];
+        for (fire, expect) in cases {
+            select(&editor, cx, 0..5);
+            fire(cx);
+            assert_eq!(buffer_text(&editor, cx), expect);
+            cx.dispatch_action(Undo);
+            assert_eq!(buffer_text(&editor, cx), "alpha beta");
+        }
+    }
+
+    #[gpui::test]
+    fn bold_needs_a_selection_and_falls_through_to_the_next_binding(cx: &mut TestAppContext) {
+        // Newline stands in for the app's global cmd-b (sidebar toggle):
+        // with no selection the keystroke must reach the next binding.
+        let (_fx, editor, cx) = open_editor(cx, "fmt.md", "hello");
+        cx.update(|_, app| {
+            app.bind_keys([
+                KeyBinding::new("cmd-b", Newline, None),
+                KeyBinding::new("cmd-b", ToggleBold, Some("Editor")),
+            ]);
+        });
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(buffer_text(&editor, cx), "\nhello", "cursor-only cmd-b fell through");
+        select(&editor, cx, 1..6);
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(buffer_text(&editor, cx), "\n**hello**", "selection cmd-b bolds");
+    }
+
+    #[gpui::test]
+    fn formatting_is_inert_outside_markdown(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "code.rs", "let x = 1;");
+        select(&editor, cx, 0..3);
+        cx.dispatch_action(ToggleBold);
+        cx.dispatch_action(CycleHeading);
+        cx.dispatch_action(ToggleQuote);
+        assert_eq!(buffer_text(&editor, cx), "let x = 1;");
     }
 
     #[gpui::test]
@@ -3353,6 +3643,68 @@ mod tests {
             );
         });
         cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::shift());
+    }
+
+    #[gpui::test]
+    fn format_toolbar_shows_after_a_mouse_selection_settles(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "alpha beta gamma\n");
+        let p2 = point_for_index(&editor, cx, 0, 2);
+        let p10 = point_for_index(&editor, cx, 0, 10);
+        cx.simulate_mouse_down(p2, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(p10, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(p10, MouseButton::Left, Modifiers::none());
+        cx.update(|_, app| {
+            assert!(!editor.read(app).toolbar_showing(), "waits for the settle delay");
+        });
+        cx.executor().advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(editor.read(app).toolbar_showing()));
+
+        // Formatting from the toolbar keeps the selection — and the bar.
+        cx.dispatch_action(ToggleBold);
+        assert_eq!(buffer_text(&editor, cx), "al**pha beta** gamma\n");
+        cx.update(|_, app| assert!(editor.read(app).toolbar_showing(), "bar survives a toggle"));
+
+        // Typing replaces the selection; the collapsed selection hides it.
+        cx.simulate_input("x");
+        cx.update(|_, app| assert!(!editor.read(app).toolbar_showing()));
+    }
+
+    #[gpui::test]
+    fn format_toolbar_ignores_clicks_and_code_files(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "alpha beta\n");
+        let p2 = point_for_index(&editor, cx, 0, 2);
+        // A plain click ends with a cursor: no toolbar.
+        cx.simulate_mouse_down(p2, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(p2, MouseButton::Left, Modifiers::none());
+        cx.executor().advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(!editor.read(app).toolbar_showing()));
+
+        // A settled selection dies on the next mouse-down.
+        let p8 = point_for_index(&editor, cx, 0, 8);
+        cx.simulate_mouse_down(p2, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(p8, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(p8, MouseButton::Left, Modifiers::none());
+        cx.executor().advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(editor.read(app).toolbar_showing()));
+        cx.simulate_mouse_down(p2, MouseButton::Left, Modifiers::none());
+        cx.update(|_, app| assert!(!editor.read(app).toolbar_showing()));
+        cx.simulate_mouse_up(p2, MouseButton::Left, Modifiers::none());
+    }
+
+    #[gpui::test]
+    fn format_toolbar_never_shows_on_code_files(cx: &mut TestAppContext) {
+        let (_fx, code, cx) = open_editor(cx, "main.rs", "let value = 1;\n");
+        let q2 = point_for_index(&code, cx, 0, 2);
+        let q9 = point_for_index(&code, cx, 0, 9);
+        cx.simulate_mouse_down(q2, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(q9, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(q9, MouseButton::Left, Modifiers::none());
+        cx.executor().advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(!code.read(app).toolbar_showing()));
     }
 
     #[gpui::test]
