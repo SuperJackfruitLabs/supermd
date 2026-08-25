@@ -2050,6 +2050,30 @@ impl EntityInputHandler for Editor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Typing a marker over a selection wraps it instead of
+        // replacing; repeated presses stack (`*` then `*` → `**`).
+        if range_utf16.is_none()
+            && self.marked_range.is_none()
+            && !self.core.selection.is_cursor()
+            && self.can_format()
+            && matches!(new_text, "*" | "_" | "`" | "~")
+        {
+            let range = self.core.selection.range();
+            let content = self.core.selected_text();
+            self.core.break_undo_group();
+            self.core.replace_range(
+                range.clone(),
+                &format!("{new_text}{content}{new_text}"),
+                Instant::now(),
+            );
+            self.core.selection = Selection {
+                anchor: range.start + new_text.len(),
+                head: range.start + new_text.len() + content.len(),
+            };
+            self.core.break_undo_group();
+            self.after_edit(cx);
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -3881,6 +3905,30 @@ mod tests {
         cx.dispatch_action(DocEnd);
         cx.dispatch_action(InsertTab);
         assert_eq!(buffer_text(&editor, cx), "text\t");
+    }
+
+    #[gpui::test]
+    fn typing_a_marker_wraps_the_selection(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "wrap.md", "pick me now");
+        select(&editor, cx, 5..7);
+        cx.simulate_input("*");
+        assert_eq!(buffer_text(&editor, cx), "pick *me* now");
+        // The content stays selected, so a second press upgrades to bold.
+        cx.simulate_input("*");
+        assert_eq!(buffer_text(&editor, cx), "pick **me** now");
+        select(&editor, cx, 7..9);
+        cx.simulate_input("`");
+        assert_eq!(buffer_text(&editor, cx), "pick **`me`** now");
+        // Ordinary characters still replace the selection.
+        let (_fx2, editor, cx) = open_editor(cx, "wrap2.md", "pick me now");
+        select(&editor, cx, 5..7);
+        cx.simulate_input("x");
+        assert_eq!(buffer_text(&editor, cx), "pick x now");
+        // Markers replace as usual outside markdown.
+        let (_fx3, editor, cx) = open_editor(cx, "wrap.rs", "let x = 1;");
+        select(&editor, cx, 4..5);
+        cx.simulate_input("*");
+        assert_eq!(buffer_text(&editor, cx), "let * = 1;");
     }
 
     #[gpui::test]
