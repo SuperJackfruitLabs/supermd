@@ -1075,6 +1075,17 @@ impl Workspace {
             }
             None => (Vec::new(), Vec::new()),
         };
+        // App-level commands exist with or without plugins.
+        let mut entries = entries;
+        entries.push(crate::palette::PaletteEntry {
+            plugin: "supermd".into(),
+            id: "__flux".into(),
+            title: if cx.global::<crate::theme::ThemeState>().settings.flux.enabled {
+                "Flux: Disable Adaptive Theme".into()
+            } else {
+                "Flux: Enable Adaptive Theme".into()
+            },
+        });
         let palette = cx.new(|cx| crate::palette::Palette::new(entries, failures, cx));
         let subscription = cx.subscribe_in(
             &palette,
@@ -1214,6 +1225,22 @@ impl Workspace {
     ) {
         if id == "__install" {
             self.open_install_overlay(window, cx);
+            return;
+        }
+        if id == "__flux" {
+            {
+                let state = cx.global_mut::<crate::theme::ThemeState>();
+                state.settings.flux.enabled = !state.settings.flux.enabled;
+                state.flux_blend = crate::flux::current_blend(&state.settings.flux);
+                if let Err(err) =
+                    crate::settings::save(&crate::settings::config_dir(), &state.settings)
+                {
+                    eprintln!("supermd: cannot save settings: {err}");
+                }
+            }
+            crate::theme::refresh_active_theme(cx);
+            window.refresh();
+            cx.notify();
             return;
         }
         // Templates need a workspace, not an editor — handled before
@@ -3231,6 +3258,7 @@ mod tests {
                 themes: crate::theme::builtin_themes(),
                 settings: crate::settings::Settings::default(),
                 system_dark: false,
+                flux_blend: 0.0,
             });
         });
         cx.add_window_view(|_, cx| Workspace::new(arg, cx))
@@ -3238,6 +3266,44 @@ mod tests {
 
     fn tab_paths(ws: &Workspace, cx: &App) -> Vec<Option<PathBuf>> {
         ws.tabs.iter().map(|t| t.path(cx)).collect()
+    }
+
+    #[gpui::test]
+    fn flux_toggle_lives_in_the_palette_and_persists(cx: &mut TestAppContext) {
+        let home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let (_ws, cx) = open_workspace(cx, root.path());
+        cx.update(|window, app| {
+            let handle = _ws.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        // No ExtensionState global: the toggle must be there anyway.
+        cx.dispatch_action(TogglePalette);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(_ws.read(app).palette.is_some(), "palette open"));
+        cx.simulate_input("Flux");
+        cx.run_until_parked();
+        cx.dispatch_action(crate::palette::PaletteConfirm);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(
+                app.global::<crate::theme::ThemeState>().settings.flux.enabled,
+                "palette toggle enables flux"
+            );
+        });
+        let saved =
+            std::fs::read_to_string(crate::settings::config_dir().join("settings.toml")).unwrap();
+        assert!(saved.contains("[flux]") && saved.contains("enabled = true"), "{saved}");
+
+        // Toggling again flips it back off.
+        cx.dispatch_action(TogglePalette);
+        cx.simulate_input("Flux");
+        cx.dispatch_action(crate::palette::PaletteConfirm);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(!app.global::<crate::theme::ThemeState>().settings.flux.enabled);
+        });
+        drop(home);
     }
 
     #[gpui::test]

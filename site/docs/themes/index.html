@@ -143,6 +143,18 @@
 <h1>Themes</h1>
 <p><strong>⌘ T</strong> opens the theme picker. SuperMD follows your system's light/dark setting, with a theme for each: pick your light theme and your dark theme once, and the app switches with your OS.</p>
 <p>Eight themes ship built in: <strong>Jackfruit Light</strong> and <strong>Jackfruit Dark</strong> (the defaults), <strong>Paper</strong>, <strong>Graphite</strong>, <strong>Nord</strong>, <strong>Gruvbox Dark</strong>, and <strong>Solarized</strong> in both light and dark. Diagrams, code highlighting, and the whole interface follow the active theme.</p>
+<h2>Flux: themes that follow the sun</h2>
+<p>Like f.lux, but for your editor's own palette: as evening falls, SuperMD can fade to your dark theme and gently warm every color toward candle-light — then fade back at dawn. Enable it from the command palette (<strong>⌘ ⇧ P</strong> → <em>Flux: Enable Adaptive Theme</em>) or in <code>~/.supermd/settings.toml</code>:</p>
+<pre><code class="language-toml">[flux]
+enabled = true
+latitude = 51.51        # optional — your rough coordinates
+longitude = -0.13
+auto_dark = true        # crossfade to the dark theme at night
+warm_shift = true       # drift colors warmer after sunset
+night_kelvin = 3400     # how warm the night gets (6500 = no shift)
+transition_minutes = 40 # fade length around sunrise and sunset
+</code></pre>
+<p>With coordinates set, sunrise and sunset are computed <strong>offline</strong> with the NOAA solar equations — no location permission, no network, nothing leaves your machine. Without them, a fixed 7:00–19:00 day window applies (as it does under a polar sun). Both halves are independent: keep <code>auto_dark</code> and drop <code>warm_shift</code> for a hard theme schedule, or the reverse to stay on your system theme but lose the blue light at night.</p>
 <h2>Custom themes</h2>
 <p>A theme is a single TOML file dropped into your themes folder:</p>
 <ul>

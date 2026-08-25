@@ -56,6 +56,51 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// A copy with every color passed through `f`; fonts, sizes, and
+    /// flags unchanged. New color fields must be threaded through here
+    /// — flux warming relies on full coverage.
+    pub fn map_colors(&self, f: impl Fn(Hsla) -> Hsla) -> Self {
+        Self {
+            is_dark: self.is_dark,
+            bg: f(self.bg),
+            fg: f(self.fg),
+            fg_strong: f(self.fg_strong),
+            fg_muted: f(self.fg_muted),
+            accent: f(self.accent),
+            link: f(self.link),
+            code_bg: f(self.code_bg),
+            code_fg: f(self.code_fg),
+            border: f(self.border),
+            panel_bg: f(self.panel_bg),
+            hover_bg: f(self.hover_bg),
+            selected_bg: f(self.selected_bg),
+            find_match_bg: f(self.find_match_bg),
+            find_active_bg: f(self.find_active_bg),
+            diff_added_bg: f(self.diff_added_bg),
+            diff_added_fg: f(self.diff_added_fg),
+            diff_deleted_bg: f(self.diff_deleted_bg),
+            diff_deleted_fg: f(self.diff_deleted_fg),
+            syntax: SyntaxColors {
+                keyword: f(self.syntax.keyword),
+                function: f(self.syntax.function),
+                kind: f(self.syntax.kind),
+                string: f(self.syntax.string),
+                comment: f(self.syntax.comment),
+                constant: f(self.syntax.constant),
+                property: f(self.syntax.property),
+                operator: f(self.syntax.operator),
+                tag: f(self.syntax.tag),
+                attribute: f(self.syntax.attribute),
+            },
+            body_family: self.body_family.clone(),
+            mono_family: self.mono_family.clone(),
+            body_size: self.body_size,
+            body_line_height: self.body_line_height,
+            code_size: self.code_size,
+            ui_size: self.ui_size,
+        }
+    }
+
     pub fn light() -> Self {
         Self {
             is_dark: false,
@@ -516,29 +561,44 @@ pub struct ThemeState {
     pub themes: Vec<LoadedTheme>,
     pub settings: crate::settings::Settings,
     pub system_dark: bool,
+    /// Flux day↔night factor (0 day, 1 night); ignored while flux is
+    /// disabled. Kept current by the minute timer in main.rs.
+    pub flux_blend: f32,
 }
 
 impl Global for ThemeState {}
 
 impl ThemeState {
     pub fn resolve(&self) -> Arc<Theme> {
-        let want = if self.system_dark {
+        let flux = &self.settings.flux;
+        // Flux night forces the dark theme; day still follows the
+        // system appearance.
+        let dark = if flux.enabled && flux.auto_dark && self.flux_blend >= 0.5 {
+            true
+        } else {
+            self.system_dark
+        };
+        let want = if dark {
             &self.settings.dark_theme
         } else {
             &self.settings.light_theme
         };
-        self.themes
+        let picked = self
+            .themes
             .iter()
-            .find(|t| &t.name == want && t.theme.is_dark == self.system_dark)
-            .or_else(|| {
-                self.themes
-                    .iter()
-                    .find(|t| t.theme.is_dark == self.system_dark)
-            })
+            .find(|t| &t.name == want && t.theme.is_dark == dark)
+            .or_else(|| self.themes.iter().find(|t| t.theme.is_dark == dark))
             .map(|t| t.theme.clone())
-            .unwrap_or_else(|| {
-                Arc::new(if self.system_dark { Theme::dark() } else { Theme::light() })
-            })
+            .unwrap_or_else(|| Arc::new(if dark { Theme::dark() } else { Theme::light() }));
+        if flux.enabled && flux.warm_shift && self.flux_blend > 0.0 {
+            Arc::new(crate::flux::warm_theme(
+                &picked,
+                self.flux_blend,
+                flux.night_kelvin,
+            ))
+        } else {
+            picked
+        }
     }
 }
 
@@ -555,7 +615,39 @@ mod theme_state_tests {
                 ..crate::settings::Settings::default()
             },
             system_dark,
+            flux_blend: 0.0,
         }
+    }
+
+    #[test]
+    fn flux_night_forces_dark_and_warms() {
+        let mut s = state("Paper", "Nord", false);
+        s.settings.flux.enabled = true;
+        s.flux_blend = 1.0;
+        let resolved = s.resolve();
+        assert!(resolved.is_dark, "night overrides a light system appearance");
+        // Warm shift trimmed blue against the plain dark theme.
+        let plain = state("Paper", "Nord", true).resolve();
+        let plain_bg = gpui::Rgba::from(plain.fg);
+        let warmed_bg = gpui::Rgba::from(resolved.fg);
+        assert!(warmed_bg.b < plain_bg.b, "{} < {}", warmed_bg.b, plain_bg.b);
+
+        // auto_dark off: theme follows the system, warmth still applies.
+        s.settings.flux.auto_dark = false;
+        assert!(!s.resolve().is_dark);
+    }
+
+    #[test]
+    fn flux_disabled_or_daytime_changes_nothing() {
+        let mut s = state("Paper", "Nord", false);
+        s.flux_blend = 1.0; // stale blend with flux off: ignored
+        let off = s.resolve();
+        assert!(!off.is_dark);
+        assert_eq!(off.bg, state("Paper", "Nord", false).resolve().bg);
+
+        s.settings.flux.enabled = true;
+        s.flux_blend = 0.0; // enabled but daytime: byte-identical
+        assert_eq!(s.resolve().bg, off.bg);
     }
 
     #[test]
