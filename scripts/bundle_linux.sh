@@ -17,6 +17,9 @@ cp "$ROOT/target/release/supermd" "$STAGE/"
 cp "$ROOT/assets/linux/supermd.desktop" "$STAGE/"
 cp "$ROOT/assets/linux/supermd-128.png" "$STAGE/"
 cp "$ROOT/assets/linux/supermd-512.png" "$STAGE/"
+if [ -d "$ROOT/dist/default-plugins" ]; then
+    cp -R "$ROOT/dist/default-plugins" "$STAGE/plugins"
+fi
 
 cat > "$STAGE/install.sh" <<'INSTALL'
 #!/bin/sh

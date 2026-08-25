@@ -44,4 +44,14 @@ version = "0.1.0"
 formats = true
 EOF
 fi
+# Stage the default set for installer payloads (seeded on first run).
+if [ "${1:-}" != "--fixtures" ]; then
+    DEFAULTS="dot toc emoji tidy todo-marks word-count csv-view graphql"
+    rm -rf "$ROOT/dist/default-plugins"
+    for name in $DEFAULTS; do
+        mkdir -p "$ROOT/dist/default-plugins"
+        cp -R "$OUT/$name" "$ROOT/dist/default-plugins/$name"
+    done
+    echo "staged defaults: $DEFAULTS -> $ROOT/dist/default-plugins"
+fi
 echo "built: $CRATES -> $OUT"

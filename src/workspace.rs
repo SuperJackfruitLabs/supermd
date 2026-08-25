@@ -236,6 +236,7 @@ pub struct Workspace {
     finder: Option<(Entity<Finder>, gpui::Subscription)>,
     search: Option<(Entity<crate::search_ui::SearchOverlay>, gpui::Subscription)>,
     palette: Option<(Entity<crate::palette::Palette>, gpui::Subscription)>,
+    install_overlay: Option<(Entity<crate::install_ui::InstallOverlay>, gpui::Subscription)>,
     /// Transient plugin-command error, auto-cleared.
     command_error: Option<SharedString>,
     /// (plugin, capability) awaiting a consent decision; capability is
@@ -333,6 +334,7 @@ impl Workspace {
             finder: None,
             search: None,
             palette: None,
+            install_overlay: None,
             command_error: None,
             consent_request: None,
             preview_tab: None,
@@ -1049,6 +1051,11 @@ impl Workspace {
                         });
                     }
                 }
+                entries.push(crate::palette::PaletteEntry {
+                    plugin: "supermd".into(),
+                    id: "__install".into(),
+                    title: "Install Plugins…".into(),
+                });
                 for (plugin, id, name) in crate::extensions::template_entries() {
                     entries.push(crate::palette::PaletteEntry {
                         plugin,
@@ -1089,6 +1096,96 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Fetch the catalog (background) and show the install overlay.
+    fn open_install_overlay(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let fetch = cx
+            .try_global::<crate::catalog::CatalogFetcher>()
+            .map(|f| f.0.clone())
+            .unwrap_or_else(crate::catalog::ureq_fetcher);
+        let run = cx.background_executor().spawn(async move {
+            fetch(crate::catalog::CATALOG_URL)
+                .and_then(|bytes| String::from_utf8(bytes).map_err(|e| e.to_string()))
+                .and_then(|json| crate::catalog::parse_catalog(&json))
+        });
+        cx.spawn_in(_window, async move |this, cx| {
+            let result = run.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(entries) => this.show_install_overlay(entries, window, cx),
+                Err(e) => this.show_command_error(format!("catalog: {e}"), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn show_install_overlay(
+        &mut self,
+        entries: Vec<crate::catalog::CatalogEntry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let plugins_dir = crate::settings::config_dir().join("plugins");
+        let installed: Vec<String> = entries
+            .iter()
+            .filter(|e| plugins_dir.join(&e.name).is_dir())
+            .map(|e| e.name.clone())
+            .collect();
+        let overlay =
+            cx.new(|cx| crate::install_ui::InstallOverlay::new(entries, installed, cx));
+        let subscription = cx.subscribe_in(
+            &overlay,
+            window,
+            |this, _o, event, window, cx| match event {
+                crate::install_ui::InstallEvent::Install(entry) => {
+                    let entry = entry.clone();
+                    this.dismiss_install_overlay(window, cx);
+                    this.install_catalog_plugin(entry, window, cx);
+                }
+                crate::install_ui::InstallEvent::Dismissed => {
+                    this.dismiss_install_overlay(window, cx)
+                }
+            },
+        );
+        window.focus(&overlay.focus_handle(cx));
+        self.install_overlay = Some((overlay, subscription));
+        cx.notify();
+    }
+
+    fn dismiss_install_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.install_overlay = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn install_catalog_plugin(
+        &mut self,
+        entry: crate::catalog::CatalogEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fetch = cx
+            .try_global::<crate::catalog::CatalogFetcher>()
+            .map(|f| f.0.clone())
+            .unwrap_or_else(crate::catalog::ureq_fetcher);
+        let plugins_dir = crate::settings::config_dir().join("plugins");
+        let name = entry.name.clone();
+        let run = cx.background_executor().spawn(async move {
+            crate::catalog::install_plugin(&entry, &plugins_dir, &fetch)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = run.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => {
+                    this.reload_plugins(&ReloadPlugins, window, cx);
+                    this.show_command_error(format!("Installed {name}"), cx);
+                }
+                Err(e) => this.show_command_error(e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn show_command_error(&mut self, msg: String, cx: &mut Context<Self>) {
         self.command_error = Some(msg.into());
         cx.notify();
@@ -1112,6 +1209,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if id == "__install" {
+            self.open_install_overlay(window, cx);
+            return;
+        }
         // Templates need a workspace, not an editor — handled before
         // the editable-tab guard.
         if let Some(template_id) = id.strip_prefix("__template:") {
@@ -2835,6 +2936,32 @@ impl Render for Workspace {
                                     cx,
                                     |t, w, c| t.toggle_shortcuts(&ToggleShortcuts, w, c),
                                 )),
+                        ),
+                )
+            })
+            .when_some(self.install_overlay.as_ref(), |root, (overlay, _)| {
+                let overlay = overlay.clone();
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .pt(px(110.))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.dismiss_install_overlay(window, cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(overlay),
                         ),
                 )
             })
@@ -5013,6 +5140,76 @@ mod tests {
         cx.update(|_, app| {
             let msg = ws.read(app).command_error.clone().expect("error strip");
             assert!(msg.contains("ghost") || msg.contains("unknown"), "{msg}");
+        });
+    }
+
+
+    #[gpui::test]
+    fn install_overlay_flow_installs_from_the_catalog(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let _tables = crate::extensions::table_test_guard();
+        // A valid plugin zip: the echo fixture's real component under a
+        // new name, so the reloaded host actually compiles it.
+        let fixture_wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/plugins/echo/plugin.wasm");
+        if !fixture_wasm.exists() {
+            eprintln!("SKIP: fixtures not built");
+            return;
+        }
+        let wasm_bytes = std::fs::read(&fixture_wasm).unwrap();
+        let zip_bytes = {
+            use std::io::Write as _;
+            let mut buf = std::io::Cursor::new(Vec::new());
+            {
+                let mut w = zip::ZipWriter::new(&mut buf);
+                let opts = zip::write::SimpleFileOptions::default();
+                w.start_file("demo/plugin.toml", opts).unwrap();
+                w.write_all(b"name=\"demo\"\nversion=\"0.1.0\"\nformats=true\n")
+                    .unwrap();
+                w.start_file("demo/plugin.wasm", opts).unwrap();
+                w.write_all(&wasm_bytes).unwrap();
+                w.finish().unwrap();
+            }
+            buf.into_inner()
+        };
+        let sha = {
+            use sha2::Digest as _;
+            format!("{:x}", sha2::Sha256::digest(&zip_bytes))
+        };
+        let catalog_json = format!(
+            r#"{{"catalog_version":1,"plugins":[{{"name":"demo","description":"a demo","version":"0.1.0","capabilities":[],"download":"https://github.com/SuperJackfruitLabs/supermd/releases/download/v0/plugin-demo.zip","sha256":"{sha}"}}]}}"#
+        );
+        cx.update(|cx| {
+            let zip_bytes = zip_bytes.clone();
+            let catalog_json = catalog_json.clone();
+            cx.set_global(crate::catalog::CatalogFetcher(Arc::new(move |url: &str| {
+                if url.ends_with("catalog.json") {
+                    Ok(catalog_json.clone().into_bytes())
+                } else {
+                    Ok(zip_bytes.clone())
+                }
+            })));
+            // an empty host so reload_plugins has a global to swap
+            let host = crate::extensions::ExtensionHost::load(std::path::Path::new("/nonexistent"));
+            cx.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
+        });
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("supermd".into(), "__install".into(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).install_overlay.is_some(), "overlay open"));
+        cx.dispatch_action(crate::install_ui::InstallConfirm);
+        cx.run_until_parked();
+        let installed = crate::settings::config_dir().join("plugins/demo/plugin.toml");
+        assert!(installed.exists(), "plugin landed in the plugins dir");
+        cx.update(|_, app| {
+            assert!(ws.read(app).install_overlay.is_none(), "overlay closed");
+            let state = app.global::<crate::extensions::ExtensionState>();
+            let names: Vec<String> =
+                state.0.lock().unwrap().plugins().iter().map(|p| p.name.clone()).collect();
+            assert_eq!(names, ["demo"], "host reloaded with the new plugin");
         });
     }
 

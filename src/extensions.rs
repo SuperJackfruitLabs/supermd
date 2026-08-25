@@ -46,6 +46,11 @@ pub struct GrammarInfo {
 
 /// Grammar-only plugins ship grammar.wasm + highlights.scm instead of
 /// a component; anything with a component surface needs plugin.wasm.
+/// Public alias for zip validation in the catalog installer.
+pub fn manifest_needs_component(meta: &PluginMeta) -> bool {
+    needs_component(meta)
+}
+
 fn needs_component(meta: &PluginMeta) -> bool {
     meta.grammars.is_empty()
         || !meta.commands.is_empty()

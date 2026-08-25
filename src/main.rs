@@ -11,11 +11,14 @@ mod git;
 mod highlight;
 mod input;
 mod install;
+mod install_ui;
 mod markdown;
 mod palette;
 mod platform;
 mod reader;
 mod search;
+mod catalog;
+mod seeding;
 mod search_ui;
 mod seti;
 mod settings;
@@ -165,6 +168,10 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("down"), palette::PaletteDown, Some("Palette")),
             KeyBinding::new(&platform::keybinding("enter"), palette::PaletteConfirm, Some("Palette")),
             KeyBinding::new(&platform::keybinding("escape"), palette::PaletteDismiss, Some("Palette")),
+            KeyBinding::new(&platform::keybinding("up"), install_ui::InstallUp, Some("InstallOverlay")),
+            KeyBinding::new(&platform::keybinding("down"), install_ui::InstallDown, Some("InstallOverlay")),
+            KeyBinding::new(&platform::keybinding("enter"), install_ui::InstallConfirm, Some("InstallOverlay")),
+            KeyBinding::new(&platform::keybinding("escape"), install_ui::InstallDismiss, Some("InstallOverlay")),
             KeyBinding::new(&platform::keybinding("ctrl-cmd-f"), ToggleFocusMode, None),
             KeyBinding::new(&platform::keybinding("up"), search_ui::SearchUp, Some("Search")),
             KeyBinding::new(&platform::keybinding("down"), search_ui::SearchDown, Some("Search")),
@@ -348,6 +355,11 @@ fn main() {
         cx.set_global(highlight::SyntaxLanguages(Arc::new(
             highlight::Languages::new(),
         )));
+        // Seed the installer-bundled default plugins on first run
+        // (user deletions and modifications are respected).
+        if let Some(bundled) = platform::bundled_plugins_dir() {
+            seeding::run_seeding(&bundled, &settings::config_dir().join("plugins"));
+        }
         // Extension host: discover + compile plugins, snapshot the
         // contribution tables for pure discovery contexts.
         {
@@ -368,6 +380,8 @@ fn main() {
                 editor::autosave::BackupRegistry::default_dir(),
             ),
         ))));
+
+        cx.set_global(catalog::CatalogFetcher(catalog::ureq_fetcher()));
 
         extensions::start_inline_drainer(cx);
 
@@ -548,7 +562,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 102);
+        assert_eq!(bindings.len(), 106);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));

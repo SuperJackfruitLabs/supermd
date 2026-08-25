@@ -9,8 +9,18 @@ cargo build --release
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
 New-Item -ItemType Directory -Force -Path dist | Out-Null
-Compress-Archive -Force -Path target/release/supermd.exe `
+# The plain zip carries the binary plus the default plugins (seeded on
+# first run) when build_plugins.sh has staged them.
+$zipStage = "dist/zip-staging"
+if (Test-Path $zipStage) { Remove-Item -Recurse -Force $zipStage }
+New-Item -ItemType Directory -Force -Path $zipStage | Out-Null
+Copy-Item target/release/supermd.exe $zipStage/
+if (Test-Path "dist/default-plugins") {
+    Copy-Item -Recurse "dist/default-plugins" "$zipStage/plugins"
+}
+Compress-Archive -Force -Path "$zipStage/*" `
     -DestinationPath "dist/supermd-windows-x64.zip"
+Remove-Item -Recurse -Force $zipStage
 
 iscc /DAppVersion=$Version scripts/windows/supermd.iss
 if ($LASTEXITCODE -ne 0) { exit 1 }

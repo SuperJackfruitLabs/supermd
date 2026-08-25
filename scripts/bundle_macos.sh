@@ -11,7 +11,9 @@ APP="$DIST/supermd.app"
 echo "building release binary…"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
 
-rm -rf "$DIST"
+# Clear only our own outputs — dist/ may hold the staged default
+# plugins from build_plugins.sh, which ride inside the bundle.
+rm -rf "$APP" "$DIST"/supermd-*.dmg "$DIST/dmg-staging"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$ROOT/target/release/supermd" "$APP/Contents/MacOS/supermd"
@@ -66,6 +68,13 @@ PLIST
 # Sign with a Developer ID identity when provided (hardened runtime,
 # notarization-ready); otherwise ad-hoc (right-click → Open on first
 # launch).
+# Default plugins ride inside the bundle (seeded on first run); they
+# must be in place before signing so the signature covers them.
+if [ -d "$ROOT/dist/default-plugins" ]; then
+    mkdir -p "$APP/Contents/Resources/plugins"
+    cp -R "$ROOT/dist/default-plugins/." "$APP/Contents/Resources/plugins/"
+fi
+
 # Entitlements: the wasm plugin runtime needs JIT under the hardened
 # runtime (see assets/entitlements.plist) — without them the notarized
 # app is SIGKILLed on the first plugin execution.
