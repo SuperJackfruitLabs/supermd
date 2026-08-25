@@ -239,6 +239,14 @@ pub fn map_offset(block: &str, aligned: &str, offset: usize) -> usize {
     let Some(pos) = cell_at(block, offset) else {
         return offset.min(aligned.len());
     };
+    // Past the row's last cell (the trailing `|` region): stay at the
+    // row's end so an Enter there still lands after the row.
+    let rs = rows(block);
+    if let (Some(row), Some(arow)) = (rs.get(pos.row), rows(aligned).get(pos.row)) {
+        if row.cells.last().is_some_and(|c| offset > c.end) {
+            return arow.line.end;
+        }
+    }
     let (Some(from), Some(to)) = (cell_range(block, pos), cell_range(aligned, pos)) else {
         return offset.min(aligned.len());
     };
@@ -343,6 +351,20 @@ mod tests {
     #[test]
     fn new_row_matches_the_column_count() {
         assert_eq!(new_row(ALIGNED), "|    |      |");
+    }
+
+    #[test]
+    fn map_offset_keeps_line_ends_outside_the_cells() {
+        // Cursor at a row's end (after the closing pipe) must stay at
+        // the row's end — mapping it into the last cell would make a
+        // following Enter split the row.
+        let block = "| a | bbbb |\n| ppp | q |";
+        let aligned = align(block);
+        let row_end = block.find('\n').unwrap();
+        let mapped = map_offset(block, &aligned, row_end);
+        assert_eq!(mapped, aligned.find('\n').unwrap());
+        let mapped = map_offset(block, &aligned, block.len());
+        assert_eq!(mapped, aligned.len());
     }
 
     #[test]

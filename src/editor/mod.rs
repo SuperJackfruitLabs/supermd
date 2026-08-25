@@ -884,6 +884,22 @@ impl Editor {
         }
         if self.core.selection.is_cursor() {
             let head = self.core.selection.head;
+            // Enter inside a table: tidy the block first, keeping the
+            // cursor at its row boundary so the row stays whole.
+            let text = self.core.buffer.text();
+            if let Some(br) = table_edit::table_block(&text, head) {
+                let block = &text[br.clone()];
+                let aligned = table_edit::align(block);
+                if aligned != block {
+                    let mapped =
+                        br.start + table_edit::map_offset(block, &aligned, head - br.start);
+                    self.core.break_undo_group();
+                    self.core.replace_range(br.clone(), &aligned, Instant::now());
+                    self.core.set_cursor(mapped);
+                }
+                self.insert_str("\n", cx);
+                return;
+            }
             let line_ix = self.core.buffer.line_of_byte(head);
             let line_start = self.core.buffer.line_range(line_ix).start;
             if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
@@ -909,18 +925,31 @@ impl Editor {
     }
 
     fn insert_tab(&mut self, _: &InsertTab, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_code_mode() && self.core.selection.is_cursor() {
-            let line_ix = self.core.buffer.line_of_byte(self.core.selection.head);
-            if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
-                self.reindent_line(line_ix, item.indent_step as isize, cx);
+        if !self.is_code_mode() {
+            // Selections included: a previous Tab leaves the next cell
+            // selected, and Tab again must keep hopping.
+            if self.table_tab(false, cx) {
                 return;
+            }
+            if self.core.selection.is_cursor() {
+                let line_ix = self.core.buffer.line_of_byte(self.core.selection.head);
+                if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
+                    self.reindent_line(line_ix, item.indent_step as isize, cx);
+                    return;
+                }
             }
         }
         self.insert_str("\t", cx);
     }
 
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_code_mode() && self.core.selection.is_cursor() {
+        if self.is_code_mode() {
+            return;
+        }
+        if self.table_tab(true, cx) {
+            return;
+        }
+        if self.core.selection.is_cursor() {
             let line_ix = self.core.buffer.line_of_byte(self.core.selection.head);
             if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
                 let step = (item.indent_step.min(item.indent)) as isize;
@@ -928,6 +957,90 @@ impl Editor {
                     self.reindent_line(line_ix, -step, cx);
                 }
             }
+        }
+    }
+
+    /// Tab inside a table: align the block, then select the next (or
+    /// previous) cell; Tab off the last cell appends an empty row.
+    /// One undo group per press.
+    fn table_tab(&mut self, backward: bool, cx: &mut Context<Self>) -> bool {
+        let head = self.core.selection.head;
+        let text = self.core.buffer.text();
+        let Some(br) = table_edit::table_block(&text, head) else {
+            return false;
+        };
+        let block = text[br.clone()].to_string();
+        let Some(pos) = table_edit::cell_at(&block, head - br.start) else {
+            return false;
+        };
+        let aligned = table_edit::align(&block);
+        self.core.break_undo_group();
+        if aligned != block {
+            self.core.replace_range(br.clone(), &aligned, Instant::now());
+        }
+        let base = br.start;
+        let select = |range: Range<usize>| Selection {
+            anchor: base + range.start,
+            head: base + range.end,
+        };
+        match table_edit::next_pos(&aligned, pos, backward) {
+            Some(p) => {
+                if let Some(r) = table_edit::cell_range(&aligned, p) {
+                    self.core.selection = select(r);
+                }
+            }
+            // Backward off the first cell: stay in place.
+            None if backward => {
+                if let Some(r) = table_edit::cell_range(&aligned, pos) {
+                    self.core.selection = select(r);
+                }
+            }
+            None => {
+                let row = table_edit::new_row(&aligned);
+                let insert_at = base + aligned.len();
+                self.core
+                    .replace_range(insert_at..insert_at, &format!("\n{row}"), Instant::now());
+                let combined = format!("{aligned}\n{row}");
+                let last = table_edit::rows(&combined).len() - 1;
+                if let Some(r) =
+                    table_edit::cell_range(&combined, table_edit::CellPos { row: last, cell: 0 })
+                {
+                    self.core.selection = select(r);
+                }
+            }
+        }
+        self.core.break_undo_group();
+        self.after_edit(cx);
+        true
+    }
+
+    /// A click that moves the cursor out of a table tidies the table
+    /// it left. Returns the click offset adjusted for the alignment.
+    fn tidy_table_on_leave(&mut self, target: usize, cx: &mut Context<Self>) -> usize {
+        if self.is_code_mode() {
+            return target;
+        }
+        let head = self.core.selection.head;
+        let text = self.core.buffer.text();
+        let Some(br) = table_edit::table_block(&text, head) else {
+            return target;
+        };
+        if target >= br.start && target <= br.end {
+            return target; // still inside the table
+        }
+        let block = &text[br.clone()];
+        let aligned = table_edit::align(block);
+        if aligned == block {
+            return target;
+        }
+        self.core.break_undo_group();
+        self.core.replace_range(br.clone(), &aligned, Instant::now());
+        self.core.break_undo_group();
+        self.after_edit(cx);
+        if target > br.end {
+            (target as isize + aligned.len() as isize - block.len() as isize) as usize
+        } else {
+            target
         }
     }
 
@@ -1391,6 +1504,7 @@ impl Editor {
         let offset = self
             .offset_at_point(event.position)
             .unwrap_or_else(|| self.core.buffer.line_range(line_ix).start);
+        let offset = self.tidy_table_on_leave(offset, cx);
         if event.modifiers.shift {
             self.core.select_to(offset);
         } else {
@@ -3767,6 +3881,78 @@ mod tests {
         cx.dispatch_action(DocEnd);
         cx.dispatch_action(InsertTab);
         assert_eq!(buffer_text(&editor, cx), "text\t");
+    }
+
+    #[gpui::test]
+    fn tab_hops_table_cells_aligning_and_appending_rows(cx: &mut TestAppContext) {
+        let doc = "| h1 | h2 |\n|---|---|\n| a | bbbb |";
+        let (_fx, editor, cx) = open_editor(cx, "table.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(3); // inside "h1"
+            cx.notify();
+        });
+        let aligned = "| h1 | h2   |\n| -- | ---- |\n| a  | bbbb |";
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), aligned);
+        let sel_text = |cx: &mut VisualTestContext| {
+            cx.update(|_, app| {
+                let ed = editor.read(app);
+                ed.core.buffer.text()[ed.core.selection.range()].to_string()
+            })
+        };
+        assert_eq!(sel_text(cx), "h2", "tab selects the next cell");
+        cx.dispatch_action(InsertTab);
+        assert_eq!(sel_text(cx), "a", "skips the separator row");
+        cx.dispatch_action(InsertTab);
+        assert_eq!(sel_text(cx), "bbbb");
+        // Tab off the last cell appends an empty row.
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), format!("{aligned}\n|    |      |"));
+        cx.update(|_, app| {
+            assert!(editor.read(app).core.selection.is_cursor(), "empty cell is a cursor");
+        });
+        // Shift-Tab walks back from the new row.
+        cx.dispatch_action(Outdent);
+        assert_eq!(sel_text(cx), "bbbb");
+        // One undo drops the appended row (single group per press).
+        cx.dispatch_action(Undo);
+        assert_eq!(buffer_text(&editor, cx), aligned);
+    }
+
+    #[gpui::test]
+    fn enter_in_a_table_aligns_and_leaves_the_row_intact(cx: &mut TestAppContext) {
+        let doc = "| a | bbbb |\n| ppp | q |";
+        let (_fx, editor, cx) = open_editor(cx, "table.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(doc.find('\n').unwrap()); // end of row one
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "| a   | bbbb |\n\n| ppp | q    |",
+            "row aligned, newline after the full row"
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_away_from_a_table_tidies_it(cx: &mut TestAppContext) {
+        let doc = "| a | bbbb |\n| ppp | q |\n\ntail here";
+        let (_fx, editor, cx) = open_editor(cx, "table.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(2); // inside "a"
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let p = point_for_index(&editor, cx, 3, 2); // "tail here" line
+        cx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(p, MouseButton::Left, Modifiers::none());
+        assert_eq!(buffer_text(&editor, cx), "| a   | bbbb |\n| ppp | q    |\n\ntail here");
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let line = ed.core.buffer.line_of_byte(ed.core.selection.head);
+            assert_eq!(line, 3, "cursor landed on the clicked line");
+        });
     }
 
     #[gpui::test]
