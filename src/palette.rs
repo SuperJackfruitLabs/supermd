@@ -3,8 +3,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    actions, div, px, uniform_list, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
 
 use crate::input::TextInput;
@@ -33,6 +33,7 @@ pub struct Palette {
     matches: Vec<usize>,
     selected: usize,
     last_query: String,
+    scroll: gpui::UniformListScrollHandle,
     _watch_input: Subscription,
 }
 
@@ -69,6 +70,7 @@ impl Palette {
             matches: Vec::new(),
             selected: 0,
             last_query: String::new(),
+            scroll: gpui::UniformListScrollHandle::default(),
             _watch_input: watch,
         };
         palette.refilter();
@@ -79,11 +81,18 @@ impl Palette {
         let titles: Vec<String> = self.entries.iter().map(|e| e.title.clone()).collect();
         self.matches = filter(&self.last_query, &titles);
         self.selected = 0;
+        self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+    }
+
+    fn reveal_selected(&self) {
+        self.scroll
+            .scroll_to_item(self.selected, gpui::ScrollStrategy::Center);
     }
 
     fn up(&mut self, _: &PaletteUp, _: &mut Window, cx: &mut Context<Self>) {
         if !self.matches.is_empty() {
             self.selected = (self.selected + self.matches.len() - 1) % self.matches.len();
+            self.reveal_selected();
             cx.notify();
         }
     }
@@ -91,6 +100,7 @@ impl Palette {
     fn down(&mut self, _: &PaletteDown, _: &mut Window, cx: &mut Context<Self>) {
         if !self.matches.is_empty() {
             self.selected = (self.selected + 1) % self.matches.len();
+            self.reveal_selected();
             cx.notify();
         }
     }
@@ -122,43 +132,51 @@ impl Render for Palette {
         let t = theme(cx);
         let selected = self.selected;
 
-        let rows: Vec<gpui::AnyElement> = self
-            .matches
-            .iter()
-            .enumerate()
-            .map(|(ix, &entry_ix)| {
-                let entry = &self.entries[entry_ix];
-                let is_selected = ix == selected;
-                div()
-                    .id(("palette-row", ix))
-                    .w_full()
-                    .px_3()
-                    .py(px(6.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .cursor_pointer()
-                    .when(is_selected, |d| d.bg(t.selected_bg))
-                    .when(!is_selected, |d| d.hover(|s| s.bg(t.hover_bg)))
-                    .child(
+        let list = uniform_list(
+            "palette-rows",
+            self.matches.len(),
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                let t = theme(cx);
+                range
+                    .map(|ix| {
+                        let Some(&entry_ix) = this.matches.get(ix) else {
+                            return div().id(ix);
+                        };
+                        let entry = &this.entries[entry_ix];
+                        let is_selected = ix == this.selected;
                         div()
-                            .flex_1()
-                            .text_size(px(13.))
-                            .text_color(t.fg_strong)
-                            .child(SharedString::from(entry.title.clone())),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(t.fg_muted)
-                            .child(SharedString::from(entry.plugin.clone())),
-                    )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                        this.confirm_index(ix, cx);
-                    }))
-                    .into_any_element()
-            })
-            .collect();
+                            .id(ix)
+                            .w_full()
+                            .h(px(30.))
+                            .px_3()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .cursor_pointer()
+                            .when(is_selected, |d| d.bg(t.selected_bg))
+                            .when(!is_selected, |d| d.hover(|s| s.bg(t.hover_bg)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(13.))
+                                    .text_color(t.fg_strong)
+                                    .child(SharedString::from(entry.title.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(t.fg_muted)
+                                    .child(SharedString::from(entry.plugin.clone())),
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                this.confirm_index(ix, cx);
+                            }))
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(self.scroll.clone())
+        .h_full();
 
         let failures: Vec<gpui::AnyElement> = self
             .failures
@@ -185,7 +203,7 @@ impl Render for Palette {
             .on_action(cx.listener(Self::dismiss))
             .w(px(480.))
             .max_w(gpui::relative(0.9))
-            .max_h(px(400.))
+            .h(px(400.))
             .flex_none()
             .bg(t.panel_bg)
             .border_1()
@@ -211,7 +229,7 @@ impl Render for Palette {
                     .py_1()
                     .flex()
                     .flex_col()
-                    .children(rows)
+                    .child(div().flex_1().min_h_0().child(list))
                     .children(failures)
                     .children(empty.then(|| {
                         div()

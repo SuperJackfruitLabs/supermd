@@ -4,8 +4,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, SharedString, Styled, Window,
+    actions, div, px, uniform_list, ClickEvent, Context, EventEmitter, FocusHandle, Focusable,
+    IntoElement, ParentElement, Render, SharedString, Styled, Window,
 };
 
 use crate::catalog::CatalogEntry;
@@ -23,6 +23,7 @@ pub struct InstallOverlay {
     installed: Vec<String>,
     selected: usize,
     focus_handle: FocusHandle,
+    scroll: gpui::UniformListScrollHandle,
 }
 
 impl EventEmitter<InstallEvent> for InstallOverlay {}
@@ -44,7 +45,13 @@ impl InstallOverlay {
         installed: Vec<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self { entries, installed, selected: 0, focus_handle: cx.focus_handle() }
+        Self {
+            entries,
+            installed,
+            selected: 0,
+            focus_handle: cx.focus_handle(),
+            scroll: gpui::UniformListScrollHandle::default(),
+        }
     }
 
     fn is_installed(&self, entry: &CatalogEntry) -> bool {
@@ -54,6 +61,7 @@ impl InstallOverlay {
     fn up(&mut self, _: &InstallUp, _: &mut Window, cx: &mut Context<Self>) {
         if !self.entries.is_empty() {
             self.selected = (self.selected + self.entries.len() - 1) % self.entries.len();
+            self.reveal_selected();
             cx.notify();
         }
     }
@@ -61,8 +69,14 @@ impl InstallOverlay {
     fn down(&mut self, _: &InstallDown, _: &mut Window, cx: &mut Context<Self>) {
         if !self.entries.is_empty() {
             self.selected = (self.selected + 1) % self.entries.len();
+            self.reveal_selected();
             cx.notify();
         }
+    }
+
+    fn reveal_selected(&self) {
+        self.scroll
+            .scroll_to_item(self.selected, gpui::ScrollStrategy::Center);
     }
 
     fn confirm(&mut self, _: &InstallConfirm, _: &mut Window, cx: &mut Context<Self>) {
@@ -93,56 +107,75 @@ impl Render for InstallOverlay {
         let t = theme(cx);
         let selected = self.selected;
 
-        let rows: Vec<gpui::AnyElement> = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(ix, entry)| {
-                let installed = self.is_installed(entry);
-                let is_selected = ix == selected;
-                let mut row = div()
-                    .id(("install-row", ix))
-                    .w_full()
-                    .px_3()
-                    .py(px(7.))
-                    .flex()
-                    .flex_col()
-                    .when(is_selected, |d| d.bg(t.selected_bg))
-                    .when(!is_selected && !installed, |d| d.hover(|s| s.bg(t.hover_bg)));
-                if !installed {
-                    row = row
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                            this.confirm_index(ix, cx);
-                        }));
-                }
-                let title_color = if installed { t.fg_muted } else { t.fg_strong };
-                let title = if installed {
-                    format!("{}  ✓ installed", entry.name)
-                } else {
-                    entry.name.clone()
-                };
-                let mut body = div()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(title_color)
-                            .child(SharedString::from(title)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(t.fg_muted)
-                            .child(SharedString::from(entry.description.clone())),
-                    );
-                if let Some(blurb) = capability_blurb(&entry.capabilities) {
-                    body = body.child(
-                        div().text_size(px(11.)).text_color(t.accent).child(blurb),
-                    );
-                }
-                row.child(body).into_any_element()
-            })
-            .collect();
+        let list = uniform_list(
+            "install-rows",
+            self.entries.len(),
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                let t = theme(cx);
+                range
+                    .map(|ix| {
+                        let Some(entry) = this.entries.get(ix) else {
+                            return div().id(ix);
+                        };
+                        let installed = this.is_installed(entry);
+                        let is_selected = ix == this.selected;
+                        let title_color = if installed { t.fg_muted } else { t.fg_strong };
+                        let title = if installed {
+                            format!("{}  ✓ installed", entry.name)
+                        } else {
+                            entry.name.clone()
+                        };
+                        let mut header = div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(title_color)
+                                    .child(SharedString::from(title)),
+                            );
+                        if let Some(blurb) = capability_blurb(&entry.capabilities) {
+                            header = header.child(
+                                div().text_size(px(11.)).text_color(t.accent).child(blurb),
+                            );
+                        }
+                        let mut row = div()
+                            .id(ix)
+                            .w_full()
+                            .h(px(46.))
+                            .px_3()
+                            .py(px(5.))
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .when(is_selected, |d| d.bg(t.selected_bg))
+                            .when(!is_selected && !installed, |d| {
+                                d.hover(|st| st.bg(t.hover_bg))
+                            })
+                            .child(header)
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(t.fg_muted)
+                                    .overflow_hidden()
+                                    .child(SharedString::from(entry.description.clone())),
+                            );
+                        if !installed {
+                            row = row.cursor_pointer().on_click(cx.listener(
+                                move |this, _: &ClickEvent, _w, cx| {
+                                    this.confirm_index(ix, cx);
+                                },
+                            ));
+                        }
+                        row
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(self.scroll.clone())
+        .h_full();
 
         div()
             .key_context("InstallOverlay")
@@ -153,7 +186,7 @@ impl Render for InstallOverlay {
             .on_action(cx.listener(Self::dismiss))
             .w(px(480.))
             .max_w(gpui::relative(0.9))
-            .max_h(px(440.))
+            .h(px(440.))
             .flex_none()
             .bg(t.panel_bg)
             .border_1()
@@ -173,7 +206,7 @@ impl Render for InstallOverlay {
                     .text_color(t.fg_strong)
                     .child("Install Plugins"),
             )
-            .child(div().flex_1().min_h_0().overflow_hidden().py_1().flex().flex_col().children(rows))
+            .child(div().flex_1().min_h_0().py_1().child(list))
             .child(
                 div()
                     .px_3()
