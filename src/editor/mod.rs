@@ -9,6 +9,9 @@ pub mod core;
 pub mod display;
 pub mod find;
 pub mod formatting;
+pub mod lists;
+pub mod paste_image;
+pub mod table_edit;
 pub mod movement;
 pub mod projection;
 pub mod projector;
@@ -46,7 +49,7 @@ actions!(
         SelectLineStart, SelectLineEnd, DocStart, DocEnd, PageUp, PageDown, Backspace, Delete,
         DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow,
         OpenFind, FindNext, FindPrev, CloseFind, ToggleBold, ToggleItalic, ToggleCode,
-        ToggleStrike, InsertLink, CycleHeading, ToggleQuote
+        ToggleStrike, InsertLink, CycleHeading, ToggleQuote, Outdent
     ]
 );
 
@@ -878,13 +881,188 @@ impl Editor {
         if self.is_code_mode() {
             self.core.insert_newline_auto_indent(Instant::now());
             self.after_edit(cx);
-        } else {
-            self.insert_str("\n", cx);
+            return;
         }
+        if self.core.selection.is_cursor() {
+            let head = self.core.selection.head;
+            // Enter inside a table: tidy the block first, keeping the
+            // cursor at its row boundary so the row stays whole.
+            let text = self.core.buffer.text();
+            if let Some(br) = table_edit::table_block(&text, head) {
+                let block = &text[br.clone()];
+                let aligned = table_edit::align(block);
+                if aligned != block {
+                    let mapped =
+                        br.start + table_edit::map_offset(block, &aligned, head - br.start);
+                    self.core.break_undo_group();
+                    self.core.replace_range(br.clone(), &aligned, Instant::now());
+                    self.core.set_cursor(mapped);
+                }
+                self.insert_str("\n", cx);
+                return;
+            }
+            let line_ix = self.core.buffer.line_of_byte(head);
+            let line_start = self.core.buffer.line_range(line_ix).start;
+            if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
+                if item.content_empty {
+                    // Enter on a bare marker ends the list instead of
+                    // spawning another empty item.
+                    self.core.replace_range(
+                        line_start..line_start + item.indent + item.marker_len,
+                        "",
+                        Instant::now(),
+                    );
+                    self.core.break_undo_group();
+                    self.after_edit(cx);
+                    return;
+                }
+                let line = self.core.buffer.line_text(line_ix);
+                let indent = &line[..item.indent];
+                self.insert_str(&format!("\n{indent}{}", item.next_marker), cx);
+                return;
+            }
+        }
+        self.insert_str("\n", cx);
     }
 
     fn insert_tab(&mut self, _: &InsertTab, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_code_mode() {
+            // Selections included: a previous Tab leaves the next cell
+            // selected, and Tab again must keep hopping.
+            if self.table_tab(false, cx) {
+                return;
+            }
+            if self.core.selection.is_cursor() {
+                let line_ix = self.core.buffer.line_of_byte(self.core.selection.head);
+                if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
+                    self.reindent_line(line_ix, item.indent_step as isize, cx);
+                    return;
+                }
+            }
+        }
         self.insert_str("\t", cx);
+    }
+
+    fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_code_mode() {
+            return;
+        }
+        if self.table_tab(true, cx) {
+            return;
+        }
+        if self.core.selection.is_cursor() {
+            let line_ix = self.core.buffer.line_of_byte(self.core.selection.head);
+            if let Some(item) = lists::list_item(&self.core.buffer.line_text(line_ix)) {
+                let step = (item.indent_step.min(item.indent)) as isize;
+                if step > 0 {
+                    self.reindent_line(line_ix, -step, cx);
+                }
+            }
+        }
+    }
+
+    /// Tab inside a table: align the block, then select the next (or
+    /// previous) cell; Tab off the last cell appends an empty row.
+    /// One undo group per press.
+    fn table_tab(&mut self, backward: bool, cx: &mut Context<Self>) -> bool {
+        let head = self.core.selection.head;
+        let text = self.core.buffer.text();
+        let Some(br) = table_edit::table_block(&text, head) else {
+            return false;
+        };
+        let block = text[br.clone()].to_string();
+        let Some(pos) = table_edit::cell_at(&block, head - br.start) else {
+            return false;
+        };
+        let aligned = table_edit::align(&block);
+        self.core.break_undo_group();
+        if aligned != block {
+            self.core.replace_range(br.clone(), &aligned, Instant::now());
+        }
+        let base = br.start;
+        let select = |range: Range<usize>| Selection {
+            anchor: base + range.start,
+            head: base + range.end,
+        };
+        match table_edit::next_pos(&aligned, pos, backward) {
+            Some(p) => {
+                if let Some(r) = table_edit::cell_range(&aligned, p) {
+                    self.core.selection = select(r);
+                }
+            }
+            // Backward off the first cell: stay in place.
+            None if backward => {
+                if let Some(r) = table_edit::cell_range(&aligned, pos) {
+                    self.core.selection = select(r);
+                }
+            }
+            None => {
+                let row = table_edit::new_row(&aligned);
+                let insert_at = base + aligned.len();
+                self.core
+                    .replace_range(insert_at..insert_at, &format!("\n{row}"), Instant::now());
+                let combined = format!("{aligned}\n{row}");
+                let last = table_edit::rows(&combined).len() - 1;
+                if let Some(r) =
+                    table_edit::cell_range(&combined, table_edit::CellPos { row: last, cell: 0 })
+                {
+                    self.core.selection = select(r);
+                }
+            }
+        }
+        self.core.break_undo_group();
+        self.after_edit(cx);
+        true
+    }
+
+    /// A click that moves the cursor out of a table tidies the table
+    /// it left. Returns the click offset adjusted for the alignment.
+    fn tidy_table_on_leave(&mut self, target: usize, cx: &mut Context<Self>) -> usize {
+        if self.is_code_mode() {
+            return target;
+        }
+        let head = self.core.selection.head;
+        let text = self.core.buffer.text();
+        let Some(br) = table_edit::table_block(&text, head) else {
+            return target;
+        };
+        if target >= br.start && target <= br.end {
+            return target; // still inside the table
+        }
+        let block = &text[br.clone()];
+        let aligned = table_edit::align(block);
+        if aligned == block {
+            return target;
+        }
+        self.core.break_undo_group();
+        self.core.replace_range(br.clone(), &aligned, Instant::now());
+        self.core.break_undo_group();
+        self.after_edit(cx);
+        if target > br.end {
+            (target as isize + aligned.len() as isize - block.len() as isize) as usize
+        } else {
+            target
+        }
+    }
+
+    /// Add (or remove, when negative) leading spaces on a line while
+    /// keeping the cursor over the same character.
+    fn reindent_line(&mut self, line_ix: usize, delta: isize, cx: &mut Context<Self>) {
+        let line_start = self.core.buffer.line_range(line_ix).start;
+        let saved = self.core.selection;
+        if delta >= 0 {
+            self.core
+                .replace_range(line_start..line_start, &" ".repeat(delta as usize), Instant::now());
+        } else {
+            self.core
+                .replace_range(line_start..line_start + (-delta) as usize, "", Instant::now());
+        }
+        self.core.break_undo_group();
+        let shift = |offset: usize| {
+            (offset as isize + delta).max(line_start as isize) as usize
+        };
+        self.core.selection = Selection { anchor: shift(saved.anchor), head: shift(saved.head) };
+        self.after_edit(cx);
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -1001,7 +1179,23 @@ impl Editor {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        // Image on the clipboard: save it beside the document and
+        // insert the link. Markdown buffers only.
+        if self.can_format() {
+            let image = item.entries().iter().find_map(|entry| match entry {
+                gpui::ClipboardEntry::Image(image) => Some(image),
+                _ => None,
+            });
+            if let Some(image) = image {
+                if self.paste_image(&image.clone(), cx) {
+                    return;
+                }
+            }
+        }
+        if let Some(text) = item.text() {
             // Paste processors: first Some wins; errors/None pass the
             // original through. Synchronous under the epoch deadline —
             // paste is an explicit action.
@@ -1031,6 +1225,32 @@ impl Editor {
                 self.start_enrich(cx);
             }
         }
+    }
+
+    /// Write a pasted image into `assets/` beside the document and
+    /// insert its markdown link. False on any I/O failure — the paste
+    /// then falls back to whatever text the clipboard held.
+    fn paste_image(&mut self, image: &gpui::Image, cx: &mut Context<Self>) -> bool {
+        let Some(dir) = self.path.parent() else {
+            return false;
+        };
+        let assets = dir.join("assets");
+        if let Err(err) = std::fs::create_dir_all(&assets) {
+            eprintln!("supermd: cannot create {}: {err}", assets.display());
+            return false;
+        }
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let name = paste_image::pick_name(
+            |candidate| assets.join(candidate).exists(),
+            &stamp,
+            paste_image::extension(image.format()),
+        );
+        if let Err(err) = std::fs::write(assets.join(&name), image.bytes()) {
+            eprintln!("supermd: cannot write pasted image: {err}");
+            return false;
+        }
+        self.insert_str(&paste_image::markdown_link(&name), cx);
+        true
     }
 
     /// Run net-capable paste plugins in the background; first Some
@@ -1327,6 +1547,7 @@ impl Editor {
         let offset = self
             .offset_at_point(event.position)
             .unwrap_or_else(|| self.core.buffer.line_range(line_ix).start);
+        let offset = self.tidy_table_on_leave(offset, cx);
         if event.modifiers.shift {
             self.core.select_to(offset);
         } else {
@@ -1872,6 +2093,30 @@ impl EntityInputHandler for Editor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Typing a marker over a selection wraps it instead of
+        // replacing; repeated presses stack (`*` then `*` → `**`).
+        if range_utf16.is_none()
+            && self.marked_range.is_none()
+            && !self.core.selection.is_cursor()
+            && self.can_format()
+            && matches!(new_text, "*" | "_" | "`" | "~")
+        {
+            let range = self.core.selection.range();
+            let content = self.core.selected_text();
+            self.core.break_undo_group();
+            self.core.replace_range(
+                range.clone(),
+                &format!("{new_text}{content}{new_text}"),
+                Instant::now(),
+            );
+            self.core.selection = Selection {
+                anchor: range.start + new_text.len(),
+                head: range.start + new_text.len() + content.len(),
+            };
+            self.core.break_undo_group();
+            self.after_edit(cx);
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -2574,6 +2819,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::delete_word_left))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::insert_tab))
+            .on_action(cx.listener(Self::outdent))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::select_all))
@@ -3643,6 +3889,198 @@ mod tests {
             );
         });
         cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::shift());
+    }
+
+    #[gpui::test]
+    fn enter_continues_lists_and_empty_items_end_them(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "list.md", "- milk");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "- milk\n- ");
+        cx.simulate_input("eggs");
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "- milk\n- eggs\n- ");
+        // Enter on the empty item removes the marker and ends the list.
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "- milk\n- eggs\n");
+
+        // Numbers increment; tasks continue unchecked; indent carries.
+        let (_fx2, editor, cx) = open_editor(cx, "more.md", "  3. three");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "  3. three\n  4. ");
+        let (_fx3, editor, cx) = open_editor(cx, "task.md", "- [x] done");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "- [x] done\n- [ ] ");
+    }
+
+    #[gpui::test]
+    fn enter_off_lists_and_in_code_keeps_old_behavior(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "plain.md", "hello");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "hello\n");
+        // Code mode still auto-indents instead of continuing lists.
+        let (_fx2, editor, cx) = open_editor(cx, "code.rs", "    - x");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "    - x\n    ");
+    }
+
+    #[gpui::test]
+    fn tab_indents_list_items_and_shift_tab_outdents(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "list.md", "- a\n- bike");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), "- a\n  - bike");
+        assert_eq!(head(&editor, cx), 12, "cursor rides the shifted line");
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), "- a\n    - bike");
+        cx.dispatch_action(Outdent);
+        cx.dispatch_action(Outdent);
+        assert_eq!(buffer_text(&editor, cx), "- a\n- bike");
+        cx.dispatch_action(Outdent);
+        assert_eq!(buffer_text(&editor, cx), "- a\n- bike", "flat items stay put");
+
+        // Outside a list, Tab still types a literal tab.
+        let (_fx2, editor, cx) = open_editor(cx, "plain.md", "text");
+        cx.dispatch_action(DocEnd);
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), "text\t");
+    }
+
+    #[gpui::test]
+    fn pasting_a_clipboard_image_saves_an_asset_and_links_it(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "doc.md", "start ");
+        cx.dispatch_action(DocEnd);
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_image(&gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                vec![1, 2, 3, 4],
+            )));
+        });
+        cx.dispatch_action(Paste);
+        let text = buffer_text(&editor, cx);
+        assert!(
+            text.starts_with("start ![](assets/pasted-") && text.ends_with(".png)"),
+            "{text:?}"
+        );
+        let name = text
+            .strip_prefix("start ![](assets/")
+            .unwrap()
+            .strip_suffix(")")
+            .unwrap();
+        let on_disk = fx.path.parent().unwrap().join("assets").join(name);
+        assert_eq!(std::fs::read(on_disk).unwrap(), vec![1, 2, 3, 4]);
+
+        // Code buffers ignore image pastes entirely.
+        let (fx2, editor, cx) = open_editor(cx, "code.rs", "fn x() {}");
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_image(&gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                vec![9],
+            )));
+        });
+        cx.dispatch_action(Paste);
+        assert_eq!(buffer_text(&editor, cx), "fn x() {}");
+        assert!(!fx2.path.parent().unwrap().join("assets").exists());
+    }
+
+    #[gpui::test]
+    fn typing_a_marker_wraps_the_selection(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "wrap.md", "pick me now");
+        select(&editor, cx, 5..7);
+        cx.simulate_input("*");
+        assert_eq!(buffer_text(&editor, cx), "pick *me* now");
+        // The content stays selected, so a second press upgrades to bold.
+        cx.simulate_input("*");
+        assert_eq!(buffer_text(&editor, cx), "pick **me** now");
+        select(&editor, cx, 7..9);
+        cx.simulate_input("`");
+        assert_eq!(buffer_text(&editor, cx), "pick **`me`** now");
+        // Ordinary characters still replace the selection.
+        let (_fx2, editor, cx) = open_editor(cx, "wrap2.md", "pick me now");
+        select(&editor, cx, 5..7);
+        cx.simulate_input("x");
+        assert_eq!(buffer_text(&editor, cx), "pick x now");
+        // Markers replace as usual outside markdown.
+        let (_fx3, editor, cx) = open_editor(cx, "wrap.rs", "let x = 1;");
+        select(&editor, cx, 4..5);
+        cx.simulate_input("*");
+        assert_eq!(buffer_text(&editor, cx), "let * = 1;");
+    }
+
+    #[gpui::test]
+    fn tab_hops_table_cells_aligning_and_appending_rows(cx: &mut TestAppContext) {
+        let doc = "| h1 | h2 |\n|---|---|\n| a | bbbb |";
+        let (_fx, editor, cx) = open_editor(cx, "table.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(3); // inside "h1"
+            cx.notify();
+        });
+        let aligned = "| h1 | h2   |\n| -- | ---- |\n| a  | bbbb |";
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), aligned);
+        let sel_text = |cx: &mut VisualTestContext| {
+            cx.update(|_, app| {
+                let ed = editor.read(app);
+                ed.core.buffer.text()[ed.core.selection.range()].to_string()
+            })
+        };
+        assert_eq!(sel_text(cx), "h2", "tab selects the next cell");
+        cx.dispatch_action(InsertTab);
+        assert_eq!(sel_text(cx), "a", "skips the separator row");
+        cx.dispatch_action(InsertTab);
+        assert_eq!(sel_text(cx), "bbbb");
+        // Tab off the last cell appends an empty row.
+        cx.dispatch_action(InsertTab);
+        assert_eq!(buffer_text(&editor, cx), format!("{aligned}\n|    |      |"));
+        cx.update(|_, app| {
+            assert!(editor.read(app).core.selection.is_cursor(), "empty cell is a cursor");
+        });
+        // Shift-Tab walks back from the new row.
+        cx.dispatch_action(Outdent);
+        assert_eq!(sel_text(cx), "bbbb");
+        // One undo drops the appended row (single group per press).
+        cx.dispatch_action(Undo);
+        assert_eq!(buffer_text(&editor, cx), aligned);
+    }
+
+    #[gpui::test]
+    fn enter_in_a_table_aligns_and_leaves_the_row_intact(cx: &mut TestAppContext) {
+        let doc = "| a | bbbb |\n| ppp | q |";
+        let (_fx, editor, cx) = open_editor(cx, "table.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(doc.find('\n').unwrap()); // end of row one
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "| a   | bbbb |\n\n| ppp | q    |",
+            "row aligned, newline after the full row"
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_away_from_a_table_tidies_it(cx: &mut TestAppContext) {
+        let doc = "| a | bbbb |\n| ppp | q |\n\ntail here";
+        let (_fx, editor, cx) = open_editor(cx, "table.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(2); // inside "a"
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let p = point_for_index(&editor, cx, 3, 2); // "tail here" line
+        cx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(p, MouseButton::Left, Modifiers::none());
+        assert_eq!(buffer_text(&editor, cx), "| a   | bbbb |\n| ppp | q    |\n\ntail here");
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let line = ed.core.buffer.line_of_byte(ed.core.selection.head);
+            assert_eq!(line, 3, "cursor landed on the clicked line");
+        });
     }
 
     #[gpui::test]

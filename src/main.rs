@@ -238,6 +238,7 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("alt-backspace"), editor::DeleteWordLeft, Some("Editor")),
             KeyBinding::new(&platform::keybinding("enter"), editor::Newline, Some("Editor")),
             KeyBinding::new(&platform::keybinding("tab"), editor::InsertTab, Some("Editor")),
+            KeyBinding::new(&platform::keybinding("shift-tab"), editor::Outdent, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-z"), editor::Undo, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-shift-z"), editor::Redo, Some("Editor")),
             KeyBinding::new(&platform::keybinding("cmd-a"), editor::SelectAll, Some("Editor")),
@@ -566,7 +567,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 108);
+        assert_eq!(bindings.len(), 109);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));
