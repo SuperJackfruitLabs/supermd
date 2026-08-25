@@ -10,6 +10,7 @@ pub mod display;
 pub mod find;
 pub mod formatting;
 pub mod lists;
+pub mod paste_image;
 pub mod table_edit;
 pub mod movement;
 pub mod projection;
@@ -1178,7 +1179,23 @@ impl Editor {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        // Image on the clipboard: save it beside the document and
+        // insert the link. Markdown buffers only.
+        if self.can_format() {
+            let image = item.entries().iter().find_map(|entry| match entry {
+                gpui::ClipboardEntry::Image(image) => Some(image),
+                _ => None,
+            });
+            if let Some(image) = image {
+                if self.paste_image(&image.clone(), cx) {
+                    return;
+                }
+            }
+        }
+        if let Some(text) = item.text() {
             // Paste processors: first Some wins; errors/None pass the
             // original through. Synchronous under the epoch deadline —
             // paste is an explicit action.
@@ -1208,6 +1225,32 @@ impl Editor {
                 self.start_enrich(cx);
             }
         }
+    }
+
+    /// Write a pasted image into `assets/` beside the document and
+    /// insert its markdown link. False on any I/O failure — the paste
+    /// then falls back to whatever text the clipboard held.
+    fn paste_image(&mut self, image: &gpui::Image, cx: &mut Context<Self>) -> bool {
+        let Some(dir) = self.path.parent() else {
+            return false;
+        };
+        let assets = dir.join("assets");
+        if let Err(err) = std::fs::create_dir_all(&assets) {
+            eprintln!("supermd: cannot create {}: {err}", assets.display());
+            return false;
+        }
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let name = paste_image::pick_name(
+            |candidate| assets.join(candidate).exists(),
+            &stamp,
+            paste_image::extension(image.format()),
+        );
+        if let Err(err) = std::fs::write(assets.join(&name), image.bytes()) {
+            eprintln!("supermd: cannot write pasted image: {err}");
+            return false;
+        }
+        self.insert_str(&paste_image::markdown_link(&name), cx);
+        true
     }
 
     /// Run net-capable paste plugins in the background; first Some
@@ -3905,6 +3948,43 @@ mod tests {
         cx.dispatch_action(DocEnd);
         cx.dispatch_action(InsertTab);
         assert_eq!(buffer_text(&editor, cx), "text\t");
+    }
+
+    #[gpui::test]
+    fn pasting_a_clipboard_image_saves_an_asset_and_links_it(cx: &mut TestAppContext) {
+        let (fx, editor, cx) = open_editor(cx, "doc.md", "start ");
+        cx.dispatch_action(DocEnd);
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_image(&gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                vec![1, 2, 3, 4],
+            )));
+        });
+        cx.dispatch_action(Paste);
+        let text = buffer_text(&editor, cx);
+        assert!(
+            text.starts_with("start ![](assets/pasted-") && text.ends_with(".png)"),
+            "{text:?}"
+        );
+        let name = text
+            .strip_prefix("start ![](assets/")
+            .unwrap()
+            .strip_suffix(")")
+            .unwrap();
+        let on_disk = fx.path.parent().unwrap().join("assets").join(name);
+        assert_eq!(std::fs::read(on_disk).unwrap(), vec![1, 2, 3, 4]);
+
+        // Code buffers ignore image pastes entirely.
+        let (fx2, editor, cx) = open_editor(cx, "code.rs", "fn x() {}");
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_image(&gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                vec![9],
+            )));
+        });
+        cx.dispatch_action(Paste);
+        assert_eq!(buffer_text(&editor, cx), "fn x() {}");
+        assert!(!fx2.path.parent().unwrap().join("assets").exists());
     }
 
     #[gpui::test]
