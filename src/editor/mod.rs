@@ -270,6 +270,15 @@ impl Editor {
         self.core.buffer.text()
     }
 
+    /// Point the editor at a new path after a rename or move; buffer
+    /// and history stay put.
+    pub fn retarget(&mut self, path: PathBuf) {
+        self.disk_mtime = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        self.path = path;
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

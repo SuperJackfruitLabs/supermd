@@ -39,6 +39,13 @@ actions!(
         FocusSidebar,
         SidebarUp,
         SidebarDown,
+        SidebarRename,
+        SidebarDelete,
+        SidebarNewFile,
+        SidebarNewFolder,
+        SidebarMoveTo,
+        SidebarEditCommit,
+        SidebarEditCancel,
         SidebarExpand,
         SidebarCollapse,
         SidebarOpen,
@@ -266,7 +273,24 @@ pub struct Workspace {
     last_title: String,
     /// Absolute paths of files with uncommitted git changes (sidebar dots).
     git_modified: std::collections::HashSet<PathBuf>,
+    /// Inline rename / create in progress in the sidebar.
+    sidebar_edit: Option<SidebarEdit>,
+    /// "Move to…" folder picker (a Palette over workspace folders).
+    move_picker: Option<(Entity<crate::palette::Palette>, gpui::Subscription)>,
     _watcher: Option<notify::RecommendedWatcher>,
+}
+
+enum SidebarEditKind {
+    Rename(PathBuf),
+    /// Payload is the directory the new entry lands in.
+    NewFile(PathBuf),
+    NewDir(PathBuf),
+}
+
+struct SidebarEdit {
+    kind: SidebarEditKind,
+    input: Entity<crate::input::TextInput>,
+    error: Option<SharedString>,
 }
 
 /// Create an editor and subscribe the workspace to its events
@@ -356,6 +380,8 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
+            sidebar_edit: None,
+            move_picker: None,
             shortcuts_focus: cx.focus_handle(),
             show_shortcuts: false,
             theme_picker: None,
@@ -1598,6 +1624,280 @@ impl Workspace {
         }
     }
 
+    // ── sidebar file operations ──
+
+    fn selected_entry(&mut self) -> Option<crate::files::FsEntry> {
+        let ix = self.sidebar_selected;
+        self.sidebar_rows().get(ix).map(|(_, e)| e.clone())
+    }
+
+    /// Where new entries land: the selected folder itself, a selected
+    /// file's parent, or the workspace root.
+    fn creation_dir(&mut self) -> Option<PathBuf> {
+        let root = self.tree.as_ref()?.root.clone();
+        Some(match self.selected_entry() {
+            Some(e) if e.is_dir => e.path,
+            Some(e) => e.path.parent().map(|p| p.to_path_buf()).unwrap_or(root),
+            None => root,
+        })
+    }
+
+    fn start_sidebar_edit(
+        &mut self,
+        kind: SidebarEditKind,
+        seed_text: String,
+        select: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            let mut input = crate::input::TextInput::new("name", cx);
+            input.seed(seed_text, select);
+            input
+        });
+        window.focus(&input.read(cx).focus_handle);
+        self.sidebar_edit = Some(SidebarEdit { kind, input, error: None });
+        cx.notify();
+    }
+
+    fn sidebar_rename(&mut self, _: &SidebarRename, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let name = entry.name.clone();
+        // Pre-select the stem so typing replaces the name, not the
+        // extension. Folders select whole.
+        let stem = if entry.is_dir {
+            name.len()
+        } else {
+            name.rfind('.').filter(|&i| i > 0).unwrap_or(name.len())
+        };
+        self.start_sidebar_edit(SidebarEditKind::Rename(entry.path), name, 0..stem, window, cx);
+    }
+
+    fn sidebar_new_file(&mut self, _: &SidebarNewFile, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.creation_dir() else {
+            return;
+        };
+        if let Some(tree) = self.tree.as_mut() {
+            tree.expand_to(&dir.join("·"));
+        }
+        self.start_sidebar_edit(SidebarEditKind::NewFile(dir), String::new(), 0..0, window, cx);
+    }
+
+    fn sidebar_new_folder(
+        &mut self,
+        _: &SidebarNewFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = self.creation_dir() else {
+            return;
+        };
+        if let Some(tree) = self.tree.as_mut() {
+            tree.expand_to(&dir.join("·"));
+        }
+        self.start_sidebar_edit(SidebarEditKind::NewDir(dir), String::new(), 0..0, window, cx);
+    }
+
+    fn sidebar_edit_cancel(
+        &mut self,
+        _: &SidebarEditCancel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_edit = None;
+        window.focus(&self.sidebar_focus);
+        cx.notify();
+    }
+
+    fn sidebar_edit_commit(
+        &mut self,
+        _: &SidebarEditCommit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edit) = self.sidebar_edit.as_ref() else {
+            return;
+        };
+        let name = edit.input.read(cx).content.to_string();
+        if name.trim().is_empty() {
+            return self.sidebar_edit_cancel(&SidebarEditCancel, window, cx);
+        }
+        // (old path when this was a rename, resulting path, open it?)
+        let result = match &edit.kind {
+            SidebarEditKind::Rename(path) => {
+                crate::fileops::rename(path, &name).map(|new| (Some(path.clone()), new, false))
+            }
+            SidebarEditKind::NewFile(dir) => {
+                crate::fileops::create_file(dir, &name).map(|new| (None, new, true))
+            }
+            SidebarEditKind::NewDir(dir) => {
+                crate::fileops::create_dir(dir, &name).map(|new| (None, new, false))
+            }
+        };
+        match result {
+            Err(err) => {
+                if let Some(edit) = self.sidebar_edit.as_mut() {
+                    edit.error = Some(err.into());
+                }
+                cx.notify();
+            }
+            Ok((old, new, open)) => {
+                self.sidebar_edit = None;
+                if let Some(old) = &old {
+                    self.after_path_change(old, &new, cx);
+                }
+                self.refresh_tree_and_select(&new, cx);
+                window.focus(&self.sidebar_focus);
+                if open {
+                    self.open_path(&new, window, cx);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn refresh_tree_and_select(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Some(tree) = self.tree.as_mut() {
+            tree.refresh();
+            tree.expand_to(path);
+        }
+        let rows = self.sidebar_rows();
+        if let Some(ix) = rows.iter().position(|(_, e)| e.path == path) {
+            self.sidebar_selected = ix;
+        }
+        cx.notify();
+    }
+
+    /// Everything that must happen when a path moves. Today: retarget
+    /// open tabs (files and whole folders). Milestone 2 adds link
+    /// rewriting here.
+    fn after_path_change(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            match tab {
+                Tab::Editor { editor, .. } => {
+                    let cur = editor.read(cx).path().to_path_buf();
+                    if let Some(p) = crate::fileops::retarget(&cur, old, new) {
+                        editor.update(cx, |editor, _| editor.retarget(p));
+                    }
+                }
+                Tab::Reader(reader) => {
+                    if let Some(cur) = reader.read(cx).path.clone() {
+                        if let Some(p) = crate::fileops::retarget(&cur, old, new) {
+                            reader.update(cx, |reader, _| reader.path = Some(p));
+                        }
+                    }
+                }
+                Tab::Image { .. } => {}
+            }
+        }
+        for tab in &mut self.tabs {
+            if let Tab::Image { path, .. } = tab {
+                if let Some(p) = crate::fileops::retarget(path, old, new) {
+                    *path = p;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn sidebar_delete(&mut self, _: &SidebarDelete, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let path = entry.path;
+        // Flush dirty buffers under the path first: the trashed copy
+        // must be complete.
+        for tab in &self.tabs {
+            if let Tab::Editor { editor, .. } = tab {
+                if editor.read(cx).path().starts_with(&path) {
+                    editor.update(cx, |editor, cx| editor.flush(cx));
+                }
+            }
+        }
+        let result = match cx.try_global::<crate::fileops::TrashFn>() {
+            Some(t) => (t.0.clone())(&path),
+            None => crate::fileops::delete(&path),
+        };
+        if let Err(err) = result {
+            self.show_command_error(err, cx);
+            return;
+        }
+        let doomed: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, tab)| tab.path(cx).filter(|p| p.starts_with(&path)).map(|_| ix))
+            .collect();
+        for ix in doomed.into_iter().rev() {
+            self.close_tab_at(ix, window, cx);
+        }
+        if let Some(tree) = self.tree.as_mut() {
+            tree.refresh();
+        }
+        let last = self.sidebar_rows().len().saturating_sub(1);
+        self.sidebar_selected = self.sidebar_selected.min(last);
+        cx.notify();
+    }
+
+    fn sidebar_move_to(&mut self, _: &SidebarMoveTo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let Some(root) = self.tree.as_ref().map(|t| t.root.clone()) else {
+            return;
+        };
+        let mut folders = vec![root.clone()];
+        for item in crate::files::workspace_walk(&root).flatten() {
+            let p = item.path();
+            if p != root && item.file_type().is_some_and(|t| t.is_dir()) {
+                folders.push(p.to_path_buf());
+            }
+        }
+        let entries: Vec<crate::palette::PaletteEntry> = folders
+            .iter()
+            .map(|dir| crate::palette::PaletteEntry {
+                plugin: "move".into(),
+                id: dir.to_string_lossy().into_owned(),
+                title: if dir == &root {
+                    "/".to_string()
+                } else {
+                    format!("/{}", dir.strip_prefix(&root).unwrap_or(dir).display())
+                },
+            })
+            .collect();
+        let source = entry.path;
+        let picker = cx.new(|cx| crate::palette::Palette::new(entries, Vec::new(), cx));
+        let subscription = cx.subscribe_in(
+            &picker,
+            window,
+            move |this, _p, event, window, cx| match event {
+                crate::palette::PaletteEvent::Run { id, .. } => {
+                    let dest = PathBuf::from(id);
+                    this.dismiss_move_picker(window, cx);
+                    match crate::fileops::move_entry(&source, &dest) {
+                        Ok(new) => {
+                            this.after_path_change(&source.clone(), &new, cx);
+                            this.refresh_tree_and_select(&new, cx);
+                        }
+                        Err(err) => this.show_command_error(err, cx),
+                    }
+                }
+                crate::palette::PaletteEvent::Dismissed => this.dismiss_move_picker(window, cx),
+            },
+        );
+        window.focus(&picker.focus_handle(cx));
+        self.move_picker = Some((picker, subscription));
+        cx.notify();
+    }
+
+    fn dismiss_move_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_picker = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     fn sidebar_open(&mut self, _: &SidebarOpen, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.sidebar_rows();
         let Some((_, entry)) = rows.get(self.sidebar_selected).cloned() else {
@@ -1987,6 +2287,102 @@ impl Workspace {
 
     // ── Rendering ───────────────────────────────────────────────────────
 
+
+    /// One plain file/folder row of the sidebar list.
+    #[allow(clippy::too_many_arguments)]
+    fn sidebar_file_row(
+        &self,
+        row_ix: usize,
+        depth: usize,
+        entry: crate::files::FsEntry,
+        kb_selected: usize,
+        git_modified: &std::collections::HashSet<PathBuf>,
+        active_path: Option<&Path>,
+        t: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+                let is_active = active_path == Some(entry.path.as_path());
+                let is_kb_selected = row_ix == kb_selected;
+                let id = SharedString::from(format!("file-{}", entry.path.display()));
+                let path = entry.path.clone();
+                let is_dir = entry.is_dir;
+                let expanded = is_dir && self.tree.as_ref().is_some_and(|t| t.is_expanded(&path));
+                let is_modified = !is_dir && git_modified.contains(&entry.path);
+
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py(px(3.))
+                    .ml(px(depth as f32 * 12.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover_bg))
+                    .when(is_kb_selected, |d| d.bg(t.hover_bg))
+                    .when(is_active, |d| d.bg(t.selected_bg))
+                    .child(
+                        // Fixed chevron slot on every row so icons align in a
+                        // column whether or not the row is a directory.
+                        div()
+                            .w(px(10.))
+                            .flex_none()
+                            .text_size(px(9.))
+                            .text_color(t.fg_muted)
+                            .when(is_dir, |d| d.child(if expanded { "▼" } else { "▶" })),
+                    )
+                    .child({
+                        let (icon, tint) = if is_dir {
+                            ("folder", t.fg_muted)
+                        } else {
+                            let (icon, color) = seti::icon_for(&entry.name);
+                            (icon, seti_tint(color, &t))
+                        };
+                        // Seti glyphs carry ~30% internal padding, so the box
+                        // runs larger than the text for a matched visual size.
+                        gpui::svg()
+                            .path(SharedString::from(format!("icons/seti/{icon}.svg")))
+                            .size(px(20.))
+                            .flex_none()
+                            .text_color(tint)
+                    })
+                    .child(
+                        div()
+                            .text_size(px(t.ui_size))
+                            .text_color(if is_dir { t.fg_strong } else { t.fg })
+                            .overflow_hidden()
+                            .child(SharedString::from(entry.name.clone())),
+                    )
+                    .child(div().flex_1())
+                    .when(is_modified, |d| {
+                        d.child(
+                            div()
+                                .size(px(5.))
+                                .flex_none()
+                                .mr(px(2.))
+                                .rounded_full()
+                                .bg(t.accent),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.sidebar_selected = row_ix;
+                        if is_dir {
+                            if let Some(tree) = this.tree.as_mut() {
+                                tree.toggle(&path);
+                            }
+                            window.focus(&this.sidebar_focus);
+                            cx.notify();
+                        } else if event.click_count() >= 2 {
+                            this.open_path(&path, window, cx);
+                        } else {
+                            this.open_path_preview(&path, true, window, cx);
+                        }
+                    }))
+                    .into_any_element()
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_sidebar {
             return None;
@@ -2124,87 +2520,61 @@ impl Workspace {
 
         let kb_selected = self.sidebar_selected;
         let git_modified = self.git_modified.clone();
-        let items = rows.into_iter().enumerate().map(|(row_ix, (depth, entry))| {
-            let is_active = active_path.as_deref() == Some(entry.path.as_path());
-            let is_kb_selected = row_ix == kb_selected;
-            let id = SharedString::from(format!("file-{}", entry.path.display()));
-            let path = entry.path.clone();
-            let is_dir = entry.is_dir;
-            let expanded = is_dir && self.tree.as_ref().is_some_and(|t| t.is_expanded(&path));
-            let is_modified = !is_dir && git_modified.contains(&entry.path);
 
-            div()
-                .id(id)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py(px(3.))
-                .ml(px(depth as f32 * 12.))
-                .rounded_md()
-                .cursor_pointer()
-                .hover(|s| s.bg(t.hover_bg))
-                .when(is_kb_selected, |d| d.bg(t.hover_bg))
-                .when(is_active, |d| d.bg(t.selected_bg))
-                .child(
-                    // Fixed chevron slot on every row so icons align in a
-                    // column whether or not the row is a directory.
-                    div()
-                        .w(px(10.))
-                        .flex_none()
-                        .text_size(px(9.))
-                        .text_color(t.fg_muted)
-                        .when(is_dir, |d| d.child(if expanded { "▼" } else { "▶" })),
-                )
-                .child({
-                    let (icon, tint) = if is_dir {
-                        ("folder", t.fg_muted)
-                    } else {
-                        let (icon, color) = seti::icon_for(&entry.name);
-                        (icon, seti_tint(color, &t))
-                    };
-                    // Seti glyphs carry ~30% internal padding, so the box
-                    // runs larger than the text for a matched visual size.
-                    gpui::svg()
-                        .path(SharedString::from(format!("icons/seti/{icon}.svg")))
-                        .size(px(20.))
-                        .flex_none()
-                        .text_color(tint)
-                })
-                .child(
-                    div()
-                        .text_size(px(t.ui_size))
-                        .text_color(if is_dir { t.fg_strong } else { t.fg })
-                        .overflow_hidden()
-                        .child(SharedString::from(entry.name.clone())),
-                )
-                .child(div().flex_1())
-                .when(is_modified, |d| {
-                    d.child(
-                        div()
-                            .size(px(5.))
-                            .flex_none()
-                            .mr(px(2.))
-                            .rounded_full()
-                            .bg(t.accent),
-                    )
-                })
-                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    this.sidebar_selected = row_ix;
-                    if is_dir {
-                        if let Some(tree) = this.tree.as_mut() {
-                            tree.toggle(&path);
-                        }
-                        window.focus(&this.sidebar_focus);
-                        cx.notify();
-                    } else if event.click_count() >= 2 {
-                        this.open_path(&path, window, cx);
-                    } else {
-                        this.open_path_preview(&path, true, window, cx);
-                    }
-                }))
+        // Inline rename / create rows swap in a text input.
+        let edit_state = self.sidebar_edit.as_ref().map(|e| {
+            let target = match &e.kind {
+                SidebarEditKind::Rename(p) => p.clone(),
+                SidebarEditKind::NewFile(d) | SidebarEditKind::NewDir(d) => d.clone(),
+            };
+            let renaming = matches!(e.kind, SidebarEditKind::Rename(_));
+            (target, renaming, e.input.clone(), e.error.clone())
         });
+        let edit_row = |input: &Entity<crate::input::TextInput>,
+                        error: &Option<SharedString>,
+                        depth: usize,
+                        cx: &mut Context<Self>| {
+            div()
+                .key_context("SidebarEdit")
+                .on_action(cx.listener(Self::sidebar_edit_commit))
+                .on_action(cx.listener(Self::sidebar_edit_cancel))
+                .ml(px(depth as f32 * 12. + 12.))
+                .mr_2()
+                .flex()
+                .flex_col()
+                .child(input.clone())
+                .children(error.clone().map(|err| {
+                    div()
+                        .text_size(px(11.))
+                        .text_color(t.diff_deleted_fg)
+                        .child(err)
+                }))
+                .into_any_element()
+        };
+
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
+        if let Some((target, renaming, input, error)) = &edit_state {
+            // Creating at the workspace root: the edit row leads.
+            if !renaming && Some(target.as_path()) == self.tree.as_ref().map(|t| t.root.as_path())
+            {
+                items.push(edit_row(input, error, 0, cx));
+            }
+        }
+        for (row_ix, (depth, entry)) in rows.into_iter().enumerate() {
+            if let Some((target, renaming, input, error)) = &edit_state {
+                if *renaming && *target == entry.path {
+                    items.push(edit_row(input, error, depth, cx));
+                    continue;
+                }
+            }
+            items.push(self.sidebar_file_row(row_ix, depth, entry.clone(), kb_selected, &git_modified, active_path.as_deref(), &t, cx));
+            if let Some((target, renaming, input, error)) = &edit_state {
+                if !renaming && *target == entry.path && entry.is_dir {
+                    items.push(edit_row(input, error, depth + 1, cx));
+                }
+            }
+        }
+        let items = items;
 
         Some(
             div()
@@ -2221,6 +2591,11 @@ impl Workspace {
                 .on_action(cx.listener(Self::sidebar_expand))
                 .on_action(cx.listener(Self::sidebar_collapse))
                 .on_action(cx.listener(Self::sidebar_open))
+                .on_action(cx.listener(Self::sidebar_rename))
+                .on_action(cx.listener(Self::sidebar_delete))
+                .on_action(cx.listener(Self::sidebar_new_file))
+                .on_action(cx.listener(Self::sidebar_new_folder))
+                .on_action(cx.listener(Self::sidebar_move_to))
                 .flex()
                 .flex_col()
                 .child(
@@ -2995,6 +3370,26 @@ impl Render for Workspace {
                         ),
                 )
             })
+            .when_some(self.move_picker.as_ref(), |root, (picker, _)| {
+                let picker = picker.clone();
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .pt(px(110.))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.dismiss_move_picker(window, cx);
+                            }),
+                        )
+                        .child(picker),
+                )
+            })
             .when_some(self.palette.as_ref(), |root, (palette, _)| {
                 let palette = palette.clone();
                 root.child(
@@ -3266,6 +3661,157 @@ mod tests {
 
     fn tab_paths(ws: &Workspace, cx: &App) -> Vec<Option<PathBuf>> {
         ws.tabs.iter().map(|t| t.path(cx)).collect()
+    }
+
+    /// Select the sidebar row whose entry name matches, focusing the
+    /// sidebar first so Sidebar-context actions dispatch.
+    fn select_sidebar_row(ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext, name: &str) {
+        ws.update_in(cx, |ws, window, cx| {
+            window.focus(&ws.sidebar_focus);
+            let rows = ws.sidebar_rows();
+            let ix = rows
+                .iter()
+                .position(|(_, e)| e.name == name)
+                .unwrap_or_else(|| panic!("row {name:?} not found"));
+            ws.sidebar_selected = ix;
+            cx.notify();
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_rename_updates_disk_and_open_tab(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarRename);
+        cx.run_until_parked();
+        // The stem is pre-selected: typing replaces it, extension stays.
+        cx.simulate_input("renamed");
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+
+        assert!(root.path().join("renamed.md").exists());
+        assert!(!a.exists());
+        cx.update(|_, app| {
+            let ws = ws.read(app);
+            assert!(ws.sidebar_edit.is_none(), "edit row closed");
+            let paths = tab_paths(ws, app);
+            assert!(
+                paths.iter().flatten().any(|p| p.ends_with("renamed.md")),
+                "open tab retargeted: {paths:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_rename_to_duplicate_stays_editing_with_error(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarRename);
+        cx.run_until_parked();
+        cx.simulate_input("b"); // stem selected → becomes "b.md"
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ws = ws.read(app);
+            let edit = ws.sidebar_edit.as_ref().expect("still editing");
+            assert!(edit.error.as_ref().unwrap().contains("already exists"));
+        });
+        cx.dispatch_action(SidebarEditCancel);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).sidebar_edit.is_none()));
+        assert!(root.path().join("a.md").exists(), "cancel leaves disk alone");
+    }
+
+    #[gpui::test]
+    fn sidebar_new_file_and_folder_target_the_selection(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _, _) = workspace_fixture();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // New folder beside a selected file lands in the root.
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarNewFolder);
+        cx.run_until_parked();
+        cx.simulate_input("ideas");
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+        assert!(root.path().join("ideas").is_dir());
+
+        // New file inside a selected folder lands in that folder and opens.
+        select_sidebar_row(&ws, cx, "sub");
+        cx.dispatch_action(SidebarNewFile);
+        cx.run_until_parked();
+        cx.simulate_input("inner.md");
+        cx.dispatch_action(SidebarEditCommit);
+        cx.run_until_parked();
+        assert!(root.path().join("sub/inner.md").exists());
+        cx.update(|_, app| {
+            let paths = tab_paths(ws.read(app), app);
+            assert!(paths.iter().flatten().any(|p| p.ends_with("sub/inner.md")), "{paths:?}");
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_delete_trashes_and_closes_the_tab(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _) = workspace_fixture();
+        let trashed: std::sync::Arc<Mutex<Vec<PathBuf>>> = Default::default();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|_, app| {
+            let sink = trashed.clone();
+            app.set_global(crate::fileops::TrashFn(std::sync::Arc::new(move |p| {
+                sink.lock().unwrap().push(p.to_path_buf());
+                std::fs::remove_file(p).map_err(|e| e.to_string())
+            })));
+        });
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarDelete);
+        cx.run_until_parked();
+        assert_eq!(trashed.lock().unwrap().as_slice(), &[a.clone()]);
+        assert!(!a.exists());
+        cx.update(|_, app| {
+            let paths = tab_paths(ws.read(app), app);
+            assert!(!paths.iter().flatten().any(|p| p == &a), "tab closed: {paths:?}");
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_move_picker_relocates_and_retargets(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _) = workspace_fixture();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        select_sidebar_row(&ws, cx, "a.md");
+        cx.dispatch_action(SidebarMoveTo);
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(ws.read(app).move_picker.is_some(), "picker open"));
+        cx.simulate_input("sub");
+        cx.run_until_parked();
+        cx.dispatch_action(crate::palette::PaletteConfirm);
+        cx.run_until_parked();
+
+        assert!(root.path().join("sub/a.md").exists());
+        assert!(!a.exists());
+        cx.update(|_, app| {
+            let ws = ws.read(app);
+            assert!(ws.move_picker.is_none(), "picker closed");
+            let paths = tab_paths(ws, app);
+            assert!(paths.iter().flatten().any(|p| p.ends_with("sub/a.md")), "{paths:?}");
+        });
     }
 
     #[gpui::test]

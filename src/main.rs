@@ -190,6 +190,14 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("cmd--"), workspace::ZoomOut, None),
             KeyBinding::new(&platform::keybinding("cmd-0"), workspace::ZoomReset, None),
             KeyBinding::new(&platform::keybinding("escape"), workspace::ToggleShortcuts, Some("Shortcuts")),
+            // Sidebar file operations (while the sidebar is focused)
+            KeyBinding::new(&platform::keybinding("f2"), workspace::SidebarRename, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("cmd-backspace"), workspace::SidebarDelete, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("cmd-n"), workspace::SidebarNewFile, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("cmd-shift-n"), workspace::SidebarNewFolder, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("cmd-shift-m"), workspace::SidebarMoveTo, Some("Sidebar")),
+            KeyBinding::new(&platform::keybinding("enter"), workspace::SidebarEditCommit, Some("SidebarEdit")),
+            KeyBinding::new(&platform::keybinding("escape"), workspace::SidebarEditCancel, Some("SidebarEdit")),
             // Sidebar navigation (while the sidebar is focused)
             KeyBinding::new(&platform::keybinding("up"), workspace::SidebarUp, Some("Sidebar")),
             KeyBinding::new(&platform::keybinding("down"), workspace::SidebarDown, Some("Sidebar")),
@@ -598,7 +606,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 109);
+        assert_eq!(bindings.len(), 116);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));
