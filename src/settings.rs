@@ -17,6 +17,38 @@ pub struct Settings {
     /// Per-plugin capability grants ("workspace-read") or refusals
     /// ("denied:workspace-read").
     pub plugin_grants: std::collections::BTreeMap<String, Vec<String>>,
+    /// Time-of-day theme adaptation (off unless enabled).
+    pub flux: FluxSettings,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct FluxSettings {
+    pub enabled: bool,
+    /// Coordinates for sunrise/sunset; without them a fixed 7:00–19:00
+    /// day window applies.
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    /// Crossfade to the dark theme at night.
+    pub auto_dark: bool,
+    /// Drift colors toward `night_kelvin` as night falls.
+    pub warm_shift: bool,
+    pub night_kelvin: f64,
+    pub transition_minutes: f64,
+}
+
+impl Default for FluxSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            latitude: None,
+            longitude: None,
+            auto_dark: true,
+            warm_shift: true,
+            night_kelvin: 3400.0,
+            transition_minutes: 40.0,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -28,6 +60,7 @@ impl Default for Settings {
             recent_workspaces: Vec::new(),
             format_on_save: false,
             plugin_grants: Default::default(),
+            flux: FluxSettings::default(),
         }
     }
 }
@@ -94,6 +127,36 @@ mod tests {
     #[test]
     fn format_on_save_defaults_off() {
         assert!(!Settings::default().format_on_save);
+    }
+
+    #[test]
+    fn flux_defaults_off_and_parses_partial_tables() {
+        let d = FluxSettings::default();
+        assert!(!d.enabled && d.auto_dark && d.warm_shift);
+        assert_eq!(d.night_kelvin, 3400.0);
+        assert_eq!(d.transition_minutes, 40.0);
+        assert_eq!(d.latitude, None);
+
+        // A partial [flux] table keeps defaults for absent keys, and
+        // pre-flux settings files still parse.
+        let s: Settings =
+            toml::from_str("[flux]\nenabled = true\nlatitude = 12.97\nlongitude = 77.59\n")
+                .unwrap();
+        assert!(s.flux.enabled && s.flux.auto_dark);
+        assert_eq!(s.flux.latitude, Some(12.97));
+        let old: Settings = toml::from_str("light_theme = \"Paper\"\n").unwrap();
+        assert_eq!(old.flux, FluxSettings::default());
+    }
+
+    #[test]
+    fn flux_survives_a_save_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        s.flux.enabled = true;
+        s.flux.latitude = Some(51.5);
+        s.flux.night_kelvin = 2700.0;
+        save(dir.path(), &s).unwrap();
+        assert_eq!(load(dir.path()), s);
     }
 
     #[test]

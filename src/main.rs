@@ -351,13 +351,42 @@ fn main() {
     app.run(move |cx: &mut App| {
         let mut themes = theme::builtin_themes();
         themes.extend(theme::load_custom_themes(&settings::themes_dir()));
+        let loaded_settings = settings::load(&settings::config_dir());
+        let flux_blend = flux::current_blend(&loaded_settings.flux);
         let theme_state = theme::ThemeState {
             themes,
-            settings: settings::load(&settings::config_dir()),
+            settings: loaded_settings,
             system_dark: false,
+            flux_blend,
         };
         cx.set_global(ActiveTheme(theme_state.resolve()));
         cx.set_global(theme_state);
+        // Flux ticks once a minute; through a transition that is one
+        // step per tick, which reads as a smooth fade.
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let alive = cx.update(|cx| {
+                    let state = cx.global_mut::<theme::ThemeState>();
+                    let blend = flux::current_blend(&state.settings.flux);
+                    if (blend - state.flux_blend).abs() > 0.001 {
+                        state.flux_blend = blend;
+                        theme::refresh_active_theme(cx);
+                        for window in cx.windows() {
+                            window
+                                .update(cx, |_, window, _| window.refresh())
+                                .ok();
+                        }
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.set_global(highlight::SyntaxLanguages(Arc::new(
             highlight::Languages::new(),
         )));

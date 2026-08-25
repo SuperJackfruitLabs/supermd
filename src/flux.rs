@@ -113,6 +113,27 @@ pub fn warm_theme(theme: &Theme, blend: f32, kelvin: f64) -> Theme {
     theme.map_colors(|color| warm(color, blend, mult))
 }
 
+/// Blend for the wall clock right now: 0 while flux is disabled, the
+/// configured coordinates' sun window otherwise (fixed 7:00–19:00
+/// without coordinates or under a polar sun).
+pub fn current_blend(flux: &crate::settings::FluxSettings) -> f32 {
+    if !flux.enabled {
+        return 0.0;
+    }
+    use chrono::{Datelike, Offset, Timelike};
+    let now = chrono::Local::now();
+    let minutes = now.hour() as f64 * 60.0 + now.minute() as f64;
+    let window = match (flux.latitude, flux.longitude) {
+        (Some(lat), Some(lon)) => {
+            let offset = now.offset().fix().local_minus_utc() as f64 / 60.0;
+            sun_times_local(lat, lon, now.ordinal(), offset)
+        }
+        _ => None,
+    };
+    let (sunrise, sunset) = window.unwrap_or((DEFAULT_SUNRISE_MIN, DEFAULT_SUNSET_MIN));
+    night_blend(minutes, sunrise, sunset, flux.transition_minutes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +218,12 @@ mod tests {
         assert!((0.45..0.62).contains(&b), "b {b}");
         let (_, _, b_warmer) = kelvin_multipliers(2700.0);
         assert!(b_warmer < b, "warmer means less blue");
+    }
+
+    #[test]
+    fn current_blend_is_zero_while_disabled() {
+        let flux = crate::settings::FluxSettings::default();
+        assert_eq!(current_blend(&flux), 0.0);
     }
 
     #[test]
