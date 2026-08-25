@@ -6,9 +6,11 @@ name: CI
 on:
   push:
     branches: [master]
-    paths-ignore: ['site/**', 'docs/**']
+    # WELCOME.md stays CI-relevant: it is compiled into the binary.
+    paths-ignore: ['site/**', 'docs/**', 'README.md']
   pull_request:
-    paths-ignore: ['site/**', 'docs/**']
+    # WELCOME.md stays CI-relevant: it is compiled into the binary.
+    paths-ignore: ['site/**', 'docs/**', 'README.md']
 
 jobs:
   test:

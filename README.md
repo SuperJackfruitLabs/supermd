@@ -3,7 +3,7 @@
 [![CI](https://github.com/SuperJackfruitLabs/supermd/actions/workflows/ci.yml/badge.svg)](https://github.com/SuperJackfruitLabs/supermd/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SuperJackfruitLabs/supermd)](https://github.com/SuperJackfruitLabs/supermd/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/SuperJackfruitLabs/supermd/total)](https://github.com/SuperJackfruitLabs/supermd/releases)
-[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/rakeshgangwar/9fb5226b83eda4ae8cb0568e7bc7755f/raw/supermd-coverage.json)](https://github.com/SuperJackfruitLabs/supermd/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Frakeshgangwar%2F9fb5226b83eda4ae8cb0568e7bc7755f%2Fraw%2Fsupermd-coverage.json&cacheSeconds=1800)](https://github.com/SuperJackfruitLabs/supermd/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
