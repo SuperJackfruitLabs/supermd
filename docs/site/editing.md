@@ -21,6 +21,12 @@ You always edit real Markdown — SuperMD never rewrites your file behind your b
 
 Diagrams work the same way — see [Diagrams](diagrams.md).
 
+## Formatting toolbar
+
+Select text with the mouse and a small toolbar appears above the selection: **bold**, *italic*, `code`, ~~strikethrough~~, link, heading level, and blockquote — each a single click, each one undo step. Toggles work both ways: bolding a bold selection unbolds it.
+
+**⌘ B** (Ctrl+B) and **⌘ I** (Ctrl+I) do the same from the keyboard while text is selected. Without a selection, ⌘ B keeps its usual job of toggling the sidebar.
+
 ## Preview and focus
 
 - **⌘ E** (Ctrl+E) toggles a fully rendered read-only preview of the current document — useful for a final read-through.
