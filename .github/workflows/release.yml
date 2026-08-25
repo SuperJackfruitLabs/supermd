@@ -108,6 +108,9 @@ jobs:
             libfreetype6-dev
       - name: Run tests
         run: cargo test
+      - name: Build plugins
+        run: |
+          bash scripts/build_plugins.sh
       - name: Bundle tarball
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -116,9 +119,8 @@ jobs:
         run: |
           cargo install cargo-deb --locked
           cargo deb --no-build -o dist/
-      - name: Build plugins
+      - name: Zip plugins
         run: |
-          bash scripts/build_plugins.sh
           (cd dist && zip -r supermd-plugins.zip plugins)
           for d in dist/plugins/*/; do
             name=$(basename "$d")
