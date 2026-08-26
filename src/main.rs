@@ -247,6 +247,13 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("cmd-down"), editor::DocEnd, Some("Editor")),
             KeyBinding::new(&platform::keybinding("pageup"), editor::PageUp, Some("Editor")),
             KeyBinding::new(&platform::keybinding("pagedown"), editor::PageDown, Some("Editor")),
+            // Read-only surfaces (⌘E preview, viewer tabs, welcome).
+            KeyBinding::new(&platform::keybinding("up"), reader::ScrollUp, Some("Reader")),
+            KeyBinding::new(&platform::keybinding("down"), reader::ScrollDown, Some("Reader")),
+            KeyBinding::new(&platform::keybinding("pageup"), reader::PageUp, Some("Reader")),
+            KeyBinding::new(&platform::keybinding("pagedown"), reader::PageDown, Some("Reader")),
+            KeyBinding::new(&platform::keybinding("home"), reader::ScrollTop, Some("Reader")),
+            KeyBinding::new(&platform::keybinding("end"), reader::ScrollBottom, Some("Reader")),
             KeyBinding::new(&platform::keybinding("backspace"), editor::Backspace, Some("Editor")),
             KeyBinding::new(&platform::keybinding("delete"), editor::Delete, Some("Editor")),
             KeyBinding::new(&platform::keybinding("alt-backspace"), editor::DeleteWordLeft, Some("Editor")),
@@ -612,7 +619,7 @@ mod startup_tests {
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 120);
+        assert_eq!(bindings.len(), 126);
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));

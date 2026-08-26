@@ -45,6 +45,17 @@ Every shortcut, as shown in-app with **⌘ /** (Ctrl+/). macOS keys on the left;
 | Click ✓ / ○ | Click ✓ / ○ | Toggle task checkbox |
 | Click table / image | Click table / image | Edit its source |
 
+## Preview & read-only tabs
+
+Applies to the ⌘E pretty preview, plugin viewer tabs (CSV, notebooks),
+and the welcome tour.
+
+| Key | Action |
+| --- | ------ |
+| ↑ ↓ | Scroll line by line |
+| PgUp / PgDn | Scroll by a screen |
+| Home / End | Jump to start / end |
+
 ## Sidebar
 
 | Key | Action |

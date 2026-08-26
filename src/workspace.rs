@@ -143,6 +143,14 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Preview & read-only tabs",
+        &[
+            ("↑ ↓", "Scroll line by line"),
+            ("PgUp / PgDn", "Scroll by a screen"),
+            ("Home / End", "Jump to start / end"),
+        ],
+    ),
+    (
         "Sidebar",
         &[
             ("↑ ↓", "Move selection"),
@@ -378,8 +386,8 @@ impl Workspace {
                     }
                     Err(_) => {
                         // Unwritable config dir: fall back to read-only.
-                        let welcome = Reader::welcome(&languages(cx));
-                        tabs.push(Tab::Reader(cx.new(|_| welcome)));
+                        let langs = languages(cx);
+                        tabs.push(Tab::Reader(cx.new(|cx| Reader::welcome(&langs, cx))));
                     }
                 }
             }
@@ -607,6 +615,12 @@ impl Workspace {
         match self.tabs.get(self.active) {
             Some(Tab::Editor { editor, view: EditorView::Edit }) => {
                 window.focus(&editor.focus_handle(cx))
+            }
+            // Read-only surfaces take focus too, so the keyboard can
+            // scroll them (⌘E preview, viewer tabs, the welcome tour).
+            Some(Tab::Reader(reader))
+            | Some(Tab::Editor { view: EditorView::Preview(reader), .. }) => {
+                window.focus(&reader.focus_handle(cx))
             }
             _ => window.focus(&self.focus_handle),
         }
@@ -927,7 +941,7 @@ impl Workspace {
                 this.update_in(cx, |this, window, cx| {
                     let langs = languages(cx);
                     let title = editor.read(cx).title();
-                    let reader = cx.new(|_| Reader::from_source(title, &markdown, &langs));
+                    let reader = cx.new(|cx| Reader::from_source(title, &markdown, &langs, cx));
                     // Only swap if that tab still shows this editor in
                     // Edit view (the user may have toggled or closed).
                     if let Some(Tab::Editor { editor: e, view }) = this.tabs.get_mut(tab_ix) {
@@ -975,7 +989,7 @@ impl Workspace {
                 let title = editor.read(cx).title();
                 let text = editor.read(cx).text();
                 let langs = languages(cx);
-                let reader = cx.new(|_| Reader::from_source(title, &text, &langs));
+                let reader = cx.new(|cx| Reader::from_source(title, &text, &langs, cx));
                 if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
                     *view = EditorView::Preview(reader);
                 }
