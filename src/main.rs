@@ -44,10 +44,7 @@ use gpui::{
 };
 
 use theme::{apply_system_appearance, ActiveTheme};
-use workspace::{
-    CloseTab, NewFile, NextTab, OpenDialog, PrevTab, ToggleFinder, ToggleFocusMode, ToggleOutline,
-    TogglePreview, ToggleSidebar, Workspace,
-};
+use workspace::Workspace;
 
 actions!(app, [Quit]);
 
@@ -260,67 +257,18 @@ fn app_keybindings() -> Vec<KeyBinding> {
 
 /// The application menu bar; `recents` fills the Open Recent submenu.
 fn app_menus(recents: &[String]) -> Vec<Menu> {
-    vec![
-
-            Menu {
-                name: "SuperMD".into(),
-                items: vec![
-                    MenuItem::os_submenu("Services", SystemMenuType::Services),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit SuperMD", Quit),
-                ],
-            },
-            Menu {
-                name: "File".into(),
-                items: vec![
-                    MenuItem::action("New File", NewFile),
-                    MenuItem::action("Open…", OpenDialog),
-                    MenuItem::submenu(Menu {
-                        name: "Open Recent".into(),
-                        items: recent_menu_items(recents)
-                            .into_iter()
-                            .map(|(name, ix)| match ix {
-                                0 => MenuItem::action(name, workspace::OpenRecent0),
-                                1 => MenuItem::action(name, workspace::OpenRecent1),
-                                2 => MenuItem::action(name, workspace::OpenRecent2),
-                                3 => MenuItem::action(name, workspace::OpenRecent3),
-                                4 => MenuItem::action(name, workspace::OpenRecent4),
-                                5 => MenuItem::action(name, workspace::OpenRecent5),
-                                6 => MenuItem::action(name, workspace::OpenRecent6),
-                                _ => MenuItem::action(name, workspace::OpenRecent7),
-                            })
-                            .collect(),
-                    }),
-                    MenuItem::separator(),
-                    MenuItem::action("Close Tab", CloseTab),
-                ],
-            },
-            Menu {
-                name: "View".into(),
-                items: vec![
-                    MenuItem::action("Toggle Edit/Preview", TogglePreview),
-                    MenuItem::action("Show Changes", workspace::ShowChanges),
-                    MenuItem::action("Focus Mode", ToggleFocusMode),
-                    MenuItem::action("Theme…", workspace::ToggleThemePicker),
-                    MenuItem::separator(),
-                    MenuItem::action("Toggle Sidebar", ToggleSidebar),
-                    MenuItem::action("Toggle Outline", ToggleOutline),
-                    MenuItem::separator(),
-                    MenuItem::action("Go to File…", ToggleFinder),
-                    MenuItem::action("Command Palette…", workspace::TogglePalette),
-                    MenuItem::action("Open Plugins Folder", workspace::OpenPluginsFolder),
-                    MenuItem::action("Reload Plugins", workspace::ReloadPlugins),
-                    MenuItem::action("Search in Workspace…", workspace::ToggleSearch),
-                ],
-            },
-            Menu {
-                name: "Help".into(),
-                items: vec![MenuItem::action(
-                    "Keyboard Shortcuts",
-                    workspace::ToggleShortcuts,
-                )],
-            },
-    ]
+    // The app menu is macOS-shaped and has no table entries; everything
+    // else is derived, so the menu bar and the ☰ popover cannot drift.
+    let mut menus = vec![Menu {
+        name: "SuperMD".into(),
+        items: vec![
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Quit SuperMD", Quit),
+        ],
+    }];
+    menus.extend(commands::menus(recents));
+    menus
 }
 
 fn main() {
@@ -570,7 +518,9 @@ mod startup_tests {
             .collect();
         let menus = app_menus(&recents);
         let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
-        assert_eq!(names, ["SuperMD", "File", "View", "Help"]);
+        // Edit and Format arrive with the menu restructure; a menu with
+        // no table entries is omitted rather than rendered empty.
+        assert_eq!(names, ["SuperMD", "File", "View", "Go", "Tools", "Help"]);
         // Every recent slot (0..8) maps through its OpenRecentN arm.
         let file_menu = &menus[1];
         let recent = file_menu

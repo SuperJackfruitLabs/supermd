@@ -273,6 +273,92 @@ pub fn bindings() -> Vec<gpui::KeyBinding> {
         .collect()
 }
 
+
+/// Menu-bar order, and the order the ☰ popover renders its groups.
+pub const MENU_ORDER: [MenuId; 7] = [
+    MenuId::File,
+    MenuId::Edit,
+    MenuId::Format,
+    MenuId::View,
+    MenuId::Go,
+    MenuId::Tools,
+    MenuId::Help,
+];
+
+pub fn menu_title(id: MenuId) -> &'static str {
+    match id {
+        MenuId::File => "File",
+        MenuId::Edit => "Edit",
+        MenuId::Format => "Format",
+        MenuId::View => "View",
+        MenuId::Go => "Go",
+        MenuId::Tools => "Tools",
+        MenuId::Help => "Help",
+    }
+}
+
+/// Commands in one menu, in declaration order — which the table keeps
+/// grouped, so group indices come out ascending.
+pub fn items_for(id: MenuId) -> Vec<&'static Command> {
+    COMMANDS
+        .iter()
+        .filter(|c| matches!(c.menu, Some((m, _)) if m == id))
+        .collect()
+}
+
+/// The menu bar. `recents` fills the Open Recent submenu.
+pub fn menus(recents: &[String]) -> Vec<gpui::Menu> {
+    MENU_ORDER
+        .iter()
+        .filter_map(|&id| {
+            let cmds = items_for(id);
+            let first = cmds.first()?;
+            let mut items: Vec<gpui::MenuItem> = Vec::new();
+            let mut group = first.menu.expect("filtered on menu").1;
+            for cmd in cmds {
+                let g = cmd.menu.expect("filtered on menu").1;
+                if g != group {
+                    items.push(gpui::MenuItem::Separator);
+                    group = g;
+                }
+                items.push(gpui::MenuItem::Action {
+                    name: cmd.label.into(),
+                    action: (cmd.action)(),
+                    os_action: None,
+                });
+                // Open Recent hangs off the File menu's open entry.
+                if cmd.id == "open" && !recents.is_empty() {
+                    items.push(gpui::MenuItem::Submenu(gpui::Menu {
+                        name: "Open Recent".into(),
+                        items: recent_items(recents),
+                    }));
+                }
+            }
+            Some(gpui::Menu { name: menu_title(id).into(), items })
+        })
+        .collect()
+}
+
+/// The Open Recent submenu. The eight slots are distinct action types,
+/// so this stays a match rather than a table entry.
+fn recent_items(recents: &[String]) -> Vec<gpui::MenuItem> {
+    recents
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(ix, name)| match ix {
+            0 => gpui::MenuItem::action(name.clone(), ws::OpenRecent0),
+            1 => gpui::MenuItem::action(name.clone(), ws::OpenRecent1),
+            2 => gpui::MenuItem::action(name.clone(), ws::OpenRecent2),
+            3 => gpui::MenuItem::action(name.clone(), ws::OpenRecent3),
+            4 => gpui::MenuItem::action(name.clone(), ws::OpenRecent4),
+            5 => gpui::MenuItem::action(name.clone(), ws::OpenRecent5),
+            6 => gpui::MenuItem::action(name.clone(), ws::OpenRecent6),
+            _ => gpui::MenuItem::action(name.clone(), ws::OpenRecent7),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +432,49 @@ mod tests {
             .map(|c| c.id)
             .collect();
         assert_eq!(holders, vec!["toggle_sidebar", "bold"]);
+    }
+
+    #[test]
+    fn items_for_a_menu_come_back_in_group_order() {
+        let view = items_for(MenuId::View);
+        assert!(!view.is_empty(), "the View menu has entries");
+        let groups: Vec<u8> = view.iter().map(|c| c.menu.unwrap().1).collect();
+        let mut sorted = groups.clone();
+        sorted.sort_unstable();
+        assert_eq!(groups, sorted, "entries are grouped in order");
+    }
+
+    #[test]
+    fn menu_titles_cover_every_variant() {
+        for id in [
+            MenuId::File, MenuId::Edit, MenuId::Format,
+            MenuId::View, MenuId::Go, MenuId::Tools, MenuId::Help,
+        ] {
+            assert!(!menu_title(id).is_empty(), "{id:?} has a title");
+        }
+    }
+
+    #[test]
+    fn separators_fall_between_groups_never_at_the_edges() {
+        let built = menus(&[]);
+        let view = built
+            .iter()
+            .find(|m| m.name.as_ref() == "View")
+            .expect("View menu is built");
+        assert!(
+            !matches!(view.items.first(), Some(gpui::MenuItem::Separator)),
+            "no leading separator"
+        );
+        assert!(
+            !matches!(view.items.last(), Some(gpui::MenuItem::Separator)),
+            "no trailing separator"
+        );
+        let seps = view
+            .items
+            .iter()
+            .filter(|i| matches!(i, gpui::MenuItem::Separator))
+            .count();
+        assert_eq!(seps, 4, "View has five groups, so four separators");
     }
 
     #[test]
