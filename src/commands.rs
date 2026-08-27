@@ -210,6 +210,10 @@ commands! {
     // ── Help ───────────────────────────────────────────────────────────
     ws::ToggleShortcuts => { id: "shortcuts", label: "Keyboard Shortcuts",
         keys: ["cmd-/"], ctx: None, menu: Some((Help, 0)), help: Some(General) },
+    // On macOS About belongs in the app menu, so it is filtered out of
+    // Help there and added to the app menu by `app_menus`.
+    ws::ToggleAbout => { id: "about", label: "About SuperMD", keys: [],
+        ctx: None, menu: Some((Help, 1)), help: None },
 
     // ── Editor: menus arrive with the restructure (Task 10) ────────────
     // ── Edit ───────────────────────────────────────────────────────────
@@ -337,7 +341,14 @@ pub fn items_for(id: MenuId) -> Vec<&'static Command> {
     COMMANDS
         .iter()
         .filter(|c| matches!(c.menu, Some((m, _)) if m == id))
+        // About is a macOS app-menu item there, and a Help item elsewhere.
+        .filter(|c| !(c.id == "about" && crate::platform::ABOUT_IN_APP_MENU))
         .collect()
+}
+
+/// The About command, for the macOS app menu.
+pub fn about_command() -> &'static Command {
+    COMMANDS.iter().find(|c| c.id == "about").expect("about is in the table")
 }
 
 /// The menu bar. `recents` fills the Open Recent submenu.
@@ -710,6 +721,18 @@ mod tests {
         {
             assert!(fmt.contains(&expected), "Format menu is missing {expected}");
         }
+    }
+
+    #[test]
+    fn about_lands_in_the_app_menu_on_macos_and_help_elsewhere() {
+        let help: Vec<&str> = items_for(MenuId::Help).iter().map(|c| c.id).collect();
+        if crate::platform::ABOUT_IN_APP_MENU {
+            assert!(!help.contains(&"about"), "macOS hangs About off the app menu");
+        } else {
+            assert!(help.contains(&"about"), "elsewhere About lives in Help");
+        }
+        // Either way it exists and is reachable.
+        assert_eq!(about_command().label, "About SuperMD");
     }
 
     #[test]

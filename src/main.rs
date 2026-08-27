@@ -262,6 +262,12 @@ fn app_menus(recents: &[String]) -> Vec<Menu> {
     let mut menus = vec![Menu {
         name: "SuperMD".into(),
         items: vec![
+            MenuItem::Action {
+                name: commands::about_command().label.into(),
+                action: (commands::about_command().action)(),
+                os_action: None,
+            },
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action("Quit SuperMD", Quit),

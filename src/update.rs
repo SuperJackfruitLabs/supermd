@@ -52,6 +52,44 @@ pub fn fetch_latest_tag() -> Option<String> {
     parse_tag(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// What the About dialog should say about updates, given the running
+/// version and whatever a check has turned up so far. Pure, so the
+/// wording and the download affordance are testable without a window.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// A check is in flight.
+    Checking,
+    /// No check has answered yet.
+    Unknown,
+    /// The running version is the latest known.
+    UpToDate,
+    /// A newer release exists; carries its tag for the download button.
+    Available(String),
+}
+
+pub fn update_status(current: &str, latest: Option<&str>, checking: bool) -> UpdateStatus {
+    if checking {
+        return UpdateStatus::Checking;
+    }
+    match latest {
+        None => UpdateStatus::Unknown,
+        Some(tag) if is_newer(current, tag) => UpdateStatus::Available(tag.to_string()),
+        Some(_) => UpdateStatus::UpToDate,
+    }
+}
+
+impl UpdateStatus {
+    /// The line shown under the version number.
+    pub fn message(&self) -> String {
+        match self {
+            UpdateStatus::Checking => "Checking for updates…".to_string(),
+            UpdateStatus::Unknown => "Check for updates".to_string(),
+            UpdateStatus::UpToDate => "You're up to date".to_string(),
+            UpdateStatus::Available(tag) => format!("Version {tag} is available"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,6 +104,31 @@ mod tests {
         assert!(!is_newer("0.0.5", "0.0.4"));
         assert!(!is_newer("1.0.0", "0.9.9"));
         assert!(!is_newer("0.0.4", "not-a-version"));
+    }
+
+    #[test]
+    fn update_status_reports_what_the_about_dialog_should_say() {
+        assert_eq!(update_status("0.0.12", None, true), UpdateStatus::Checking);
+        assert_eq!(update_status("0.0.12", None, false), UpdateStatus::Unknown);
+        assert_eq!(
+            update_status("0.0.12", Some("v0.0.12"), false),
+            UpdateStatus::UpToDate
+        );
+        assert_eq!(
+            update_status("0.0.12", Some("v0.0.13"), false),
+            UpdateStatus::Available("v0.0.13".to_string())
+        );
+        // A check in flight wins over a stale answer.
+        assert_eq!(update_status("0.0.12", Some("v0.0.13"), true), UpdateStatus::Checking);
+    }
+
+    #[test]
+    fn update_status_messages_name_the_version() {
+        assert_eq!(
+            UpdateStatus::Available("v0.0.13".into()).message(),
+            "Version v0.0.13 is available"
+        );
+        assert_eq!(UpdateStatus::UpToDate.message(), "You're up to date");
     }
 
     #[test]

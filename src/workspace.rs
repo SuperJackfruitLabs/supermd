@@ -56,6 +56,8 @@ actions!(
         SidebarCollapse,
         SidebarOpen,
         ToggleShortcuts,
+        ToggleAbout,
+        CheckForUpdates,
         ToggleThemePicker,
         ThemePickerUp,
         ThemePickerDown,
@@ -221,7 +223,13 @@ pub struct Workspace {
     sidebar_focus: FocusHandle,
     sidebar_selected: usize,
     shortcuts_focus: FocusHandle,
+    about_focus: FocusHandle,
     show_shortcuts: bool,
+    show_about: bool,
+    /// Latest release tag once a manual About check has answered, and
+    /// whether that check is still in flight.
+    about_latest: Option<SharedString>,
+    about_checking: bool,
     theme_picker: Option<ThemePickerState>,
     theme_picker_focus: FocusHandle,
     last_title: String,
@@ -364,7 +372,11 @@ impl Workspace {
             sidebar_edit: None,
             move_picker: None,
             shortcuts_focus: cx.focus_handle(),
+            about_focus: cx.focus_handle(),
             show_shortcuts: false,
+            show_about: false,
+            about_latest: None,
+            about_checking: false,
             theme_picker: None,
             theme_picker_focus: cx.focus_handle(),
             last_title: String::new(),
@@ -2244,6 +2256,47 @@ impl Workspace {
         self.adjust_zoom(None, cx);
     }
 
+    fn toggle_about(&mut self, _: &ToggleAbout, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_about = !self.show_about;
+        if self.show_about {
+            window.focus(&self.about_focus);
+        } else {
+            self.focus_active(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Ask GitHub for the latest release tag. Failure is silent and
+    /// simply leaves the dialog reporting nothing, matching the quiet
+    /// launch-time check.
+    fn check_for_updates(
+        &mut self,
+        _: &CheckForUpdates,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.about_checking {
+            return;
+        }
+        self.about_checking = true;
+        cx.notify();
+        let fetch = cx
+            .background_executor()
+            .spawn(async move { crate::update::fetch_latest_tag() });
+        cx.spawn(async move |this, cx| {
+            let tag = fetch.await;
+            this.update(cx, |this, cx| {
+                this.about_checking = false;
+                if let Some(tag) = tag {
+                    this.about_latest = Some(SharedString::from(tag));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn toggle_shortcuts(
         &mut self,
         _: &ToggleShortcuts,
@@ -2257,6 +2310,109 @@ impl Workspace {
             self.focus_active(window, cx);
         }
         cx.notify();
+    }
+
+    fn render_about(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.show_about {
+            return None;
+        }
+        let t = theme(cx);
+        let version = env!("CARGO_PKG_VERSION");
+        let status = crate::update::update_status(
+            version,
+            self.about_latest.as_ref().map(|t| t.as_ref()),
+            self.about_checking,
+        );
+        let downloadable = matches!(status, crate::update::UpdateStatus::Available(_));
+        let button = |id: &'static str, label: SharedString, t: &Theme| {
+            div()
+                .id(id)
+                .px_3()
+                .py(px(4.))
+                .rounded_md()
+                .cursor_pointer()
+                .border_1()
+                .border_color(t.border)
+                .text_size(px(t.ui_size))
+                .text_color(t.fg)
+                .hover(|s| s.bg(t.hover_bg))
+                .child(label)
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.toggle_about(&ToggleAbout, window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .key_context("About")
+                        .track_focus(&self.about_focus)
+                        .on_action(cx.listener(Self::toggle_about))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .w(px(320.))
+                        .bg(t.panel_bg)
+                        .border_1()
+                        .border_color(t.border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(19.))
+                                .text_color(t.fg_strong)
+                                .child("SuperMD"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(t.ui_size))
+                                .text_color(t.fg_muted)
+                                .child(SharedString::from(format!("Version {version}"))),
+                        )
+                        .child(
+                            div()
+                                .pt_1()
+                                .text_size(px(t.ui_size))
+                                .text_color(t.fg)
+                                .child(SharedString::from(status.message())),
+                        )
+                        .child(
+                            div()
+                                .pt_2()
+                                .flex()
+                                .flex_row()
+                                .gap_2()
+                                .child(
+                                    button("about-check", "Check for Updates".into(), &t)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
+                                            this.check_for_updates(&CheckForUpdates, w, cx);
+                                        })),
+                                )
+                                .children(downloadable.then(|| {
+                                    button("about-download", "Download".into(), &t).on_click(
+                                        cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                            cx.open_url(crate::update::RELEASES_URL);
+                                        }),
+                                    )
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3541,6 +3697,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenRecent6, w, cx| this.open_recent_ix(6, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent7, w, cx| this.open_recent_ix(7, w, cx)))
             .on_action(cx.listener(Self::toggle_preview))
+            .on_action(cx.listener(Self::toggle_about))
+            .on_action(cx.listener(Self::check_for_updates))
             .on_action(cx.listener(Self::toggle_graph))
             .on_action(cx.listener(Self::toggle_flux))
             .on_action(cx.listener(Self::install_plugins))
@@ -3656,6 +3814,7 @@ impl Render for Workspace {
                     ),
             )
             .children(self.render_shortcuts(cx))
+            .children(self.render_about(cx))
             .children(self.render_theme_picker(cx))
             .when_some(self.finder.as_ref(), |root, (finder, _)| {
                 let finder = finder.clone();
@@ -4436,6 +4595,43 @@ mod tests {
     /// Graph, flux and Install were palette-only string ids, which is
     /// why they reached no menu and two had no shortcut. They are real
     /// actions now; the palette entries delegate to the same handlers.
+    #[gpui::test]
+    fn about_dialog_toggles_and_reports_the_running_version(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|window, app| {
+            let handle = ws.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(!ws.read(app).show_about, "closed by default"));
+
+        cx.dispatch_action(ToggleAbout);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.show_about, "About opens");
+            assert!(ws.render_about(cx).is_some(), "the dialog renders");
+            // Nothing has answered yet, so the dialog offers a check and
+            // no download.
+            assert_eq!(
+                crate::update::update_status(
+                    env!("CARGO_PKG_VERSION"),
+                    ws.about_latest.as_ref().map(|t| t.as_ref()),
+                    ws.about_checking,
+                ),
+                crate::update::UpdateStatus::Unknown
+            );
+        });
+
+        cx.dispatch_action(ToggleAbout);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(!ws.show_about, "toggles shut");
+            assert!(ws.render_about(cx).is_none(), "and stops rendering");
+        });
+    }
+
     #[gpui::test]
     fn graph_and_flux_are_actions_not_only_palette_strings(cx: &mut TestAppContext) {
         let _home = temp_home();
