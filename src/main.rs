@@ -1,6 +1,7 @@
 // No console window on Windows release builds.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
+mod commands;
 mod diagram;
 mod diff;
 mod editor;
@@ -29,6 +30,7 @@ mod settings;
 #[cfg(test)]
 mod seti_tests;
 mod theme;
+mod ui_icons;
 mod update;
 mod view;
 mod workspace;
@@ -43,10 +45,7 @@ use gpui::{
 };
 
 use theme::{apply_system_appearance, ActiveTheme};
-use workspace::{
-    CloseTab, NewFile, NextTab, OpenDialog, PrevTab, ToggleFinder, ToggleFocusMode, ToggleOutline,
-    TogglePreview, ToggleSidebar, Workspace,
-};
+use workspace::Workspace;
 
 actions!(app, [Quit]);
 
@@ -61,6 +60,15 @@ impl gpui::AssetSource for Assets {
         {
             if let Some((_, bytes)) = seti::ICONS.iter().find(|(n, _)| *n == name) {
                 return Ok(Some(std::borrow::Cow::Borrowed(*bytes)));
+            }
+        }
+        // Hand-authored chrome icons live beside the generated Seti set.
+        if let Some(name) = path
+            .strip_prefix("icons/ui/")
+            .and_then(|p| p.strip_suffix(".svg"))
+        {
+            if let Some(bytes) = ui_icons::bytes(name) {
+                return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
             }
         }
         Ok(None)
@@ -151,24 +159,12 @@ fn queue_open_urls(pending: &std::sync::Mutex<Vec<PathBuf>>, urls: Vec<String>) 
 /// Every application key binding. Separated from `run` so tests can
 /// prove each keystroke string parses on all platforms.
 fn app_keybindings() -> Vec<KeyBinding> {
-    vec![
+    // Every user-facing command declares its own keys in `commands`.
+    // What remains here is surface mechanics: overlay navigation and
+    // text movement, which are not commands and appear in no menu.
+    let mut bindings = commands::bindings();
+    bindings.extend(vec![
             KeyBinding::new(&platform::keybinding("cmd-q"), Quit, None),
-            KeyBinding::new(&platform::keybinding("cmd-o"), OpenDialog, None),
-            KeyBinding::new(&platform::keybinding("cmd-n"), NewFile, None),
-            KeyBinding::new(&platform::keybinding("cmd-w"), CloseTab, None),
-            KeyBinding::new(&platform::keybinding("ctrl-tab"), NextTab, None),
-            KeyBinding::new(&platform::keybinding("ctrl-shift-tab"), PrevTab, None),
-            KeyBinding::new(&platform::keybinding("cmd-shift-]"), NextTab, None),
-            KeyBinding::new(&platform::keybinding("cmd-shift-["), PrevTab, None),
-            KeyBinding::new(&platform::keybinding("cmd-b"), ToggleSidebar, None),
-            KeyBinding::new(&platform::keybinding("cmd-shift-o"), ToggleOutline, None),
-            KeyBinding::new(&platform::keybinding("cmd-shift-k"), workspace::ToggleKnowledge, None),
-            KeyBinding::new(&platform::keybinding("cmd-p"), ToggleFinder, None),
-            KeyBinding::new(&platform::keybinding("cmd-e"), TogglePreview, None),
-            KeyBinding::new(&platform::keybinding("cmd-shift-d"), workspace::ShowChanges, None),
-            KeyBinding::new(&platform::keybinding("escape"), workspace::ShowChanges, Some("DiffView")),
-            KeyBinding::new(&platform::keybinding("cmd-shift-f"), workspace::ToggleSearch, None),
-            KeyBinding::new(&platform::keybinding("cmd-shift-p"), workspace::TogglePalette, None),
             KeyBinding::new(&platform::keybinding("up"), palette::PaletteUp, Some("Palette")),
             KeyBinding::new(&platform::keybinding("down"), palette::PaletteDown, Some("Palette")),
             KeyBinding::new(&platform::keybinding("enter"), palette::PaletteConfirm, Some("Palette")),
@@ -177,28 +173,15 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("down"), install_ui::InstallDown, Some("InstallOverlay")),
             KeyBinding::new(&platform::keybinding("enter"), install_ui::InstallConfirm, Some("InstallOverlay")),
             KeyBinding::new(&platform::keybinding("escape"), install_ui::InstallDismiss, Some("InstallOverlay")),
-            KeyBinding::new(&platform::keybinding("ctrl-cmd-f"), ToggleFocusMode, None),
             KeyBinding::new(&platform::keybinding("up"), search_ui::SearchUp, Some("Search")),
             KeyBinding::new(&platform::keybinding("down"), search_ui::SearchDown, Some("Search")),
             KeyBinding::new(&platform::keybinding("enter"), search_ui::SearchConfirm, Some("Search")),
             KeyBinding::new(&platform::keybinding("escape"), search_ui::SearchDismiss, Some("Search")),
-            KeyBinding::new(&platform::keybinding("cmd-1"), workspace::FocusSidebar, None),
-            KeyBinding::new(&platform::keybinding("cmd-/"), workspace::ToggleShortcuts, None),
-            KeyBinding::new(&platform::keybinding("cmd-t"), workspace::ToggleThemePicker, None),
             KeyBinding::new(&platform::keybinding("up"), workspace::ThemePickerUp, Some("ThemePicker")),
             KeyBinding::new(&platform::keybinding("down"), workspace::ThemePickerDown, Some("ThemePicker")),
             KeyBinding::new(&platform::keybinding("enter"), workspace::ThemePickerConfirm, Some("ThemePicker")),
             KeyBinding::new(&platform::keybinding("escape"), workspace::ThemePickerCancel, Some("ThemePicker")),
-            KeyBinding::new(&platform::keybinding("cmd-="), workspace::ZoomIn, None),
-            KeyBinding::new(&platform::keybinding("cmd--"), workspace::ZoomOut, None),
-            KeyBinding::new(&platform::keybinding("cmd-0"), workspace::ZoomReset, None),
-            KeyBinding::new(&platform::keybinding("escape"), workspace::ToggleShortcuts, Some("Shortcuts")),
             // Sidebar file operations (while the sidebar is focused)
-            KeyBinding::new(&platform::keybinding("f2"), workspace::SidebarRename, Some("Sidebar")),
-            KeyBinding::new(&platform::keybinding("cmd-backspace"), workspace::SidebarDelete, Some("Sidebar")),
-            KeyBinding::new(&platform::keybinding("cmd-n"), workspace::SidebarNewFile, Some("Sidebar")),
-            KeyBinding::new(&platform::keybinding("cmd-shift-n"), workspace::SidebarNewFolder, Some("Sidebar")),
-            KeyBinding::new(&platform::keybinding("cmd-shift-m"), workspace::SidebarMoveTo, Some("Sidebar")),
             KeyBinding::new(&platform::keybinding("enter"), workspace::SidebarEditCommit, Some("SidebarEdit")),
             KeyBinding::new(&platform::keybinding("escape"), workspace::SidebarEditCancel, Some("SidebarEdit")),
             KeyBinding::new(&platform::keybinding("escape"), workspace::GraphDismiss, Some("GraphView")),
@@ -248,12 +231,6 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("pageup"), editor::PageUp, Some("Editor")),
             KeyBinding::new(&platform::keybinding("pagedown"), editor::PageDown, Some("Editor")),
             // Read-only surfaces (⌘E preview, viewer tabs, welcome).
-            KeyBinding::new(&platform::keybinding("up"), reader::ScrollUp, Some("Reader")),
-            KeyBinding::new(&platform::keybinding("down"), reader::ScrollDown, Some("Reader")),
-            KeyBinding::new(&platform::keybinding("pageup"), reader::PageUp, Some("Reader")),
-            KeyBinding::new(&platform::keybinding("pagedown"), reader::PageDown, Some("Reader")),
-            KeyBinding::new(&platform::keybinding("home"), reader::ScrollTop, Some("Reader")),
-            KeyBinding::new(&platform::keybinding("end"), reader::ScrollBottom, Some("Reader")),
             KeyBinding::new(&platform::keybinding("backspace"), editor::Backspace, Some("Editor")),
             KeyBinding::new(&platform::keybinding("delete"), editor::Delete, Some("Editor")),
             KeyBinding::new(&platform::keybinding("alt-backspace"), editor::DeleteWordLeft, Some("Editor")),
@@ -268,16 +245,14 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("cmd-v"), editor::Paste, Some("Editor")),
             // With a selection cmd-b bolds; the handler propagates a
             // cursor-only press so ToggleSidebar still fires.
-            KeyBinding::new(&platform::keybinding("cmd-b"), editor::ToggleBold, Some("Editor")),
-            KeyBinding::new(&platform::keybinding("cmd-i"), editor::ToggleItalic, Some("Editor")),
-            KeyBinding::new(&platform::keybinding("cmd-enter"), editor::FollowLink, Some("Editor")),
             KeyBinding::new(&platform::keybinding("escape"), editor::DismissCompletion, Some("Editor")),
-            KeyBinding::new(&platform::keybinding("cmd-s"), editor::SaveNow, Some("Editor")),
-            KeyBinding::new(&platform::keybinding("cmd-f"), editor::OpenFind, Some("Editor")),
-            KeyBinding::new(&platform::keybinding("cmd-g"), editor::FindNext, Some("Editor")),
-            KeyBinding::new(&platform::keybinding("cmd-shift-g"), editor::FindPrev, Some("Editor")),
+            // These reuse a command's action in a different context, so
+            // they are surface mechanics rather than commands: Enter in
+            // the find bar, and Escape to leave the diff or the ⌘/ sheet.
             KeyBinding::new(&platform::keybinding("enter"), editor::FindNext, Some("FindBar")),
             KeyBinding::new(&platform::keybinding("shift-enter"), editor::FindPrev, Some("FindBar")),
+            KeyBinding::new(&platform::keybinding("escape"), workspace::ShowChanges, Some("DiffView")),
+            KeyBinding::new(&platform::keybinding("escape"), workspace::ToggleShortcuts, Some("Shortcuts")),
             KeyBinding::new(&platform::keybinding("escape"), editor::CloseFind, Some("FindBar")),
             // Finder overlay
             KeyBinding::new(&platform::keybinding("up"), finder::FinderUp, Some("Finder")),
@@ -286,72 +261,30 @@ fn app_keybindings() -> Vec<KeyBinding> {
             KeyBinding::new(&platform::keybinding("ctrl-n"), finder::FinderDown, Some("Finder")),
             KeyBinding::new(&platform::keybinding("enter"), finder::FinderConfirm, Some("Finder")),
             KeyBinding::new(&platform::keybinding("escape"), finder::FinderDismiss, Some("Finder")),
-    ]
+    ]);
+    bindings
 }
 
 /// The application menu bar; `recents` fills the Open Recent submenu.
 fn app_menus(recents: &[String]) -> Vec<Menu> {
-    vec![
-
-            Menu {
-                name: "SuperMD".into(),
-                items: vec![
-                    MenuItem::os_submenu("Services", SystemMenuType::Services),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit SuperMD", Quit),
-                ],
+    // The app menu is macOS-shaped and has no table entries; everything
+    // else is derived, so the menu bar and the ☰ popover cannot drift.
+    let mut menus = vec![Menu {
+        name: "SuperMD".into(),
+        items: vec![
+            MenuItem::Action {
+                name: commands::about_command().label.into(),
+                action: (commands::about_command().action)(),
+                os_action: None,
             },
-            Menu {
-                name: "File".into(),
-                items: vec![
-                    MenuItem::action("New File", NewFile),
-                    MenuItem::action("Open…", OpenDialog),
-                    MenuItem::submenu(Menu {
-                        name: "Open Recent".into(),
-                        items: recent_menu_items(recents)
-                            .into_iter()
-                            .map(|(name, ix)| match ix {
-                                0 => MenuItem::action(name, workspace::OpenRecent0),
-                                1 => MenuItem::action(name, workspace::OpenRecent1),
-                                2 => MenuItem::action(name, workspace::OpenRecent2),
-                                3 => MenuItem::action(name, workspace::OpenRecent3),
-                                4 => MenuItem::action(name, workspace::OpenRecent4),
-                                5 => MenuItem::action(name, workspace::OpenRecent5),
-                                6 => MenuItem::action(name, workspace::OpenRecent6),
-                                _ => MenuItem::action(name, workspace::OpenRecent7),
-                            })
-                            .collect(),
-                    }),
-                    MenuItem::separator(),
-                    MenuItem::action("Close Tab", CloseTab),
-                ],
-            },
-            Menu {
-                name: "View".into(),
-                items: vec![
-                    MenuItem::action("Toggle Edit/Preview", TogglePreview),
-                    MenuItem::action("Show Changes", workspace::ShowChanges),
-                    MenuItem::action("Focus Mode", ToggleFocusMode),
-                    MenuItem::action("Theme…", workspace::ToggleThemePicker),
-                    MenuItem::separator(),
-                    MenuItem::action("Toggle Sidebar", ToggleSidebar),
-                    MenuItem::action("Toggle Outline", ToggleOutline),
-                    MenuItem::separator(),
-                    MenuItem::action("Go to File…", ToggleFinder),
-                    MenuItem::action("Command Palette…", workspace::TogglePalette),
-                    MenuItem::action("Open Plugins Folder", workspace::OpenPluginsFolder),
-                    MenuItem::action("Reload Plugins", workspace::ReloadPlugins),
-                    MenuItem::action("Search in Workspace…", workspace::ToggleSearch),
-                ],
-            },
-            Menu {
-                name: "Help".into(),
-                items: vec![MenuItem::action(
-                    "Keyboard Shortcuts",
-                    workspace::ToggleShortcuts,
-                )],
-            },
-    ]
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Quit SuperMD", Quit),
+        ],
+    }];
+    menus.extend(commands::menus(recents));
+    menus
 }
 
 fn main() {
@@ -601,7 +534,10 @@ mod startup_tests {
             .collect();
         let menus = app_menus(&recents);
         let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
-        assert_eq!(names, ["SuperMD", "File", "View", "Help"]);
+        assert_eq!(
+            names,
+            ["SuperMD", "File", "Edit", "Format", "View", "Go", "Tools", "Help"]
+        );
         // Every recent slot (0..8) maps through its OpenRecentN arm.
         let file_menu = &menus[1];
         let recent = file_menu
@@ -613,13 +549,21 @@ mod startup_tests {
             })
             .expect("Open Recent submenu");
         assert_eq!(recent.items.len(), 8);
-        assert!(menus[2].items.len() >= 8, "View menu holds the toggles");
+        let view = menus
+            .iter()
+            .find(|m| m.name.as_ref() == "View")
+            .expect("View menu");
+        assert!(view.items.len() >= 8, "View menu holds the toggles");
     }
 
     #[gpui::test]
     fn every_keybinding_parses_and_binds(cx: &mut gpui::TestAppContext) {
+        // No count assertion: it was a weak detector, staying green while
+        // 44 bindings moved into the table and three panels rebound. The
+        // properties that matter live in `commands`: no same-context key
+        // collisions, and every command reachable from some surface.
         let bindings = app_keybindings();
-        assert_eq!(bindings.len(), 126);
+        assert!(bindings.len() > 100, "the binding table is populated");
         // KeyBinding::new panics on malformed keystrokes at construction;
         // binding proves the whole table is accepted by the dispatcher.
         cx.update(|cx| cx.bind_keys(app_keybindings()));

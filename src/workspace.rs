@@ -39,6 +39,9 @@ actions!(
         ToggleFocusMode,
         FocusSidebar,
         ToggleKnowledge,
+        ToggleGraph,
+        ToggleFlux,
+        InstallPlugins,
         GraphDismiss,
         SidebarUp,
         SidebarDown,
@@ -53,6 +56,8 @@ actions!(
         SidebarCollapse,
         SidebarOpen,
         ToggleShortcuts,
+        ToggleAbout,
+        CheckForUpdates,
         ToggleThemePicker,
         ThemePickerUp,
         ThemePickerDown,
@@ -95,75 +100,6 @@ fn record_recent(root: &Path) {
         eprintln!("supermd: cannot save settings: {err}");
     }
 }
-
-/// Shown by the ⌘/ dialog. Kept adjacent to the actual bindings in
-/// main.rs — update both together.
-const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
-    (
-        "General",
-        &[
-            ("⌘ N", "New file"),
-            ("⌘ O", "Open file or folder"),
-            ("⌘ P", "Go to file"),
-            ("⌘ F", "Find in file"),
-            ("⌘ E", "Toggle edit / preview"),
-            ("⌘ ⇧ D", "Show changes vs git HEAD"),
-            ("⌘ ⇧ F", "Search in workspace"),
-            ("⌘ ⇧ P", "Command palette (plugins)"),
-            ("⌃ ⌘ F", "Focus mode"),
-            ("⌘ B", "Toggle sidebar"),
-            ("⌘ ⇧ O", "Toggle outline"),
-            ("⌘ ⇧ K", "Knowledge panel (backlinks, tags, graph)"),
-            ("⌘ 1", "Focus sidebar"),
-            ("⌘ W", "Close tab"),
-            ("⌃ Tab / ⌘ ⇧ ]", "Next tab"),
-            ("⌘ ⇧ [", "Previous tab"),
-            ("⌘ S", "Save now"),
-            ("⌘ + / − / 0", "Zoom image tab"),
-            ("⌘ T", "Theme picker"),
-            ("⌘ /", "This dialog"),
-        ],
-    ),
-    (
-        "Editor",
-        &[
-            ("⌘ Z / ⌘ ⇧ Z", "Undo / redo"),
-            ("⌘ B / ⌘ I", "Bold / italic selection"),
-            ("⏎ in a list", "Continue the list"),
-            ("Tab / ⇧ Tab", "Indent list item · hop table cells"),
-            ("⌘ ⏎ / ⌘ Click", "Follow link under cursor"),
-            ("[[", "Link to a note (completion)"),
-            ("⌥ ← →", "Move by word"),
-            ("⌘ ← →", "Line start / end"),
-            ("⌘ ↑ ↓", "Document start / end"),
-            ("⌥ ⌫", "Delete word"),
-            ("⌘ G / ⌘ ⇧ G", "Next / previous match"),
-            ("Click ✓ / ○", "Toggle task checkbox"),
-            ("Click table / image", "Edit its source"),
-        ],
-    ),
-    (
-        "Preview & read-only tabs",
-        &[
-            ("↑ ↓", "Scroll line by line"),
-            ("PgUp / PgDn", "Scroll by a screen"),
-            ("Home / End", "Jump to start / end"),
-        ],
-    ),
-    (
-        "Sidebar",
-        &[
-            ("↑ ↓", "Move selection"),
-            ("→", "Expand folder"),
-            ("←", "Collapse / to parent"),
-            ("⏎", "Open"),
-            ("F2", "Rename"),
-            ("⌘ ⌫", "Delete (to trash)"),
-            ("⌘ N / ⌘ ⇧ N", "New file / folder here"),
-            ("⌘ ⇧ M", "Move to folder…"),
-        ],
-    ),
-];
 
 /// How an editor tab presents its buffer.
 pub enum EditorView {
@@ -287,7 +223,13 @@ pub struct Workspace {
     sidebar_focus: FocusHandle,
     sidebar_selected: usize,
     shortcuts_focus: FocusHandle,
+    about_focus: FocusHandle,
     show_shortcuts: bool,
+    show_about: bool,
+    /// Latest release tag once a manual About check has answered, and
+    /// whether that check is still in flight.
+    about_latest: Option<SharedString>,
+    about_checking: bool,
     theme_picker: Option<ThemePickerState>,
     theme_picker_focus: FocusHandle,
     last_title: String,
@@ -430,7 +372,11 @@ impl Workspace {
             sidebar_edit: None,
             move_picker: None,
             shortcuts_focus: cx.focus_handle(),
+            about_focus: cx.focus_handle(),
             show_shortcuts: false,
+            show_about: false,
+            about_latest: None,
+            about_checking: false,
             theme_picker: None,
             theme_picker_focus: cx.focus_handle(),
             last_title: String::new(),
@@ -1332,6 +1278,37 @@ impl Workspace {
         .detach();
     }
 
+    fn toggle_graph(&mut self, _: &ToggleGraph, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_graph_view(window, cx);
+    }
+
+    fn install_plugins(
+        &mut self,
+        _: &InstallPlugins,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_install_overlay(window, cx);
+    }
+
+    /// Flip flux on or off, persist it, and re-resolve the active theme
+    /// so the change is visible without waiting for the minute timer.
+    fn toggle_flux(&mut self, _: &ToggleFlux, window: &mut Window, cx: &mut Context<Self>) {
+        {
+            let state = cx.global_mut::<crate::theme::ThemeState>();
+            state.settings.flux.enabled = !state.settings.flux.enabled;
+            state.flux_blend = crate::flux::current_blend(&state.settings.flux);
+            if let Err(err) =
+                crate::settings::save(&crate::settings::config_dir(), &state.settings)
+            {
+                eprintln!("supermd: cannot save settings: {err}");
+            }
+        }
+        crate::theme::refresh_active_theme(cx);
+        window.refresh();
+        cx.notify();
+    }
+
     fn run_plugin_command(
         &mut self,
         plugin: String,
@@ -1339,28 +1316,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // These three were string ids only. They are actions now; the
+        // palette keeps working by delegating to the same handlers.
         if id == "__install" {
-            self.open_install_overlay(window, cx);
+            self.install_plugins(&InstallPlugins, window, cx);
             return;
         }
         if id == "__graph" {
-            self.open_graph_view(window, cx);
+            self.toggle_graph(&ToggleGraph, window, cx);
             return;
         }
         if id == "__flux" {
-            {
-                let state = cx.global_mut::<crate::theme::ThemeState>();
-                state.settings.flux.enabled = !state.settings.flux.enabled;
-                state.flux_blend = crate::flux::current_blend(&state.settings.flux);
-                if let Err(err) =
-                    crate::settings::save(&crate::settings::config_dir(), &state.settings)
-                {
-                    eprintln!("supermd: cannot save settings: {err}");
-                }
-            }
-            crate::theme::refresh_active_theme(cx);
-            window.refresh();
-            cx.notify();
+            self.toggle_flux(&ToggleFlux, window, cx);
             return;
         }
         // Templates need a workspace, not an editor — handled before
@@ -2289,6 +2256,47 @@ impl Workspace {
         self.adjust_zoom(None, cx);
     }
 
+    fn toggle_about(&mut self, _: &ToggleAbout, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_about = !self.show_about;
+        if self.show_about {
+            window.focus(&self.about_focus);
+        } else {
+            self.focus_active(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Ask GitHub for the latest release tag. Failure is silent and
+    /// simply leaves the dialog reporting nothing, matching the quiet
+    /// launch-time check.
+    fn check_for_updates(
+        &mut self,
+        _: &CheckForUpdates,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.about_checking {
+            return;
+        }
+        self.about_checking = true;
+        cx.notify();
+        let fetch = cx
+            .background_executor()
+            .spawn(async move { crate::update::fetch_latest_tag() });
+        cx.spawn(async move |this, cx| {
+            let tag = fetch.await;
+            this.update(cx, |this, cx| {
+                this.about_checking = false;
+                if let Some(tag) = tag {
+                    this.about_latest = Some(SharedString::from(tag));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn toggle_shortcuts(
         &mut self,
         _: &ToggleShortcuts,
@@ -2304,12 +2312,115 @@ impl Workspace {
         cx.notify();
     }
 
+    fn render_about(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.show_about {
+            return None;
+        }
+        let t = theme(cx);
+        let version = env!("CARGO_PKG_VERSION");
+        let status = crate::update::update_status(
+            version,
+            self.about_latest.as_ref().map(|t| t.as_ref()),
+            self.about_checking,
+        );
+        let downloadable = matches!(status, crate::update::UpdateStatus::Available(_));
+        let button = |id: &'static str, label: SharedString, t: &Theme| {
+            div()
+                .id(id)
+                .px_3()
+                .py(px(4.))
+                .rounded_md()
+                .cursor_pointer()
+                .border_1()
+                .border_color(t.border)
+                .text_size(px(t.ui_size))
+                .text_color(t.fg)
+                .hover(|s| s.bg(t.hover_bg))
+                .child(label)
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.toggle_about(&ToggleAbout, window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .key_context("About")
+                        .track_focus(&self.about_focus)
+                        .on_action(cx.listener(Self::toggle_about))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .w(px(320.))
+                        .bg(t.panel_bg)
+                        .border_1()
+                        .border_color(t.border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(19.))
+                                .text_color(t.fg_strong)
+                                .child("SuperMD"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(t.ui_size))
+                                .text_color(t.fg_muted)
+                                .child(SharedString::from(format!("Version {version}"))),
+                        )
+                        .child(
+                            div()
+                                .pt_1()
+                                .text_size(px(t.ui_size))
+                                .text_color(t.fg)
+                                .child(SharedString::from(status.message())),
+                        )
+                        .child(
+                            div()
+                                .pt_2()
+                                .flex()
+                                .flex_row()
+                                .gap_2()
+                                .child(
+                                    button("about-check", "Check for Updates".into(), &t)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
+                                            this.check_for_updates(&CheckForUpdates, w, cx);
+                                        })),
+                                )
+                                .children(downloadable.then(|| {
+                                    button("about-download", "Download".into(), &t).on_click(
+                                        cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                            cx.open_url(crate::update::RELEASES_URL);
+                                        }),
+                                    )
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_shortcuts {
             return None;
         }
         let t = theme(cx);
-        let groups = SHORTCUTS.iter().map(|(title, rows)| {
+        let groups = crate::commands::help_sections().into_iter().map(|(title, rows)| {
             div()
                 .flex()
                 .flex_col()
@@ -2321,7 +2432,7 @@ impl Workspace {
                         .pb_1()
                         .child(SharedString::from(title.to_uppercase())),
                 )
-                .children(rows.iter().map(|(keys, desc)| {
+                .children(rows.into_iter().map(|(keys, desc)| {
                     div()
                         .flex()
                         .flex_row()
@@ -2339,14 +2450,14 @@ impl Workspace {
                                 .bg(t.code_bg)
                                 .rounded_md()
                                 .child(SharedString::from(crate::platform::shortcut_glyphs(
-                                    keys,
+                                    &keys,
                                 ))),
                         )
                         .child(
                             div()
                                 .text_size(px(t.ui_size))
                                 .text_color(t.fg)
-                                .child(SharedString::from(*desc)),
+                                .child(SharedString::from(desc)),
                         )
                 }))
         });
@@ -2750,13 +2861,44 @@ impl Workspace {
                         .window_control_area(gpui::WindowControlArea::Drag),
                 )
                 .child(
+                    // Workspace name, with a `+` for new files — ⌘N and
+                    // ⌘⇧N were keyboard-only.
                     div()
                         .px_3()
                         .pt(px(4.))
                         .pb(px(6.))
-                        .text_size(px(11.))
-                        .text_color(t.fg_muted)
-                        .child(SharedString::from(root_name.to_uppercase())),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(11.))
+                                .text_color(t.fg_muted)
+                                .overflow_hidden()
+                                .truncate()
+                                .child(SharedString::from(root_name.to_uppercase())),
+                        )
+                        .child(
+                            div()
+                                .id("sidebar-new-file")
+                                .flex_none()
+                                .p(px(2.))
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(t.hover_bg))
+                                .child(
+                                    gpui::svg()
+                                        .path(SharedString::from(crate::ui_icons::path("plus")))
+                                        .size(px(13.))
+                                        .flex_none()
+                                        .text_color(t.fg_muted),
+                                )
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.sidebar_new_file(&SidebarNewFile, window, cx);
+                                })),
+                        ),
                 )
                 .child(
                     div()
@@ -2830,6 +2972,159 @@ impl Workspace {
                         |_, window, _| window.remove_window(),
                     ),
                 )
+                .into_any_element(),
+        )
+    }
+
+    /// Right-hand titlebar cluster: the three panel toggles, plus a Show
+    /// Changes button that appears only when the open file differs from
+    /// HEAD. Keyboard-only until now.
+    /// The bottom status strip. Replaces the floating pill that used to
+    /// carry widget-plugin text, and gives flux and the graph a home in
+    /// the chrome. Hidden in focus mode, which is meant to be bare.
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.focus_mode {
+            return None;
+        }
+        let t = theme(cx);
+        let flux_on = cx.global::<crate::theme::ThemeState>().settings.flux.enabled;
+        let status = match self.tabs.get(self.active) {
+            Some(Tab::Editor { editor, view: EditorView::Edit })
+                if !crate::extensions::widget_plugins().is_empty() =>
+            {
+                editor.read(cx).status()
+            }
+            _ => None,
+        };
+        let button = |id: &'static str,
+                      icon: &'static str,
+                      on: bool,
+                      cx: &mut Context<Self>,
+                      act: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            div()
+                .id(id)
+                .px(px(5.))
+                .h_full()
+                .flex()
+                .flex_none()
+                .items_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(t.hover_bg))
+                .child(
+                    gpui::svg()
+                        .path(SharedString::from(crate::ui_icons::path(icon)))
+                        .size(px(13.))
+                        .flex_none()
+                        .text_color(if on { t.accent } else { t.fg_muted }),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    act(this, window, cx);
+                }))
+        };
+        Some(
+            div()
+                .h(px(22.))
+                .w_full()
+                .flex_none()
+                .bg(t.panel_bg)
+                .border_t_1()
+                .border_color(t.border)
+                .flex()
+                .flex_row()
+                .items_center()
+                .px_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(11.))
+                        .text_color(t.fg_muted)
+                        .overflow_hidden()
+                        .truncate()
+                        .children(status),
+                )
+                .child(button("status-graph", "graph", false, cx, |t, w, c| {
+                    t.toggle_graph(&ToggleGraph, w, c)
+                }))
+                .child(button("status-flux", "sun", flux_on, cx, |t, w, c| {
+                    t.toggle_flux(&ToggleFlux, w, c)
+                }))
+                .into_any_element(),
+        )
+    }
+
+    fn render_titlebar_chrome(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.focus_mode {
+            return None;
+        }
+        let t = theme(cx);
+        let button = |id: &'static str,
+                      icon: &'static str,
+                      on: bool,
+                      cx: &mut Context<Self>,
+                      act: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            div()
+                .id(id)
+                .w(px(28.))
+                .h_full()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(t.hover_bg))
+                .child(
+                    gpui::svg()
+                        .path(SharedString::from(crate::ui_icons::path(icon)))
+                        .size(px(15.))
+                        .flex_none()
+                        .text_color(if on { t.fg_strong } else { t.fg_muted }),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    act(this, window, cx);
+                }))
+        };
+        // Show Changes is offered only when there is a change to show.
+        let modified = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.path(cx))
+            .is_some_and(|p| self.git_modified.contains(&p));
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .h_full()
+                .items_center()
+                .children(modified.then(|| {
+                    button("chrome-changes", "changes", false, cx, |t, w, c| {
+                        t.show_changes(&ShowChanges, w, c)
+                    })
+                }))
+                .child(button(
+                    "chrome-sidebar",
+                    "sidebar",
+                    self.show_sidebar,
+                    cx,
+                    |t, w, c| t.toggle_sidebar(&ToggleSidebar, w, c),
+                ))
+                .child(button(
+                    "chrome-outline",
+                    "outline",
+                    self.show_outline,
+                    cx,
+                    |t, w, c| t.toggle_outline(&ToggleOutline, w, c),
+                ))
+                .child(button(
+                    "chrome-knowledge",
+                    "knowledge",
+                    self.show_knowledge,
+                    cx,
+                    |t, w, c| t.toggle_knowledge(&ToggleKnowledge, w, c),
+                ))
                 .into_any_element(),
         )
     }
@@ -2957,6 +3252,7 @@ impl Workspace {
                     .h_full()
                     .window_control_area(gpui::WindowControlArea::Drag),
             )
+            .children(self.render_titlebar_chrome(cx))
             .when_some(self.update_available.clone(), |d, tag| {
                 d.child(
                     div()
@@ -3586,6 +3882,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenRecent6, w, cx| this.open_recent_ix(6, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent7, w, cx| this.open_recent_ix(7, w, cx)))
             .on_action(cx.listener(Self::toggle_preview))
+            .on_action(cx.listener(Self::toggle_about))
+            .on_action(cx.listener(Self::check_for_updates))
+            .on_action(cx.listener(Self::toggle_graph))
+            .on_action(cx.listener(Self::toggle_flux))
+            .on_action(cx.listener(Self::install_plugins))
             .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::focus_sidebar))
@@ -3695,9 +3996,11 @@ impl Render for Workspace {
                             )
                             .children(outline)
                             .children(knowledge),
-                    ),
+                    )
+                    .children(self.render_status_bar(cx)),
             )
             .children(self.render_shortcuts(cx))
+            .children(self.render_about(cx))
             .children(self.render_theme_picker(cx))
             .when_some(self.finder.as_ref(), |root, (finder, _)| {
                 let finder = finder.clone();
@@ -3727,13 +4030,19 @@ impl Render for Workspace {
             })
             .when(self.app_menu_open && !crate::platform::MACOS, |root| {
                 let t = theme(cx);
-                let item = |id: &'static str,
-                            label: &'static str,
-                            shortcut: &'static str,
-                            cx: &mut Context<Self>,
-                            action: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+                // One row per table entry. Clicking dispatches the very
+                // action the menu bar and the keystroke dispatch, so all
+                // three paths are the same path.
+                let item = |cmd: &'static crate::commands::Command,
+                            cx: &mut Context<Self>| {
+                    let shortcut = cmd
+                        .keys
+                        .first()
+                        .map(|k| crate::platform::shortcut_glyphs(&crate::commands::glyphs(k)))
+                        .unwrap_or_default();
+                    let label = cmd.label;
                     div()
-                        .id(id)
+                        .id(SharedString::from(format!("m-{}", cmd.id)))
                         .w_full()
                         .px_3()
                         .py(px(5.))
@@ -3754,13 +4063,11 @@ impl Render for Workspace {
                             div()
                                 .text_size(px(11.))
                                 .text_color(t.fg_muted)
-                                .child(SharedString::from(crate::platform::shortcut_glyphs(
-                                    shortcut,
-                                ))),
+                                .child(SharedString::from(shortcut)),
                         )
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.app_menu_open = false;
-                            action(this, window, cx);
+                            window.dispatch_action((cmd.action)(), cx);
                         }))
                 };
                 let recents: Vec<AnyElement> = self
@@ -3795,6 +4102,33 @@ impl Render for Workspace {
                     })
                     .collect();
                 let divider = || div().h(px(1.)).w_full().my_1().bg(t.border);
+
+                // Same grouping as the macOS menu bar — off macOS this
+                // popover *is* the menu, and the two must never diverge.
+                let mut recents = recents;
+                let mut menu_rows: Vec<AnyElement> = Vec::new();
+                for (gi, (title, cmds)) in
+                    crate::commands::popover_groups().into_iter().enumerate()
+                {
+                    if gi > 0 {
+                        menu_rows.push(divider().into_any_element());
+                    }
+                    menu_rows.push(
+                        div()
+                            .px_3()
+                            .py(px(3.))
+                            .text_size(px(10.))
+                            .text_color(t.fg_muted)
+                            .child(SharedString::from(title.to_uppercase()))
+                            .into_any_element(),
+                    );
+                    for cmd in cmds {
+                        menu_rows.push(item(cmd, cx).into_any_element());
+                        if cmd.id == "open" && !recents.is_empty() {
+                            menu_rows.extend(std::mem::take(&mut recents));
+                        }
+                    }
+                }
                 root.child(
                     div()
                         .absolute()
@@ -3824,50 +4158,7 @@ impl Render for Workspace {
                                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();
                                 })
-                                .child(item("m-new", "New File", "⌘ N", cx, |t, w, c| {
-                                    t.new_file(&NewFile, w, c)
-                                }))
-                                .child(item("m-open", "Open…", "⌘ O", cx, |t, w, c| {
-                                    t.open_dialog(&OpenDialog, w, c)
-                                }))
-                                .children((!recents.is_empty()).then(divider))
-                                .children(recents)
-                                .child(divider())
-                                .child(item("m-find", "Go to File", "⌘ P", cx, |t, w, c| {
-                                    t.toggle_finder(&ToggleFinder, w, c)
-                                }))
-                                .child(item(
-                                    "m-search",
-                                    "Search in Workspace",
-                                    "⌘ ⇧ F",
-                                    cx,
-                                    |t, w, c| t.toggle_search(&ToggleSearch, w, c),
-                                ))
-                                .child(item(
-                                    "m-diff",
-                                    "Show Changes",
-                                    "⌘ ⇧ D",
-                                    cx,
-                                    |t, w, c| t.show_changes(&ShowChanges, w, c),
-                                ))
-                                .child(item(
-                                    "m-preview",
-                                    "Toggle Preview",
-                                    "⌘ E",
-                                    cx,
-                                    |t, w, c| t.toggle_preview(&TogglePreview, w, c),
-                                ))
-                                .child(divider())
-                                .child(item("m-theme", "Theme…", "⌘ T", cx, |t, w, c| {
-                                    t.toggle_theme_picker(&ToggleThemePicker, w, c)
-                                }))
-                                .child(item(
-                                    "m-shortcuts",
-                                    "Shortcuts",
-                                    "⌘ /",
-                                    cx,
-                                    |t, w, c| t.toggle_shortcuts(&ToggleShortcuts, w, c),
-                                )),
+                                .children(menu_rows),
                         ),
                 )
             })
@@ -4005,33 +4296,6 @@ impl Render for Workspace {
                         ),
                 )
             })
-            .when_some(
-                // Status strip: widget-plugin text for the active editor.
-                match self.tabs.get(self.active) {
-                    Some(Tab::Editor { editor, view: EditorView::Edit })
-                        if !crate::extensions::widget_plugins().is_empty() =>
-                    {
-                        editor.read(cx).status()
-                    }
-                    _ => None,
-                },
-                |root, status| {
-                    let t = theme(cx);
-                    root.child(
-                        div()
-                            .absolute()
-                            .bottom_2()
-                            .right_4()
-                            .px_2()
-                            .py(px(3.))
-                            .rounded_md()
-                            .bg(t.panel_bg)
-                            .text_size(px(11.))
-                            .text_color(t.fg_muted)
-                            .child(status),
-                    )
-                },
-            )
             .when_some(self.command_error.clone(), |root, msg| {
                 let t = theme(cx);
                 root.child(
@@ -4484,6 +4748,143 @@ mod tests {
             assert!(ws.move_picker.is_none(), "picker closed");
             let paths = tab_paths(ws, app);
             assert!(paths.iter().flatten().any(|p| p.ends_with("sub/a.md")), "{paths:?}");
+        });
+    }
+
+    /// Graph, flux and Install were palette-only string ids, which is
+    /// why they reached no menu and two had no shortcut. They are real
+    /// actions now; the palette entries delegate to the same handlers.
+    #[gpui::test]
+    fn status_bar_renders_and_its_flux_toggle_works(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|window, app| {
+            let handle = ws.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.render_status_bar(cx).is_some(), "the strip renders");
+        });
+
+        // The sun icon drives the same handler the menu and palette do.
+        let before =
+            cx.update(|_, app| app.global::<crate::theme::ThemeState>().settings.flux.enabled);
+        cx.dispatch_action(ToggleFlux);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_ne!(
+                app.global::<crate::theme::ThemeState>().settings.flux.enabled,
+                before,
+                "flux flipped"
+            );
+        });
+
+        // Focus mode is meant to be bare: no strip.
+        cx.dispatch_action(ToggleFocusMode);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.render_status_bar(cx).is_none(), "hidden in focus mode");
+        });
+    }
+
+    #[gpui::test]
+    fn titlebar_chrome_tracks_panel_state_and_hides_in_focus_mode(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# A\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|window, app| {
+            let handle = ws.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.render_titlebar_chrome(cx).is_some(), "chrome renders");
+        });
+        // Focus mode is a deliberately bare surface: no chrome at all.
+        cx.dispatch_action(ToggleFocusMode);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.focus_mode, "focus mode is on");
+            assert!(ws.render_titlebar_chrome(cx).is_none(), "chrome hides");
+        });
+        cx.dispatch_action(ToggleFocusMode);
+        cx.run_until_parked();
+
+        // The toggles drive the same state the keyboard does.
+        let before = cx.update(|_, app| ws.read(app).show_knowledge);
+        cx.dispatch_action(ToggleKnowledge);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_ne!(ws.read(app).show_knowledge, before, "knowledge panel toggled");
+        });
+    }
+
+    #[gpui::test]
+    fn about_dialog_toggles_and_reports_the_running_version(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|window, app| {
+            let handle = ws.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(!ws.read(app).show_about, "closed by default"));
+
+        cx.dispatch_action(ToggleAbout);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.show_about, "About opens");
+            assert!(ws.render_about(cx).is_some(), "the dialog renders");
+            // Nothing has answered yet, so the dialog offers a check and
+            // no download.
+            assert_eq!(
+                crate::update::update_status(
+                    env!("CARGO_PKG_VERSION"),
+                    ws.about_latest.as_ref().map(|t| t.as_ref()),
+                    ws.about_checking,
+                ),
+                crate::update::UpdateStatus::Unknown
+            );
+        });
+
+        cx.dispatch_action(ToggleAbout);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(!ws.show_about, "toggles shut");
+            assert!(ws.render_about(cx).is_none(), "and stops rendering");
+        });
+    }
+
+    #[gpui::test]
+    fn graph_and_flux_are_actions_not_only_palette_strings(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|window, app| {
+            let handle = ws.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ToggleFlux);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(
+                app.global::<crate::theme::ThemeState>().settings.flux.enabled,
+                "ToggleFlux enables flux, as the palette entry did"
+            );
+        });
+
+        cx.dispatch_action(ToggleGraph);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(ws.read(app).graph.is_some(), "ToggleGraph opens the graph");
         });
     }
 

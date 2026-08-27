@@ -34,6 +34,18 @@ fn translate_glyphs(mac: &str) -> String {
 }
 
 /// Shortcut labels for the ⌘/ dialog on the current platform.
+/// macOS puts About in the app menu, above Services; every other
+/// platform puts it in Help. The command table asks here rather than
+/// carrying a `cfg!()` of its own.
+pub const ABOUT_IN_APP_MENU: bool = MACOS;
+
+/// Always the non-macOS rendering, for generating cross-platform docs.
+/// (`shortcut_glyphs` returns the macOS form when built on macOS; the
+/// docs need both columns whatever the host.)
+pub fn translate_glyphs_for_docs(mac: &str) -> String {
+    translate_glyphs(mac)
+}
+
 pub fn shortcut_glyphs(mac: &str) -> String {
     if MACOS {
         mac.to_string()
