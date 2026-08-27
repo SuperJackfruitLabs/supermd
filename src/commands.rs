@@ -685,8 +685,12 @@ mod tests {
             return;
         }
         let on_disk = std::fs::read_to_string(path).expect("read shortcuts.md");
+        // Git checks this file out with CRLF on Windows, so compare the
+        // content rather than the line endings — the generator always
+        // emits LF, which is what gets committed.
         assert_eq!(
-            on_disk, generated,
+            on_disk.replace("\r\n", "\n"),
+            generated,
             "docs/site/shortcuts.md is stale; rerun with UPDATE_DOCS=1"
         );
     }
