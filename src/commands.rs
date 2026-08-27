@@ -636,6 +636,20 @@ mod tests {
         );
     }
 
+    /// A command with no menu entry, no ⌘/ row and no keystroke exists
+    /// but no user can find it. This is the property the old
+    /// `assert_eq!(bindings.len(), N)` counter could never express — it
+    /// stayed green while 44 bindings moved and three panels rebound.
+    #[test]
+    fn every_command_is_reachable_from_some_surface() {
+        let unreachable: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.menu.is_none() && c.help.is_none() && c.keys.is_empty())
+            .map(|c| c.id)
+            .collect();
+        assert!(unreachable.is_empty(), "unreachable commands: {unreachable:?}");
+    }
+
     #[test]
     fn glyphs_render_macos_modifier_symbols() {
         assert_eq!(glyphs("cmd-n"), "⌘ N");
