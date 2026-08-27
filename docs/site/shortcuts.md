@@ -2,6 +2,20 @@
 
 On Linux and Windows, read ⌘ as Ctrl.
 
+## The scheme
+
+The modifier says what a shortcut acts on. New bindings follow the tier that matches their scope, so the map stays learnable as it grows.
+
+| Modifier | Acts on | Examples |
+| -------- | ------- | -------- |
+| ⌘ + letter | the file and the text | ⌘N ⌘O ⌘S ⌘W ⌘F ⌘Z ⌘B ⌘I ⌘P ⌘E ⌘T |
+| ⌘ ⇧ + letter | the workspace | ⌘⇧F search · ⌘⇧P palette · ⌘⇧D changes · ⌘⇧G graph |
+| ⌃ ⌘ + letter | modes and environment | ⌃⌘F focus · ⌃⌘N flux |
+| ⌘ + digit | panels | ⌘1 sidebar · ⌘2 outline · ⌘3 knowledge |
+| unmodified | only inside a surface | sidebar: F2 rename · ⌘⌫ trash |
+
+⌘B also toggles the sidebar, kept from long habit in other editors: with a selection it bolds, and with a bare cursor it falls through to the panel.
+
 ## General
 
 | macOS | Windows / Linux | Action |

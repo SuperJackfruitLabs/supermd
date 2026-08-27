@@ -4,7 +4,7 @@ Everything consciously deferred, cut from a spec's scope, or discussed and
 parked — with why, so future planning starts from decisions instead of
 archaeology. Living document: prune what ships, add what gets cut.
 
-_Last groomed: 2026-08-25, after v0.0.12 (knowledge release)._
+_Last groomed: 2026-08-26, after the shortcuts/menus/chrome pass._
 
 ## Knowledge features (deferred from M1–M4)
 
@@ -56,50 +56,31 @@ _Last groomed: 2026-08-25, after v0.0.12 (knowledge release)._
 | Item | Notes |
 | ---- | ----- |
 | Windows code signing | SmartScreen still shows one "unrecognized app" prompt |
-| In-app auto-update | Launch check shows an "update available" pill linking out; downloading and swapping in place (Sparkle-style) is the retention feature |
+| In-app auto-update | About (⌘/ → About) checks on demand and links out. Self-replacement is **three** implementations, not one, and on a `.deb` install the binary is root-owned in `/usr/bin` — the correct Linux answer is an apt repository, not self-update. Wants its own spec |
 | Homebrew cask / winget | Cheap once naming is stable |
 | README screenshot | Predates the toolbar, knowledge panel, and graph — retake on v0.0.12 |
 
-## Shortcuts, menus & chrome — reorganization candidate
+## Shortcuts, menus & chrome
 
-A 2026-08-25 audit ahead of a possible UX pass. Current state: **120
-keybindings**, menus that haven't grown since ~v0.0.5, and almost no
-clickable chrome. Findings:
+The 2026-08-25 audit is **done** — see
+`docs/superpowers/specs/2026-08-26-shortcuts-menus-chrome-design.md` and
+the plan beside it. Commands are declared once in `src/commands.rs`; the
+keybindings, macOS menu bar, ☰ popover, ⌘/ dialog and generated docs are
+all projections of that table, and tests assert the popover and menu bar
+cannot diverge again.
 
-**Menu gaps (biggest issue):**
-- **No Edit menu at all.** No Undo/Redo/Cut/Copy/Paste/Select All in the
-  menu bar — this also breaks macOS conventions (Edit is where the
-  system hangs dictation, emoji, and substitutions).
-- **None of the knowledge features are in menus**: knowledge panel,
-  Graph View, follow link — invisible to menu browsers.
-- Missing from menus: Save Now, Find in File, Install Plugins…,
-  formatting actions (bold/italic/…), flux toggle, sidebar file ops.
-- **View is a grab-bag**: navigation ("Go to File…", "Search in
-  Workspace…"), plugin management ("Open Plugins Folder", "Reload
-  Plugins"), and view toggles all in one menu. Wants a split into
-  View / Go / Plugins (or Tools).
+Shipped: Edit / Format / Go / Tools menus, panels on ⌘1/⌘2/⌘3 (freeing
+⌘⇧O and ⌘⇧K), ⌘⇧G for the graph, ⌃⌘N for flux, a written modifier
+scheme, the About dialog, titlebar panel toggles, a sidebar `+`, a Show
+Changes button, and the status bar.
 
-**Shortcut observations:**
-- ⌘⇧-letter space is nearly saturated (D F G K M N O P + `[` `]`);
-  future features will collide soon.
-- No shortcut for Graph View (palette-only today).
-- ⌘⇧M (move file) vs ⌘⇧K (knowledge) vs ⌘⇧N (new folder) are
-  memorable individually but have no mnemonic system.
-- The ⌘/ dialog and docs/site/shortcuts.md are hand-synced with
-  main.rs bindings; a generation step (or change-detector test tying
-  them together) would prevent drift.
+What the pass left open:
 
-**Chrome / quick-action candidates (deliberately minimal today):**
-- Panel toggle buttons (sidebar / outline / knowledge) in the titlebar —
-  the standard three-pane affordance; currently keyboard-only.
-- A `+` new-file button in the sidebar header.
-- Status-corner toggles: flux on/off (sun icon), graph view.
-- A discoverable home for "Show Changes" beyond ⌘⇧D.
-
-Suggested shape when picked up: one bounded pass — restructure menus
-(add Edit, split View, add knowledge/format items), rationalize the
-shortcut map (documenting a mnemonic scheme before the space runs out),
-and add the 3–5 highest-value chrome buttons behind a design review.
+| Item | Notes |
+| ---- | ----- |
+| Format toggles have no chords | Code / strike / link / heading / quote are menu- and toolbar-reachable only. Deliberate — the ⌘⇧-letter space was just relieved and should not be re-filled without a reason |
+| Edit-menu items in non-editor tabs | Undo/Cut/Copy/Paste/Select All are bound in the `Editor` context but appear in the menu always; on a Reader or Image tab they dispatch into nothing |
+| User-editable keymaps | The table is compile-time. A JSON keymap is a separate feature |
 
 ## Explicit non-goals (decided, not deferred)
 

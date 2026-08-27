@@ -443,7 +443,7 @@ pub fn popover_groups() -> Vec<(&'static str, Vec<&'static Command>)> {
 /// the one macOS-form declaration in the table.
 pub fn shortcut_markdown() -> String {
     let mut out = String::from(
-        "# Keyboard shortcuts\n\nOn Linux and Windows, read ⌘ as Ctrl.\n\n",
+        "# Keyboard shortcuts\n\nOn Linux and Windows, read ⌘ as Ctrl.\n\n## The scheme\n\nThe modifier says what a shortcut acts on. New bindings follow the tier that matches their scope, so the map stays learnable as it grows.\n\n| Modifier | Acts on | Examples |\n| -------- | ------- | -------- |\n| ⌘ + letter | the file and the text | ⌘N ⌘O ⌘S ⌘W ⌘F ⌘Z ⌘B ⌘I ⌘P ⌘E ⌘T |\n| ⌘ ⇧ + letter | the workspace | ⌘⇧F search · ⌘⇧P palette · ⌘⇧D changes · ⌘⇧G graph |\n| ⌃ ⌘ + letter | modes and environment | ⌃⌘F focus · ⌃⌘N flux |\n| ⌘ + digit | panels | ⌘1 sidebar · ⌘2 outline · ⌘3 knowledge |\n| unmodified | only inside a surface | sidebar: F2 rename · ⌘⌫ trash |\n\n⌘B also toggles the sidebar, kept from long habit in other editors: with a selection it bolds, and with a bare cursor it falls through to the panel.\n\n",
     );
     for (title, rows) in help_sections() {
         out.push_str(&format!("## {title}\n\n"));
@@ -639,6 +639,16 @@ mod tests {
             .flat_map(|(_, cmds)| cmds.iter().map(|c| c.label))
             .collect();
         assert_eq!(bar, popover, "popover and menu bar list the same commands");
+    }
+
+    #[test]
+    fn shortcut_markdown_documents_the_modifier_scheme() {
+        let md = shortcut_markdown();
+        assert!(md.contains("## The scheme"), "the scheme is documented");
+        // Each tier is named, so a future binding has a principled home.
+        for tier in ["the file and the text", "the workspace", "modes", "panels"] {
+            assert!(md.contains(tier), "scheme is missing the {tier:?} tier");
+        }
     }
 
     #[test]
