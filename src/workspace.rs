@@ -39,6 +39,9 @@ actions!(
         ToggleFocusMode,
         FocusSidebar,
         ToggleKnowledge,
+        ToggleGraph,
+        ToggleFlux,
+        InstallPlugins,
         GraphDismiss,
         SidebarUp,
         SidebarDown,
@@ -1263,6 +1266,37 @@ impl Workspace {
         .detach();
     }
 
+    fn toggle_graph(&mut self, _: &ToggleGraph, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_graph_view(window, cx);
+    }
+
+    fn install_plugins(
+        &mut self,
+        _: &InstallPlugins,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_install_overlay(window, cx);
+    }
+
+    /// Flip flux on or off, persist it, and re-resolve the active theme
+    /// so the change is visible without waiting for the minute timer.
+    fn toggle_flux(&mut self, _: &ToggleFlux, window: &mut Window, cx: &mut Context<Self>) {
+        {
+            let state = cx.global_mut::<crate::theme::ThemeState>();
+            state.settings.flux.enabled = !state.settings.flux.enabled;
+            state.flux_blend = crate::flux::current_blend(&state.settings.flux);
+            if let Err(err) =
+                crate::settings::save(&crate::settings::config_dir(), &state.settings)
+            {
+                eprintln!("supermd: cannot save settings: {err}");
+            }
+        }
+        crate::theme::refresh_active_theme(cx);
+        window.refresh();
+        cx.notify();
+    }
+
     fn run_plugin_command(
         &mut self,
         plugin: String,
@@ -1270,28 +1304,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // These three were string ids only. They are actions now; the
+        // palette keeps working by delegating to the same handlers.
         if id == "__install" {
-            self.open_install_overlay(window, cx);
+            self.install_plugins(&InstallPlugins, window, cx);
             return;
         }
         if id == "__graph" {
-            self.open_graph_view(window, cx);
+            self.toggle_graph(&ToggleGraph, window, cx);
             return;
         }
         if id == "__flux" {
-            {
-                let state = cx.global_mut::<crate::theme::ThemeState>();
-                state.settings.flux.enabled = !state.settings.flux.enabled;
-                state.flux_blend = crate::flux::current_blend(&state.settings.flux);
-                if let Err(err) =
-                    crate::settings::save(&crate::settings::config_dir(), &state.settings)
-                {
-                    eprintln!("supermd: cannot save settings: {err}");
-                }
-            }
-            crate::theme::refresh_active_theme(cx);
-            window.refresh();
-            cx.notify();
+            self.toggle_flux(&ToggleFlux, window, cx);
             return;
         }
         // Templates need a workspace, not an editor — handled before
@@ -3517,6 +3541,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenRecent6, w, cx| this.open_recent_ix(6, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent7, w, cx| this.open_recent_ix(7, w, cx)))
             .on_action(cx.listener(Self::toggle_preview))
+            .on_action(cx.listener(Self::toggle_graph))
+            .on_action(cx.listener(Self::toggle_flux))
+            .on_action(cx.listener(Self::install_plugins))
             .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::focus_sidebar))
@@ -4403,6 +4430,36 @@ mod tests {
             assert!(ws.move_picker.is_none(), "picker closed");
             let paths = tab_paths(ws, app);
             assert!(paths.iter().flatten().any(|p| p.ends_with("sub/a.md")), "{paths:?}");
+        });
+    }
+
+    /// Graph, flux and Install were palette-only string ids, which is
+    /// why they reached no menu and two had no shortcut. They are real
+    /// actions now; the palette entries delegate to the same handlers.
+    #[gpui::test]
+    fn graph_and_flux_are_actions_not_only_palette_strings(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|window, app| {
+            let handle = ws.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ToggleFlux);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(
+                app.global::<crate::theme::ThemeState>().settings.flux.enabled,
+                "ToggleFlux enables flux, as the palette entry did"
+            );
+        });
+
+        cx.dispatch_action(ToggleGraph);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(ws.read(app).graph.is_some(), "ToggleGraph opens the graph");
         });
     }
 
