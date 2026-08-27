@@ -4,7 +4,7 @@
     {
       "name": "dot",
       "description": "Graphviz DOT diagrams as live blocks (pure Rust)",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "capabilities": [],
       "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.10/plugin-dot.zip",
       "sha256": "60272fca058b52bafd64acd5a8a7881c3e9d2b9ed7019ddd3bfc69a7cfa52b80"

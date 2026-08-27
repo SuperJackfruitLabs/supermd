@@ -1,5 +1,5 @@
 name = "dot"
-version = "0.1.0"
+version = "0.1.1"
 description = "Graphviz DOT diagrams as live blocks (pure Rust)"
 authors = ["SuperJackfruitLabs"]
 fences = ["dot", "graphviz"]

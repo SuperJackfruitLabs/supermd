@@ -31,6 +31,13 @@ pub fn themed(svg: &str, theme: &t::Theme) -> String {
         // stamp the theme text color on every text element instead.
         .replace("<text ", &format!("<text fill=\"{}\" ", theme.text))
         .replace("<text>", &format!("<text fill=\"{}\">", theme.text))
+        // layout-rs hardcodes a serif family into its <style> block, so
+        // diagrams ignored the theme's typography while every other
+        // surface followed it.
+        .replace(
+            "font-family: Times, serif;",
+            &format!("font-family: {};", theme.font_body),
+        )
 }
 
 struct Plugin;
@@ -61,6 +68,29 @@ mod tests {
     #[test]
     fn bad_dot_reports_error() {
         assert!(render("digraph { -> -> }").is_err());
+    }
+
+    /// layout-rs hardcodes `font-family: Times, serif` into a <style>
+    /// block, so diagrams rendered serif while every other surface in
+    /// the app followed the theme. The host already hands us the body
+    /// font; use it.
+    #[test]
+    fn theming_replaces_the_hardcoded_serif_font() {
+        let theme = t::Theme {
+            background: "#211f1a".into(),
+            surface: "#2b2822".into(),
+            primary: "#e5a63b".into(),
+            text: "#d9d4c8".into(),
+            muted: "#8f897a".into(),
+            border: "#383428".into(),
+            font_body: "Inter".into(),
+            dark: true,
+        };
+        let raw = render("digraph { a -> b; }").unwrap();
+        assert!(raw.contains("Times, serif"), "layout-rs still emits a serif default");
+        let svg = themed(&raw, &theme);
+        assert!(!svg.contains("Times"), "no serif default survives theming");
+        assert!(svg.contains("font-family: Inter;"), "the theme body font is used");
     }
 
     #[test]
