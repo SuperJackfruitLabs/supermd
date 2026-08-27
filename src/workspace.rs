@@ -2979,6 +2979,81 @@ impl Workspace {
     /// Right-hand titlebar cluster: the three panel toggles, plus a Show
     /// Changes button that appears only when the open file differs from
     /// HEAD. Keyboard-only until now.
+    /// The bottom status strip. Replaces the floating pill that used to
+    /// carry widget-plugin text, and gives flux and the graph a home in
+    /// the chrome. Hidden in focus mode, which is meant to be bare.
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.focus_mode {
+            return None;
+        }
+        let t = theme(cx);
+        let flux_on = cx.global::<crate::theme::ThemeState>().settings.flux.enabled;
+        let status = match self.tabs.get(self.active) {
+            Some(Tab::Editor { editor, view: EditorView::Edit })
+                if !crate::extensions::widget_plugins().is_empty() =>
+            {
+                editor.read(cx).status()
+            }
+            _ => None,
+        };
+        let button = |id: &'static str,
+                      icon: &'static str,
+                      on: bool,
+                      cx: &mut Context<Self>,
+                      act: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            div()
+                .id(id)
+                .px(px(5.))
+                .h_full()
+                .flex()
+                .flex_none()
+                .items_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(t.hover_bg))
+                .child(
+                    gpui::svg()
+                        .path(SharedString::from(crate::ui_icons::path(icon)))
+                        .size(px(13.))
+                        .flex_none()
+                        .text_color(if on { t.accent } else { t.fg_muted }),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    act(this, window, cx);
+                }))
+        };
+        Some(
+            div()
+                .h(px(22.))
+                .w_full()
+                .flex_none()
+                .bg(t.panel_bg)
+                .border_t_1()
+                .border_color(t.border)
+                .flex()
+                .flex_row()
+                .items_center()
+                .px_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(11.))
+                        .text_color(t.fg_muted)
+                        .overflow_hidden()
+                        .truncate()
+                        .children(status),
+                )
+                .child(button("status-graph", "graph", false, cx, |t, w, c| {
+                    t.toggle_graph(&ToggleGraph, w, c)
+                }))
+                .child(button("status-flux", "sun", flux_on, cx, |t, w, c| {
+                    t.toggle_flux(&ToggleFlux, w, c)
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_titlebar_chrome(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.focus_mode {
             return None;
@@ -3921,7 +3996,8 @@ impl Render for Workspace {
                             )
                             .children(outline)
                             .children(knowledge),
-                    ),
+                    )
+                    .children(self.render_status_bar(cx)),
             )
             .children(self.render_shortcuts(cx))
             .children(self.render_about(cx))
@@ -4220,33 +4296,6 @@ impl Render for Workspace {
                         ),
                 )
             })
-            .when_some(
-                // Status strip: widget-plugin text for the active editor.
-                match self.tabs.get(self.active) {
-                    Some(Tab::Editor { editor, view: EditorView::Edit })
-                        if !crate::extensions::widget_plugins().is_empty() =>
-                    {
-                        editor.read(cx).status()
-                    }
-                    _ => None,
-                },
-                |root, status| {
-                    let t = theme(cx);
-                    root.child(
-                        div()
-                            .absolute()
-                            .bottom_2()
-                            .right_4()
-                            .px_2()
-                            .py(px(3.))
-                            .rounded_md()
-                            .bg(t.panel_bg)
-                            .text_size(px(11.))
-                            .text_color(t.fg_muted)
-                            .child(status),
-                    )
-                },
-            )
             .when_some(self.command_error.clone(), |root, msg| {
                 let t = theme(cx);
                 root.child(
@@ -4705,6 +4754,42 @@ mod tests {
     /// Graph, flux and Install were palette-only string ids, which is
     /// why they reached no menu and two had no shortcut. They are real
     /// actions now; the palette entries delegate to the same handlers.
+    #[gpui::test]
+    fn status_bar_renders_and_its_flux_toggle_works(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|window, app| {
+            let handle = ws.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.render_status_bar(cx).is_some(), "the strip renders");
+        });
+
+        // The sun icon drives the same handler the menu and palette do.
+        let before =
+            cx.update(|_, app| app.global::<crate::theme::ThemeState>().settings.flux.enabled);
+        cx.dispatch_action(ToggleFlux);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_ne!(
+                app.global::<crate::theme::ThemeState>().settings.flux.enabled,
+                before,
+                "flux flipped"
+            );
+        });
+
+        // Focus mode is meant to be bare: no strip.
+        cx.dispatch_action(ToggleFocusMode);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.render_status_bar(cx).is_none(), "hidden in focus mode");
+        });
+    }
+
     #[gpui::test]
     fn titlebar_chrome_tracks_panel_state_and_hides_in_focus_mode(cx: &mut TestAppContext) {
         let _home = temp_home();
