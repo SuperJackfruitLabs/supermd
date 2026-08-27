@@ -30,6 +30,7 @@ mod settings;
 #[cfg(test)]
 mod seti_tests;
 mod theme;
+mod ui_icons;
 mod update;
 mod view;
 mod workspace;
@@ -59,6 +60,15 @@ impl gpui::AssetSource for Assets {
         {
             if let Some((_, bytes)) = seti::ICONS.iter().find(|(n, _)| *n == name) {
                 return Ok(Some(std::borrow::Cow::Borrowed(*bytes)));
+            }
+        }
+        // Hand-authored chrome icons live beside the generated Seti set.
+        if let Some(name) = path
+            .strip_prefix("icons/ui/")
+            .and_then(|p| p.strip_suffix(".svg"))
+        {
+            if let Some(bytes) = ui_icons::bytes(name) {
+                return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
             }
         }
         Ok(None)

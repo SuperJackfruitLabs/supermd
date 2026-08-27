@@ -2861,13 +2861,44 @@ impl Workspace {
                         .window_control_area(gpui::WindowControlArea::Drag),
                 )
                 .child(
+                    // Workspace name, with a `+` for new files — ⌘N and
+                    // ⌘⇧N were keyboard-only.
                     div()
                         .px_3()
                         .pt(px(4.))
                         .pb(px(6.))
-                        .text_size(px(11.))
-                        .text_color(t.fg_muted)
-                        .child(SharedString::from(root_name.to_uppercase())),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(11.))
+                                .text_color(t.fg_muted)
+                                .overflow_hidden()
+                                .truncate()
+                                .child(SharedString::from(root_name.to_uppercase())),
+                        )
+                        .child(
+                            div()
+                                .id("sidebar-new-file")
+                                .flex_none()
+                                .p(px(2.))
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(t.hover_bg))
+                                .child(
+                                    gpui::svg()
+                                        .path(SharedString::from(crate::ui_icons::path("plus")))
+                                        .size(px(13.))
+                                        .flex_none()
+                                        .text_color(t.fg_muted),
+                                )
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.sidebar_new_file(&SidebarNewFile, window, cx);
+                                })),
+                        ),
                 )
                 .child(
                     div()
@@ -2941,6 +2972,84 @@ impl Workspace {
                         |_, window, _| window.remove_window(),
                     ),
                 )
+                .into_any_element(),
+        )
+    }
+
+    /// Right-hand titlebar cluster: the three panel toggles, plus a Show
+    /// Changes button that appears only when the open file differs from
+    /// HEAD. Keyboard-only until now.
+    fn render_titlebar_chrome(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.focus_mode {
+            return None;
+        }
+        let t = theme(cx);
+        let button = |id: &'static str,
+                      icon: &'static str,
+                      on: bool,
+                      cx: &mut Context<Self>,
+                      act: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            div()
+                .id(id)
+                .w(px(28.))
+                .h_full()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(t.hover_bg))
+                .child(
+                    gpui::svg()
+                        .path(SharedString::from(crate::ui_icons::path(icon)))
+                        .size(px(15.))
+                        .flex_none()
+                        .text_color(if on { t.fg_strong } else { t.fg_muted }),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    act(this, window, cx);
+                }))
+        };
+        // Show Changes is offered only when there is a change to show.
+        let modified = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.path(cx))
+            .is_some_and(|p| self.git_modified.contains(&p));
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .h_full()
+                .items_center()
+                .children(modified.then(|| {
+                    button("chrome-changes", "changes", false, cx, |t, w, c| {
+                        t.show_changes(&ShowChanges, w, c)
+                    })
+                }))
+                .child(button(
+                    "chrome-sidebar",
+                    "sidebar",
+                    self.show_sidebar,
+                    cx,
+                    |t, w, c| t.toggle_sidebar(&ToggleSidebar, w, c),
+                ))
+                .child(button(
+                    "chrome-outline",
+                    "outline",
+                    self.show_outline,
+                    cx,
+                    |t, w, c| t.toggle_outline(&ToggleOutline, w, c),
+                ))
+                .child(button(
+                    "chrome-knowledge",
+                    "knowledge",
+                    self.show_knowledge,
+                    cx,
+                    |t, w, c| t.toggle_knowledge(&ToggleKnowledge, w, c),
+                ))
                 .into_any_element(),
         )
     }
@@ -3068,6 +3177,7 @@ impl Workspace {
                     .h_full()
                     .window_control_area(gpui::WindowControlArea::Drag),
             )
+            .children(self.render_titlebar_chrome(cx))
             .when_some(self.update_available.clone(), |d, tag| {
                 d.child(
                     div()
@@ -4595,6 +4705,40 @@ mod tests {
     /// Graph, flux and Install were palette-only string ids, which is
     /// why they reached no menu and two had no shortcut. They are real
     /// actions now; the palette entries delegate to the same handlers.
+    #[gpui::test]
+    fn titlebar_chrome_tracks_panel_state_and_hides_in_focus_mode(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# A\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|window, app| {
+            let handle = ws.read(app).focus_handle(app);
+            window.focus(&handle);
+        });
+        cx.run_until_parked();
+
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.render_titlebar_chrome(cx).is_some(), "chrome renders");
+        });
+        // Focus mode is a deliberately bare surface: no chrome at all.
+        cx.dispatch_action(ToggleFocusMode);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, cx| {
+            assert!(ws.focus_mode, "focus mode is on");
+            assert!(ws.render_titlebar_chrome(cx).is_none(), "chrome hides");
+        });
+        cx.dispatch_action(ToggleFocusMode);
+        cx.run_until_parked();
+
+        // The toggles drive the same state the keyboard does.
+        let before = cx.update(|_, app| ws.read(app).show_knowledge);
+        cx.dispatch_action(ToggleKnowledge);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_ne!(ws.read(app).show_knowledge, before, "knowledge panel toggled");
+        });
+    }
+
     #[gpui::test]
     fn about_dialog_toggles_and_reports_the_running_version(cx: &mut TestAppContext) {
         let _home = temp_home();
