@@ -518,9 +518,10 @@ mod startup_tests {
             .collect();
         let menus = app_menus(&recents);
         let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
-        // Edit and Format arrive with the menu restructure; a menu with
-        // no table entries is omitted rather than rendered empty.
-        assert_eq!(names, ["SuperMD", "File", "View", "Go", "Tools", "Help"]);
+        assert_eq!(
+            names,
+            ["SuperMD", "File", "Edit", "Format", "View", "Go", "Tools", "Help"]
+        );
         // Every recent slot (0..8) maps through its OpenRecentN arm.
         let file_menu = &menus[1];
         let recent = file_menu
@@ -532,7 +533,11 @@ mod startup_tests {
             })
             .expect("Open Recent submenu");
         assert_eq!(recent.items.len(), 8);
-        assert!(menus[2].items.len() >= 8, "View menu holds the toggles");
+        let view = menus
+            .iter()
+            .find(|m| m.name.as_ref() == "View")
+            .expect("View menu");
+        assert!(view.items.len() >= 8, "View menu holds the toggles");
     }
 
     #[gpui::test]

@@ -16,12 +16,14 @@ On Linux and Windows, read ⌘ as Ctrl.
 | ⌘ 2 | Ctrl 2 | Toggle Outline |
 | ⌘ 3 | Ctrl 3 | Knowledge Panel |
 | ⌃ ⌘ F | Ctrl Alt F | Focus Mode |
+| ⌃ ⌘ N | Ctrl Alt N | Flux (adaptive theme) |
 | ⌘ = | Ctrl = | Zoom In |
 | ⌘ T | Ctrl T | Theme… |
 | ⌘ P | Ctrl P | Go to File… |
 | ⌘ ⇧ F | Ctrl Shift F | Search in Workspace… |
 | ⌘ ⇧ ] | Ctrl Shift ] | Next Tab |
 | ⌘ ⇧ [ | Ctrl Shift [ | Previous Tab |
+| ⌘ ⇧ G | Ctrl Shift G | Graph View |
 | ⌘ ⇧ P | Ctrl Shift P | Command Palette… |
 | ⌘ / | Ctrl / | Keyboard Shortcuts |
 
@@ -30,11 +32,13 @@ On Linux and Windows, read ⌘ as Ctrl.
 | macOS | Windows / Linux | Action |
 | ----- | --------------- | ------ |
 | ⌘ ⏎ | Ctrl ⏎ | Follow Link |
-| ⌘ B | Ctrl B | Bold |
-| ⌘ I | Ctrl I | Italic |
+| ⌘ Z | Ctrl Z | Undo |
+| ⌘ ⇧ Z | Ctrl Shift Z | Redo |
 | ⌘ F | Ctrl F | Find in File |
 | ⌘ G | Ctrl G | Find Next |
 | ⌘ ⇧ G | Ctrl Shift G | Find Previous |
+| ⌘ B | Ctrl B | Bold |
+| ⌘ I | Ctrl I | Italic |
 
 ## Preview & read-only tabs
 

@@ -168,6 +168,8 @@ commands! {
         keys: ["cmd-3"], ctx: None, menu: Some((View, 1)), help: Some(General) },
     ws::ToggleFocusMode => { id: "focus_mode", label: "Focus Mode",
         keys: ["ctrl-cmd-f"], ctx: None, menu: Some((View, 2)), help: Some(General) },
+    ws::ToggleFlux => { id: "flux", label: "Flux (adaptive theme)",
+        keys: ["ctrl-cmd-n"], ctx: None, menu: Some((View, 2)), help: Some(General) },
     ws::ZoomIn => { id: "zoom_in", label: "Zoom In", keys: ["cmd-="],
         ctx: None, menu: Some((View, 3)), help: Some(General) },
     ws::ZoomOut => { id: "zoom_out", label: "Zoom Out", keys: ["cmd--"],
@@ -194,8 +196,12 @@ commands! {
         help: Some(HEditor) },
 
     // ── Tools ──────────────────────────────────────────────────────────
+    ws::ToggleGraph => { id: "graph", label: "Graph View", keys: ["cmd-shift-g"],
+        ctx: None, menu: Some((Go, 0)), help: Some(General) },
     ws::TogglePalette => { id: "palette", label: "Command Palette…",
         keys: ["cmd-shift-p"], ctx: None, menu: Some((Tools, 0)), help: Some(General) },
+    ws::InstallPlugins => { id: "install_plugins", label: "Install Plugins…",
+        keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
     ws::OpenPluginsFolder => { id: "plugins_folder", label: "Open Plugins Folder",
         keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
     ws::ReloadPlugins => { id: "reload_plugins", label: "Reload Plugins",
@@ -206,16 +212,44 @@ commands! {
         keys: ["cmd-/"], ctx: None, menu: Some((Help, 0)), help: Some(General) },
 
     // ── Editor: menus arrive with the restructure (Task 10) ────────────
-    ed::ToggleBold => { id: "bold", label: "Bold", keys: ["cmd-b"],
-        ctx: Some("Editor"), menu: None, help: Some(HEditor) },
-    ed::ToggleItalic => { id: "italic", label: "Italic", keys: ["cmd-i"],
-        ctx: Some("Editor"), menu: None, help: Some(HEditor) },
+    // ── Edit ───────────────────────────────────────────────────────────
+    // An Edit menu is not only discoverability: macOS hangs Emoji &
+    // Symbols, dictation and substitutions off a conventional one.
+    ed::Undo => { id: "undo", label: "Undo", keys: ["cmd-z"],
+        ctx: Some("Editor"), menu: Some((Edit, 0)), help: Some(HEditor) },
+    ed::Redo => { id: "redo", label: "Redo", keys: ["cmd-shift-z"],
+        ctx: Some("Editor"), menu: Some((Edit, 0)), help: Some(HEditor) },
+    ed::Cut => { id: "cut", label: "Cut", keys: ["cmd-x"],
+        ctx: Some("Editor"), menu: Some((Edit, 1)), help: None },
+    ed::Copy => { id: "copy", label: "Copy", keys: ["cmd-c"],
+        ctx: Some("Editor"), menu: Some((Edit, 1)), help: None },
+    ed::Paste => { id: "paste", label: "Paste", keys: ["cmd-v"],
+        ctx: Some("Editor"), menu: Some((Edit, 1)), help: None },
+    ed::SelectAll => { id: "select_all", label: "Select All", keys: ["cmd-a"],
+        ctx: Some("Editor"), menu: Some((Edit, 1)), help: None },
     ed::OpenFind => { id: "find", label: "Find in File", keys: ["cmd-f"],
-        ctx: Some("Editor"), menu: None, help: Some(HEditor) },
+        ctx: Some("Editor"), menu: Some((Edit, 2)), help: Some(HEditor) },
     ed::FindNext => { id: "find_next", label: "Find Next", keys: ["cmd-g"],
-        ctx: Some("Editor"), menu: None, help: Some(HEditor) },
+        ctx: Some("Editor"), menu: Some((Edit, 2)), help: Some(HEditor) },
     ed::FindPrev => { id: "find_prev", label: "Find Previous",
-        keys: ["cmd-shift-g"], ctx: Some("Editor"), menu: None, help: Some(HEditor) },
+        keys: ["cmd-shift-g"], ctx: Some("Editor"), menu: Some((Edit, 2)),
+        help: Some(HEditor) },
+
+    // ── Format ─────────────────────────────────────────────────────────
+    ed::ToggleBold => { id: "bold", label: "Bold", keys: ["cmd-b"],
+        ctx: Some("Editor"), menu: Some((Format, 0)), help: Some(HEditor) },
+    ed::ToggleItalic => { id: "italic", label: "Italic", keys: ["cmd-i"],
+        ctx: Some("Editor"), menu: Some((Format, 0)), help: Some(HEditor) },
+    ed::ToggleCode => { id: "code", label: "Code", keys: [],
+        ctx: Some("Editor"), menu: Some((Format, 0)), help: None },
+    ed::ToggleStrike => { id: "strike", label: "Strikethrough", keys: [],
+        ctx: Some("Editor"), menu: Some((Format, 0)), help: None },
+    ed::InsertLink => { id: "link", label: "Link", keys: [],
+        ctx: Some("Editor"), menu: Some((Format, 0)), help: None },
+    ed::CycleHeading => { id: "heading", label: "Heading", keys: [],
+        ctx: Some("Editor"), menu: Some((Format, 1)), help: None },
+    ed::ToggleQuote => { id: "quote", label: "Quote", keys: [],
+        ctx: Some("Editor"), menu: Some((Format, 1)), help: None },
 
     // ── Sidebar (context-scoped; no menu placement) ────────────────────
     ws::SidebarNewFile => { id: "sidebar_new_file", label: "New File Here",
@@ -648,6 +682,31 @@ mod tests {
             .map(|c| c.id)
             .collect();
         assert!(unreachable.is_empty(), "unreachable commands: {unreachable:?}");
+    }
+
+    #[test]
+    fn the_edit_menu_exists_and_carries_the_clipboard_verbs() {
+        let edit: Vec<&str> = items_for(MenuId::Edit).iter().map(|c| c.label).collect();
+        for expected in ["Undo", "Redo", "Cut", "Copy", "Paste", "Select All"] {
+            assert!(edit.contains(&expected), "Edit menu is missing {expected}");
+        }
+    }
+
+    #[test]
+    fn the_format_menu_carries_every_marker_toggle() {
+        let fmt: Vec<&str> = items_for(MenuId::Format).iter().map(|c| c.label).collect();
+        for expected in
+            ["Bold", "Italic", "Code", "Strikethrough", "Link", "Heading", "Quote"]
+        {
+            assert!(fmt.contains(&expected), "Format menu is missing {expected}");
+        }
+    }
+
+    #[test]
+    fn graph_view_reaches_a_menu_and_a_shortcut() {
+        let graph = COMMANDS.iter().find(|c| c.id == "graph").expect("graph in table");
+        assert_eq!(graph.keys, &["cmd-shift-g"]);
+        assert_eq!(graph.menu.map(|(m, _)| m), Some(MenuId::Go));
     }
 
     #[test]
