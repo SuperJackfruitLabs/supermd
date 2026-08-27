@@ -21,7 +21,7 @@ bold, italic, code, and friends, each a single click. **⌘B** and
 
 Open a folder and type `[[` — every note in it is a completion away.
 **⌘-click** a link to follow it (linking to a note that doesn't exist
-yet creates it), and **⌘⇧K** shows what links *back* to the note
+yet creates it), and **⌘3** shows what links *back* to the note
 you're reading, its `#tags`, and a live graph of the neighborhood.
 Rename a note and every link to it is rewritten. No database — just
 your Markdown files, indexed.
@@ -54,7 +54,7 @@ flowchart LR
 - **⌘O** — open a file or folder
 - **⌘P** — jump to any file by fuzzy name
 - **⌘⇧F** — search inside every file in the workspace
-- **⌘⇧K** — backlinks, tags, and the graph for the open note
+- **⌘3** — backlinks, tags, and the graph for the open note
 - **⌘⇧D** — see what you've changed since your last git commit
 - **⌘T** — pick a theme (your light/dark choices follow the system)
 

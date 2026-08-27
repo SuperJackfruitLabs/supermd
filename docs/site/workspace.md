@@ -6,7 +6,7 @@ Open a folder (**⌘ O**, or drop one on the window) and SuperMD becomes a works
 
 - **Go to file** — **⌘ P** opens a fuzzy finder over every file in the workspace. Type a few letters, ⏎ opens.
 - **Sidebar browsing** — arrow keys move through the tree; files open in a single preview tab as you move, so browsing doesn't leave a trail of tabs. ⏎ or a double-click pins the file in its own tab.
-- **Outline** — **⌘ ⇧ O** shows the current document's headings; click one to jump.
+- **Outline** — **⌘ 2** shows the current document's headings; click one to jump.
 - **Recents** — SuperMD remembers your recent workspaces (File → Open Recent), and can reopen the last one automatically on launch.
 
 ## Managing files

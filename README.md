@@ -27,7 +27,7 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
 - **Notes that know each other** — type `[[` and complete to any note
   in the workspace; follow links with ⌘-click (unresolved links create
   the note); backlinks with context and `#tags` in the knowledge panel
-  (⌘⇧K); a native force-directed **graph view** of the whole
+  (⌘3); a native force-directed **graph view** (⌘⇧G) of the whole
   workspace. Renaming or moving a note rewrites every link pointing at
   it — the graph never breaks. All computed from your plain files: no
   database.
@@ -105,7 +105,7 @@ stays thin.
 | ⌘O | open a file or folder |
 | ⌘P | jump to any file by fuzzy name |
 | ⌘⇧F | search inside every file in the workspace |
-| ⌘⇧K | backlinks, tags, and the local graph for the open note |
+| ⌘3 | backlinks, tags, and the local graph for the open note |
 | ⌘⇧D | see what you've changed since your last git commit |
 | ⌘T | pick a theme |
 

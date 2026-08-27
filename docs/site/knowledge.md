@@ -17,7 +17,7 @@ Rename or move a note — or a whole folder — in the sidebar, and every link p
 
 ## Backlinks and tags
 
-**⌘ ⇧ K** opens the knowledge panel:
+**⌘ 3** opens the knowledge panel:
 
 - **Backlinks** — every note linking to the one you're reading, each with the line of context it links from. Click to jump there.
 - **Tags** — write `#tag` (or nested `#area/subtopic`) anywhere in a note. The panel shows every workspace tag with its count; click one to search for it.
