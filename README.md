@@ -16,7 +16,7 @@ Zed. Plain CommonMark on disk, always.
 built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
 [Zed](https://zed.dev)
 
-![SuperMD editing a workspace — hybrid WYSIWYG text, a live table, and syntax-highlighted code, with sidebar and outline panels](docs/assets/screenshot.png)
+![SuperMD editing a workspace — hybrid WYSIWYG text with markers hidden, a live table, syntax-highlighted code and a [[wiki link]], with the sidebar, outline panel, titlebar panel toggles and status bar](docs/assets/screenshot.png)
 
 ## Highlights
 
@@ -85,6 +85,14 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   ship first-party — eight pre-installed, the rest one **Install
   Plugins…** away — and each doubles as a working example. Author your
   own from `plugins/template/` in ~20 lines of Rust.
+- **Findable** — every command is declared once and reaches the menu
+  bar, the ☰ menu off macOS, the ⌘/ sheet and the docs from that one
+  place, so they cannot drift apart. Full File / Edit / Format / View /
+  Go / Tools menus, panel toggles and a `+` in the chrome, a status bar
+  carrying plugin widgets alongside flux and graph toggles, and an
+  About dialog that checks for updates on demand. Panels sit on
+  ⌘1/⌘2/⌘3; the shortcut map has a written scheme so new bindings have
+  a home.
 - **Update aware** — a quiet launch-time check against GitHub releases
   shows an "update available" pill in the titlebar when a newer version
   ships; clicking opens the download page. Nothing phones home beyond

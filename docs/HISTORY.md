@@ -21,3 +21,11 @@ The phase-by-phase build record that used to live in WELCOME.md.
 | 14 | Linux + Windows: platform layer, chrome, packaging, 3-OS CI | Done |
 | 15 | Extensions Phase 1: wasm runtime, palette, dot + toc plugins | Done |
 | 16 | Extensions Phase 2: inline/decorations/formatters/paste, workspace-read consent | Done |
+| 17 | Extensions Phase 3: host-mediated fetch, exports, net consent | Done |
+| 18 | Extensions Phase 4: viewers, status widgets, templates, save hooks | Done |
+| 19 | Extensions Phase 5: plugin grammars, docs generator, website | Done |
+| 20 | Plugin distribution: seeding, catalog, in-app Install Plugins | Done |
+| 21 | Writing ergonomics: selection toolbar, table nav, image paste | Done |
+| 22 | Flux: solar times, night blend, kelvin warming | Done |
+| 23 | Knowledge: file ops, wiki links, backlinks, tags, graph view | Done |
+| 24 | Shortcuts, menus & chrome: one command table, six surfaces | Done |

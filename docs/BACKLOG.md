@@ -58,7 +58,6 @@ _Last groomed: 2026-08-26, after the shortcuts/menus/chrome pass._
 | Windows code signing | SmartScreen still shows one "unrecognized app" prompt |
 | In-app auto-update | About (⌘/ → About) checks on demand and links out. Self-replacement is **three** implementations, not one, and on a `.deb` install the binary is root-owned in `/usr/bin` — the correct Linux answer is an apt repository, not self-update. Wants its own spec |
 | Homebrew cask / winget | Cheap once naming is stable |
-| README screenshot | Predates the toolbar, knowledge panel, and graph — retake on v0.0.12 |
 
 ## Shortcuts, menus & chrome
 
