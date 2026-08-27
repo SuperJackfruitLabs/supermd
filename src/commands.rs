@@ -359,6 +359,38 @@ fn recent_items(recents: &[String]) -> Vec<gpui::MenuItem> {
         .collect()
 }
 
+
+fn help_title(section: HelpSection) -> &'static str {
+    match section {
+        HelpSection::General => "General",
+        HelpSection::Editor => "Editor",
+        HelpSection::Preview => "Preview & read-only tabs",
+        HelpSection::Sidebar => "Sidebar",
+    }
+}
+
+/// The ⌘/ dialog, and the source for the generated shortcut docs. Only
+/// the first (canonical) key is listed: aliases bind but do not clutter.
+pub fn help_sections() -> Vec<(&'static str, Vec<(String, &'static str)>)> {
+    const ORDER: [HelpSection; 4] = [
+        HelpSection::General,
+        HelpSection::Editor,
+        HelpSection::Preview,
+        HelpSection::Sidebar,
+    ];
+    ORDER
+        .iter()
+        .filter_map(|&section| {
+            let rows: Vec<(String, &'static str)> = COMMANDS
+                .iter()
+                .filter(|c| c.help == Some(section))
+                .filter_map(|c| c.keys.first().map(|k| (glyphs(k), c.label)))
+                .collect();
+            (!rows.is_empty()).then_some((help_title(section), rows))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +507,49 @@ mod tests {
             .filter(|i| matches!(i, gpui::MenuItem::Separator))
             .count();
         assert_eq!(seps, 4, "View has five groups, so four separators");
+    }
+
+    #[test]
+    fn help_sections_carry_glyphs_and_labels() {
+        let sections = help_sections();
+        let general = sections
+            .iter()
+            .find(|(title, _)| *title == "General")
+            .expect("General section exists");
+        assert!(
+            general.1.iter().any(|(keys, label)| keys == "⌘ P" && *label == "Go to File…"),
+            "⌘P is listed under General"
+        );
+    }
+
+    #[test]
+    fn help_lists_only_the_canonical_key_not_aliases() {
+        let sections = help_sections();
+        let general: Vec<String> = sections
+            .iter()
+            .find(|(t, _)| *t == "General")
+            .expect("General section")
+            .1
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+        assert!(general.iter().any(|k| k == "⌘ 1"), "canonical panel key shown");
+        // ⌘B is the sidebar's alias, so it must not appear a second time
+        // under General. It still appears under Editor, for Bold — a
+        // different command that legitimately owns the same chord.
+        assert!(
+            !general.iter().any(|k| k == "⌘ B"),
+            "the ⌘B sidebar alias is not listed alongside ⌘1"
+        );
+        let editor: Vec<String> = sections
+            .iter()
+            .find(|(t, _)| *t == "Editor")
+            .expect("Editor section")
+            .1
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+        assert!(editor.iter().any(|k| k == "⌘ B"), "Bold keeps ⌘B in Editor");
     }
 
     #[test]

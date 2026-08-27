@@ -96,75 +96,6 @@ fn record_recent(root: &Path) {
     }
 }
 
-/// Shown by the ⌘/ dialog. Kept adjacent to the actual bindings in
-/// main.rs — update both together.
-const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
-    (
-        "General",
-        &[
-            ("⌘ N", "New file"),
-            ("⌘ O", "Open file or folder"),
-            ("⌘ P", "Go to file"),
-            ("⌘ F", "Find in file"),
-            ("⌘ E", "Toggle edit / preview"),
-            ("⌘ ⇧ D", "Show changes vs git HEAD"),
-            ("⌘ ⇧ F", "Search in workspace"),
-            ("⌘ ⇧ P", "Command palette (plugins)"),
-            ("⌃ ⌘ F", "Focus mode"),
-            ("⌘ B", "Toggle sidebar"),
-            ("⌘ ⇧ O", "Toggle outline"),
-            ("⌘ ⇧ K", "Knowledge panel (backlinks, tags, graph)"),
-            ("⌘ 1", "Focus sidebar"),
-            ("⌘ W", "Close tab"),
-            ("⌃ Tab / ⌘ ⇧ ]", "Next tab"),
-            ("⌘ ⇧ [", "Previous tab"),
-            ("⌘ S", "Save now"),
-            ("⌘ + / − / 0", "Zoom image tab"),
-            ("⌘ T", "Theme picker"),
-            ("⌘ /", "This dialog"),
-        ],
-    ),
-    (
-        "Editor",
-        &[
-            ("⌘ Z / ⌘ ⇧ Z", "Undo / redo"),
-            ("⌘ B / ⌘ I", "Bold / italic selection"),
-            ("⏎ in a list", "Continue the list"),
-            ("Tab / ⇧ Tab", "Indent list item · hop table cells"),
-            ("⌘ ⏎ / ⌘ Click", "Follow link under cursor"),
-            ("[[", "Link to a note (completion)"),
-            ("⌥ ← →", "Move by word"),
-            ("⌘ ← →", "Line start / end"),
-            ("⌘ ↑ ↓", "Document start / end"),
-            ("⌥ ⌫", "Delete word"),
-            ("⌘ G / ⌘ ⇧ G", "Next / previous match"),
-            ("Click ✓ / ○", "Toggle task checkbox"),
-            ("Click table / image", "Edit its source"),
-        ],
-    ),
-    (
-        "Preview & read-only tabs",
-        &[
-            ("↑ ↓", "Scroll line by line"),
-            ("PgUp / PgDn", "Scroll by a screen"),
-            ("Home / End", "Jump to start / end"),
-        ],
-    ),
-    (
-        "Sidebar",
-        &[
-            ("↑ ↓", "Move selection"),
-            ("→", "Expand folder"),
-            ("←", "Collapse / to parent"),
-            ("⏎", "Open"),
-            ("F2", "Rename"),
-            ("⌘ ⌫", "Delete (to trash)"),
-            ("⌘ N / ⌘ ⇧ N", "New file / folder here"),
-            ("⌘ ⇧ M", "Move to folder…"),
-        ],
-    ),
-];
-
 /// How an editor tab presents its buffer.
 pub enum EditorView {
     /// The editable styled-source view.
@@ -2309,7 +2240,7 @@ impl Workspace {
             return None;
         }
         let t = theme(cx);
-        let groups = SHORTCUTS.iter().map(|(title, rows)| {
+        let groups = crate::commands::help_sections().into_iter().map(|(title, rows)| {
             div()
                 .flex()
                 .flex_col()
@@ -2321,7 +2252,7 @@ impl Workspace {
                         .pb_1()
                         .child(SharedString::from(title.to_uppercase())),
                 )
-                .children(rows.iter().map(|(keys, desc)| {
+                .children(rows.into_iter().map(|(keys, desc)| {
                     div()
                         .flex()
                         .flex_row()
@@ -2339,14 +2270,14 @@ impl Workspace {
                                 .bg(t.code_bg)
                                 .rounded_md()
                                 .child(SharedString::from(crate::platform::shortcut_glyphs(
-                                    keys,
+                                    &keys,
                                 ))),
                         )
                         .child(
                             div()
                                 .text_size(px(t.ui_size))
                                 .text_color(t.fg)
-                                .child(SharedString::from(*desc)),
+                                .child(SharedString::from(desc)),
                         )
                 }))
         });
