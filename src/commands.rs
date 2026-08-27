@@ -391,6 +391,19 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(String, &'static str)>)> {
         .collect()
 }
 
+
+/// The ☰ popover's contents: the same menus, as flat labelled groups.
+/// Off macOS there is no global menu bar, so this *is* the menu.
+pub fn popover_groups() -> Vec<(&'static str, Vec<&'static Command>)> {
+    MENU_ORDER
+        .iter()
+        .filter_map(|&id| {
+            let cmds = items_for(id);
+            (!cmds.is_empty()).then_some((menu_title(id), cmds))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +563,28 @@ mod tests {
             .map(|(k, _)| k.clone())
             .collect();
         assert!(editor.iter().any(|k| k == "⌘ B"), "Bold keeps ⌘B in Editor");
+    }
+
+    /// The defect this module exists to kill: the Linux/Windows ☰
+    /// popover was a separate hand-written list carrying about half the
+    /// macOS menu bar. Both now project the same grouping.
+    #[test]
+    fn the_popover_shows_exactly_what_the_menu_bar_shows() {
+        let built = menus(&[]);
+        let bar: Vec<&str> = built
+            .iter()
+            .flat_map(|m| {
+                m.items.iter().filter_map(|i| match i {
+                    gpui::MenuItem::Action { name, .. } => Some(name.as_ref()),
+                    _ => None,
+                })
+            })
+            .collect();
+        let popover: Vec<&str> = popover_groups()
+            .iter()
+            .flat_map(|(_, cmds)| cmds.iter().map(|c| c.label))
+            .collect();
+        assert_eq!(bar, popover, "popover and menu bar list the same commands");
     }
 
     #[test]

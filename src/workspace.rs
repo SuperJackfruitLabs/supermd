@@ -3658,13 +3658,19 @@ impl Render for Workspace {
             })
             .when(self.app_menu_open && !crate::platform::MACOS, |root| {
                 let t = theme(cx);
-                let item = |id: &'static str,
-                            label: &'static str,
-                            shortcut: &'static str,
-                            cx: &mut Context<Self>,
-                            action: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+                // One row per table entry. Clicking dispatches the very
+                // action the menu bar and the keystroke dispatch, so all
+                // three paths are the same path.
+                let item = |cmd: &'static crate::commands::Command,
+                            cx: &mut Context<Self>| {
+                    let shortcut = cmd
+                        .keys
+                        .first()
+                        .map(|k| crate::platform::shortcut_glyphs(&crate::commands::glyphs(k)))
+                        .unwrap_or_default();
+                    let label = cmd.label;
                     div()
-                        .id(id)
+                        .id(SharedString::from(format!("m-{}", cmd.id)))
                         .w_full()
                         .px_3()
                         .py(px(5.))
@@ -3685,13 +3691,11 @@ impl Render for Workspace {
                             div()
                                 .text_size(px(11.))
                                 .text_color(t.fg_muted)
-                                .child(SharedString::from(crate::platform::shortcut_glyphs(
-                                    shortcut,
-                                ))),
+                                .child(SharedString::from(shortcut)),
                         )
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.app_menu_open = false;
-                            action(this, window, cx);
+                            window.dispatch_action((cmd.action)(), cx);
                         }))
                 };
                 let recents: Vec<AnyElement> = self
@@ -3726,6 +3730,33 @@ impl Render for Workspace {
                     })
                     .collect();
                 let divider = || div().h(px(1.)).w_full().my_1().bg(t.border);
+
+                // Same grouping as the macOS menu bar — off macOS this
+                // popover *is* the menu, and the two must never diverge.
+                let mut recents = recents;
+                let mut menu_rows: Vec<AnyElement> = Vec::new();
+                for (gi, (title, cmds)) in
+                    crate::commands::popover_groups().into_iter().enumerate()
+                {
+                    if gi > 0 {
+                        menu_rows.push(divider().into_any_element());
+                    }
+                    menu_rows.push(
+                        div()
+                            .px_3()
+                            .py(px(3.))
+                            .text_size(px(10.))
+                            .text_color(t.fg_muted)
+                            .child(SharedString::from(title.to_uppercase()))
+                            .into_any_element(),
+                    );
+                    for cmd in cmds {
+                        menu_rows.push(item(cmd, cx).into_any_element());
+                        if cmd.id == "open" && !recents.is_empty() {
+                            menu_rows.extend(std::mem::take(&mut recents));
+                        }
+                    }
+                }
                 root.child(
                     div()
                         .absolute()
@@ -3755,50 +3786,7 @@ impl Render for Workspace {
                                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();
                                 })
-                                .child(item("m-new", "New File", "⌘ N", cx, |t, w, c| {
-                                    t.new_file(&NewFile, w, c)
-                                }))
-                                .child(item("m-open", "Open…", "⌘ O", cx, |t, w, c| {
-                                    t.open_dialog(&OpenDialog, w, c)
-                                }))
-                                .children((!recents.is_empty()).then(divider))
-                                .children(recents)
-                                .child(divider())
-                                .child(item("m-find", "Go to File", "⌘ P", cx, |t, w, c| {
-                                    t.toggle_finder(&ToggleFinder, w, c)
-                                }))
-                                .child(item(
-                                    "m-search",
-                                    "Search in Workspace",
-                                    "⌘ ⇧ F",
-                                    cx,
-                                    |t, w, c| t.toggle_search(&ToggleSearch, w, c),
-                                ))
-                                .child(item(
-                                    "m-diff",
-                                    "Show Changes",
-                                    "⌘ ⇧ D",
-                                    cx,
-                                    |t, w, c| t.show_changes(&ShowChanges, w, c),
-                                ))
-                                .child(item(
-                                    "m-preview",
-                                    "Toggle Preview",
-                                    "⌘ E",
-                                    cx,
-                                    |t, w, c| t.toggle_preview(&TogglePreview, w, c),
-                                ))
-                                .child(divider())
-                                .child(item("m-theme", "Theme…", "⌘ T", cx, |t, w, c| {
-                                    t.toggle_theme_picker(&ToggleThemePicker, w, c)
-                                }))
-                                .child(item(
-                                    "m-shortcuts",
-                                    "Shortcuts",
-                                    "⌘ /",
-                                    cx,
-                                    |t, w, c| t.toggle_shortcuts(&ToggleShortcuts, w, c),
-                                )),
+                                .children(menu_rows),
                         ),
                 )
             })
