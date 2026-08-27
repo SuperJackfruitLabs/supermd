@@ -404,6 +404,26 @@ pub fn popover_groups() -> Vec<(&'static str, Vec<&'static Command>)> {
         .collect()
 }
 
+
+/// `docs/site/shortcuts.md`, generated. Both platform columns come from
+/// the one macOS-form declaration in the table.
+pub fn shortcut_markdown() -> String {
+    let mut out = String::from(
+        "# Keyboard shortcuts\n\nOn Linux and Windows, read ⌘ as Ctrl.\n\n",
+    );
+    for (title, rows) in help_sections() {
+        out.push_str(&format!("## {title}\n\n"));
+        out.push_str("| macOS | Windows / Linux | Action |\n");
+        out.push_str("| ----- | --------------- | ------ |\n");
+        for (keys, label) in rows {
+            let other = crate::platform::translate_glyphs_for_docs(&keys);
+            out.push_str(&format!("| {keys} | {other} | {label} |\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,6 +605,35 @@ mod tests {
             .flat_map(|(_, cmds)| cmds.iter().map(|c| c.label))
             .collect();
         assert_eq!(bar, popover, "popover and menu bar list the same commands");
+    }
+
+    #[test]
+    fn shortcut_markdown_renders_a_table_per_section() {
+        let md = shortcut_markdown();
+        assert!(md.starts_with("# Keyboard shortcuts"), "has a title");
+        assert!(md.contains("## General"), "has the General section");
+        assert!(
+            md.contains("| ⌘ P | Ctrl P | Go to File… |"),
+            "a row renders both platform columns"
+        );
+    }
+
+    /// The docs source is generated from the table. If this fails, run
+    /// `UPDATE_DOCS=1 cargo test shortcut_docs_match_the_table`, commit
+    /// the result, then `cargo run --example build_docs`.
+    #[test]
+    fn shortcut_docs_match_the_table() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/site/shortcuts.md");
+        let generated = shortcut_markdown();
+        if std::env::var("UPDATE_DOCS").is_ok() {
+            std::fs::write(path, &generated).expect("write shortcuts.md");
+            return;
+        }
+        let on_disk = std::fs::read_to_string(path).expect("read shortcuts.md");
+        assert_eq!(
+            on_disk, generated,
+            "docs/site/shortcuts.md is stale; rerun with UPDATE_DOCS=1"
+        );
     }
 
     #[test]
