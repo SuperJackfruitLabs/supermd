@@ -112,9 +112,241 @@ fn key_glyph(key: &str) -> String {
     }
 }
 
+/// Declares the table. Each line reads as one fact about one command;
+/// the macro captures the concrete action type in a fn pointer, so the
+/// table stays heterogeneous without boxing at declaration time.
+macro_rules! commands {
+    ($($action:expr => {
+        id: $id:expr,
+        label: $label:expr,
+        keys: [$($key:expr),* $(,)?],
+        ctx: $ctx:expr,
+        menu: $menu:expr,
+        help: $help:expr $(,)?
+    }),* $(,)?) => {
+        pub const COMMANDS: &[Command] = &[$(
+            Command {
+                id: $id,
+                label: $label,
+                keys: &[$($key),*],
+                context: $ctx,
+                menu: $menu,
+                help: $help,
+                action: || Box::new($action),
+            }
+        ),*];
+    };
+}
+
+use crate::editor as ed;
+use crate::reader as rd;
+use crate::workspace as ws;
+use HelpSection::{Editor as HEditor, General, Preview, Sidebar as HSidebar};
+use MenuId::*;
+
+commands! {
+    // ── File ───────────────────────────────────────────────────────────
+    ws::NewFile => { id: "new_file", label: "New File", keys: ["cmd-n"],
+        ctx: None, menu: Some((File, 0)), help: Some(General) },
+    ws::OpenDialog => { id: "open", label: "Open…", keys: ["cmd-o"],
+        ctx: None, menu: Some((File, 0)), help: Some(General) },
+    ed::SaveNow => { id: "save", label: "Save Now", keys: ["cmd-s"],
+        ctx: Some("Editor"), menu: Some((File, 1)), help: Some(General) },
+    ws::CloseTab => { id: "close_tab", label: "Close Tab", keys: ["cmd-w"],
+        ctx: None, menu: Some((File, 2)), help: Some(General) },
+
+    // ── View ───────────────────────────────────────────────────────────
+    ws::TogglePreview => { id: "toggle_preview", label: "Toggle Edit/Preview",
+        keys: ["cmd-e"], ctx: None, menu: Some((View, 0)), help: Some(General) },
+    ws::ShowChanges => { id: "show_changes", label: "Show Changes",
+        keys: ["cmd-shift-d"], ctx: None, menu: Some((View, 0)), help: Some(General) },
+    ws::ToggleSidebar => { id: "toggle_sidebar", label: "Toggle Sidebar",
+        keys: ["cmd-1", "cmd-b"], ctx: None, menu: Some((View, 1)), help: Some(General) },
+    ws::ToggleOutline => { id: "toggle_outline", label: "Toggle Outline",
+        keys: ["cmd-2"], ctx: None, menu: Some((View, 1)), help: Some(General) },
+    ws::ToggleKnowledge => { id: "toggle_knowledge", label: "Knowledge Panel",
+        keys: ["cmd-3"], ctx: None, menu: Some((View, 1)), help: Some(General) },
+    ws::ToggleFocusMode => { id: "focus_mode", label: "Focus Mode",
+        keys: ["ctrl-cmd-f"], ctx: None, menu: Some((View, 2)), help: Some(General) },
+    ws::ZoomIn => { id: "zoom_in", label: "Zoom In", keys: ["cmd-="],
+        ctx: None, menu: Some((View, 3)), help: Some(General) },
+    ws::ZoomOut => { id: "zoom_out", label: "Zoom Out", keys: ["cmd--"],
+        ctx: None, menu: Some((View, 3)), help: None },
+    ws::ZoomReset => { id: "zoom_reset", label: "Actual Size", keys: ["cmd-0"],
+        ctx: None, menu: Some((View, 3)), help: None },
+    ws::ToggleThemePicker => { id: "theme", label: "Theme…", keys: ["cmd-t"],
+        ctx: None, menu: Some((View, 4)), help: Some(General) },
+
+    // ── Go ─────────────────────────────────────────────────────────────
+    ws::ToggleFinder => { id: "go_to_file", label: "Go to File…", keys: ["cmd-p"],
+        ctx: None, menu: Some((Go, 0)), help: Some(General) },
+    ws::ToggleSearch => { id: "search_workspace", label: "Search in Workspace…",
+        keys: ["cmd-shift-f"], ctx: None, menu: Some((Go, 0)), help: Some(General) },
+    ws::FocusSidebar => { id: "focus_sidebar", label: "Focus Sidebar", keys: [],
+        ctx: None, menu: Some((Go, 1)), help: None },
+    ws::NextTab => { id: "next_tab", label: "Next Tab", keys: ["cmd-shift-]", "ctrl-tab"],
+        ctx: None, menu: Some((Go, 1)), help: Some(General) },
+    ws::PrevTab => { id: "prev_tab", label: "Previous Tab",
+        keys: ["cmd-shift-[", "ctrl-shift-tab"],
+        ctx: None, menu: Some((Go, 1)), help: Some(General) },
+    ed::FollowLink => { id: "follow_link", label: "Follow Link",
+        keys: ["cmd-enter"], ctx: Some("Editor"), menu: Some((Go, 2)),
+        help: Some(HEditor) },
+
+    // ── Tools ──────────────────────────────────────────────────────────
+    ws::TogglePalette => { id: "palette", label: "Command Palette…",
+        keys: ["cmd-shift-p"], ctx: None, menu: Some((Tools, 0)), help: Some(General) },
+    ws::OpenPluginsFolder => { id: "plugins_folder", label: "Open Plugins Folder",
+        keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
+    ws::ReloadPlugins => { id: "reload_plugins", label: "Reload Plugins",
+        keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
+
+    // ── Help ───────────────────────────────────────────────────────────
+    ws::ToggleShortcuts => { id: "shortcuts", label: "Keyboard Shortcuts",
+        keys: ["cmd-/"], ctx: None, menu: Some((Help, 0)), help: Some(General) },
+
+    // ── Editor: menus arrive with the restructure (Task 10) ────────────
+    ed::ToggleBold => { id: "bold", label: "Bold", keys: ["cmd-b"],
+        ctx: Some("Editor"), menu: None, help: Some(HEditor) },
+    ed::ToggleItalic => { id: "italic", label: "Italic", keys: ["cmd-i"],
+        ctx: Some("Editor"), menu: None, help: Some(HEditor) },
+    ed::OpenFind => { id: "find", label: "Find in File", keys: ["cmd-f"],
+        ctx: Some("Editor"), menu: None, help: Some(HEditor) },
+    ed::FindNext => { id: "find_next", label: "Find Next", keys: ["cmd-g"],
+        ctx: Some("Editor"), menu: None, help: Some(HEditor) },
+    ed::FindPrev => { id: "find_prev", label: "Find Previous",
+        keys: ["cmd-shift-g"], ctx: Some("Editor"), menu: None, help: Some(HEditor) },
+
+    // ── Sidebar (context-scoped; no menu placement) ────────────────────
+    ws::SidebarNewFile => { id: "sidebar_new_file", label: "New File Here",
+        keys: ["cmd-n"], ctx: Some("Sidebar"), menu: None, help: Some(HSidebar) },
+    ws::SidebarNewFolder => { id: "sidebar_new_folder", label: "New Folder Here",
+        keys: ["cmd-shift-n"], ctx: Some("Sidebar"), menu: None, help: Some(HSidebar) },
+    ws::SidebarRename => { id: "sidebar_rename", label: "Rename", keys: ["f2"],
+        ctx: Some("Sidebar"), menu: None, help: Some(HSidebar) },
+    ws::SidebarDelete => { id: "sidebar_delete", label: "Delete to Trash",
+        keys: ["cmd-backspace"], ctx: Some("Sidebar"), menu: None, help: Some(HSidebar) },
+    ws::SidebarMoveTo => { id: "sidebar_move", label: "Move to Folder…",
+        keys: ["cmd-shift-m"], ctx: Some("Sidebar"), menu: None, help: Some(HSidebar) },
+
+    // ── Reader (context-scoped) ────────────────────────────────────────
+    rd::ScrollUp => { id: "reader_up", label: "Scroll Up", keys: ["up"],
+        ctx: Some("Reader"), menu: None, help: Some(Preview) },
+    rd::ScrollDown => { id: "reader_down", label: "Scroll Down",
+        keys: ["down"], ctx: Some("Reader"), menu: None, help: Some(Preview) },
+    rd::PageUp => { id: "reader_pageup", label: "Page Up",
+        keys: ["pageup"], ctx: Some("Reader"), menu: None, help: Some(Preview) },
+    rd::PageDown => { id: "reader_pagedown", label: "Page Down",
+        keys: ["pagedown"], ctx: Some("Reader"), menu: None, help: Some(Preview) },
+    rd::ScrollTop => { id: "reader_top", label: "Go to Start",
+        keys: ["home"], ctx: Some("Reader"), menu: None, help: Some(Preview) },
+    rd::ScrollBottom => { id: "reader_bottom", label: "Go to End",
+        keys: ["end"], ctx: Some("Reader"), menu: None, help: Some(Preview) },
+}
+
+
+/// Every declared key as a real binding. `KeyBinding::load` takes the
+/// boxed action, which is what lets one table feed a surface whose
+/// public helper (`KeyBinding::new`) demands a concrete type.
+pub fn bindings() -> Vec<gpui::KeyBinding> {
+    COMMANDS
+        .iter()
+        .flat_map(|cmd| {
+            cmd.keys.iter().map(move |key| {
+                let predicate = cmd.context.map(|ctx| {
+                    std::rc::Rc::new(
+                        gpui::KeyBindingContextPredicate::parse(ctx)
+                            .expect("command context predicate parses"),
+                    )
+                });
+                gpui::KeyBinding::load(
+                    &crate::platform::keybinding(key),
+                    (cmd.action)(),
+                    predicate,
+                    false,
+                    None,
+                    &gpui::DummyKeyboardMapper,
+                )
+                .expect("command keystroke parses")
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_entries_carry_their_keys_and_display_form() {
+        let sidebar = COMMANDS
+            .iter()
+            .find(|c| c.id == "toggle_sidebar")
+            .expect("toggle_sidebar is in the table");
+        assert_eq!(sidebar.label, "Toggle Sidebar");
+        // ⌘1 is canonical; ⌘B is the retained convention alias.
+        assert_eq!(sidebar.keys, &["cmd-1", "cmd-b"]);
+        assert_eq!(glyphs(sidebar.keys[0]), "⌘ 1");
+        assert!(sidebar.context.is_none(), "panel toggles bind globally");
+    }
+
+    #[test]
+    fn every_command_has_a_unique_id() {
+        let mut ids: Vec<&str> = COMMANDS.iter().map(|c| c.id).collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "duplicate command id in the table");
+    }
+
+    #[test]
+    fn bindings_expand_every_alias_key() {
+        let total: usize = COMMANDS.iter().map(|c| c.keys.len()).sum();
+        assert_eq!(bindings().len(), total, "one binding per declared key");
+    }
+
+    #[test]
+    fn no_two_commands_claim_one_key_in_the_same_context() {
+        let mut seen: Vec<(&str, Option<&str>)> = Vec::new();
+        for cmd in COMMANDS {
+            for key in cmd.keys {
+                let slot = (*key, cmd.context);
+                assert!(
+                    !seen.contains(&slot),
+                    "{} collides on {key:?} in context {:?}",
+                    cmd.id,
+                    cmd.context
+                );
+                seen.push(slot);
+            }
+        }
+    }
+
+    /// Tab cycling has two chords each. They were nearly lost when the
+    /// table took over: a filter keyed on the action name alone dropped
+    /// ⌃Tab because ⌘⇧] already claimed NextTab.
+    #[test]
+    fn tab_cycling_keeps_both_of_its_chords() {
+        let keys = |id: &str| {
+            COMMANDS.iter().find(|c| c.id == id).expect("in table").keys
+        };
+        assert_eq!(keys("next_tab"), &["cmd-shift-]", "ctrl-tab"]);
+        assert_eq!(keys("prev_tab"), &["cmd-shift-[", "ctrl-shift-tab"]);
+    }
+
+    #[test]
+    fn cmd_b_is_shared_across_contexts_on_purpose() {
+        // ToggleSidebar (global) and ToggleBold (Editor) both bind ⌘B; the
+        // editor handler propagates a cursor-only press so the sidebar
+        // still toggles. Cross-context sharing must stay legal, so this
+        // records the exception the collision test above permits.
+        let holders: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.keys.contains(&"cmd-b"))
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(holders, vec!["toggle_sidebar", "bold"]);
+    }
 
     #[test]
     fn glyphs_render_macos_modifier_symbols() {
