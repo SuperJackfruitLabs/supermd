@@ -2,6 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Ties the signature to the team and the app record; the
+         provisioning profile is matched against these at codesign time. -->
+    <key>com.apple.application-identifier</key>
+    <string>N2QQPW2BRJ.com.superjackfruit.supermd</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>N2QQPW2BRJ</string>
     <!-- Mandatory for the Mac App Store. -->
     <key>com.apple.security.app-sandbox</key>
     <true/>

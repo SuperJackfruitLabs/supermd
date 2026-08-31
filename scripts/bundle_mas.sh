@@ -37,7 +37,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleName</key><string>SuperMD</string>
     <key>CFBundleDisplayName</key><string>SuperMD</string>
-    <key>CFBundleIdentifier</key><string>com.superjackfruitlabs.supermd</string>
+    <key>CFBundleIdentifier</key><string>com.superjackfruit.supermd</string>
     <key>CFBundleVersion</key><string>${BUILD}</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -73,10 +73,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleURLTypes</key>
     <array>
       <dict>
-        <key>CFBundleURLName</key><string>com.superjackfruitlabs.supermd.install</string>
+        <key>CFBundleURLName</key><string>com.superjackfruit.supermd.install</string>
         <key>CFBundleURLSchemes</key><array><string>supermd</string></array>
       </dict>
     </array>
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
 </dict>
