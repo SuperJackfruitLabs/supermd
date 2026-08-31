@@ -1658,7 +1658,7 @@ mod bench_backends {
     /// Does the plugin host run under a hardened-runtime signature
     /// with NO JIT entitlements? Build, then:
     ///   codesign --force --options runtime --sign - <test-bin>
-    ///   SUPERMD_PROBE_TARGET=pulley64 <test-bin> hardened_runtime_probe --ignored
+    ///   <test-bin> hardened_runtime_probe --ignored --nocapture
     #[test]
     #[ignore = "run manually against a hardened-runtime-signed test binary"]
     fn hardened_runtime_probe() {
@@ -1667,12 +1667,29 @@ mod bench_backends {
             eprintln!("SKIP: plugins not built");
             return;
         }
-        let target = std::env::var("SUPERMD_PROBE_TARGET").ok();
+        // The env var overrides for manual A/B runs; with it unset the
+        // probe exercises whatever this build actually ships, so a
+        // `--features mas` binary proves the shipping path needs no
+        // JIT entitlements.
+        let target = std::env::var("SUPERMD_PROBE_TARGET")
+            .ok()
+            .or_else(|| wasm_target().map(str::to_string));
         eprintln!("probe target: {target:?}");
         let mut host = ExtensionHost::load_with_target(&dir, target.as_deref());
         let out = host.status_text("word-count", "hello world from the probe");
         eprintln!("status_text -> {out:?}");
         assert!(out.is_ok(), "plugin call failed: {out:?}");
+    }
+
+    #[test]
+    fn a_pulley_target_builds_an_engine_on_any_build() {
+        // Exercises the target branch of load_with_target under default
+        // features, where wasm_target() is None and CI's coverage run
+        // would otherwise never reach it.
+        let dir = tempfile::tempdir().unwrap();
+        let host = ExtensionHost::load_with_target(dir.path(), Some("pulley64"));
+        assert!(host.plugins().is_empty());
+        assert!(host.failures().is_empty());
     }
 
     #[test]
