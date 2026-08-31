@@ -148,6 +148,52 @@ pub fn validate_plugin_zip(bytes: &[u8], expected_name: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Validate and install an already-fetched plugin archive. Shared by
+/// the catalog install (which fetches first) and the local Import
+/// command (where the user supplied the bytes).
+pub fn install_plugin_from_bytes(
+    bytes: &[u8],
+    name: &str,
+    plugins_dir: &std::path::Path,
+) -> Result<(), String> {
+    let destination = plugins_dir.join(name);
+    if destination.exists() {
+        return Err(format!("{name} is already installed"));
+    }
+    validate_plugin_zip(bytes, name)?;
+    let staging = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    archive.extract(staging.path()).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(plugins_dir).map_err(|e| e.to_string())?;
+    // Cross-device safe: try rename, fall back to a copy.
+    let staged = staging.path().join(name);
+    if std::fs::rename(&staged, &destination).is_err() {
+        copy_tree(&staged, &destination).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The single top-level directory name inside a plugin archive — the
+/// plugin's name, which `validate_plugin_zip` then cross-checks against
+/// the manifest.
+pub fn plugin_name_from_zip(bytes: &[u8]) -> Result<String, String> {
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let mut roots: Vec<String> = Vec::new();
+    for i in 0..archive.len() {
+        let file = archive.by_index(i).map_err(|e| e.to_string())?;
+        let root = file.name().split('/').next().unwrap_or_default().to_string();
+        if !root.is_empty() && !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    match roots.as_slice() {
+        [one] => Ok(one.clone()),
+        _ => Err("archive must contain exactly one plugin directory".to_string()),
+    }
+}
+
 /// Fetch, verify, validate, and install one catalog entry. The plugins
 /// dir is only touched after everything checks out.
 pub fn install_plugin(
@@ -158,26 +204,14 @@ pub fn install_plugin(
     if !url_allowed(&entry.download) {
         return Err(format!("download URL is not from the SuperMD repo: {}", entry.download));
     }
-    let destination = plugins_dir.join(&entry.name);
-    if destination.exists() {
+    if plugins_dir.join(&entry.name).exists() {
         return Err(format!("{} is already installed", entry.name));
     }
     let bytes = fetch(&entry.download)?;
     if sha256_hex(&bytes) != entry.sha256 {
         return Err("download did not match the catalog checksum".to_string());
     }
-    validate_plugin_zip(&bytes, &entry.name)?;
-    let staging = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let mut archive =
-        zip::ZipArchive::new(std::io::Cursor::new(&bytes)).map_err(|e| e.to_string())?;
-    archive.extract(staging.path()).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(plugins_dir).map_err(|e| e.to_string())?;
-    // Cross-device safe: try rename, fall back to a copy.
-    let staged = staging.path().join(&entry.name);
-    if std::fs::rename(&staged, &destination).is_err() {
-        copy_tree(&staged, &destination).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    install_plugin_from_bytes(&bytes, &entry.name, plugins_dir)
 }
 
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
@@ -219,6 +253,34 @@ mod install_tests {
             ("demo/plugin.toml", b"name=\"demo\"\nversion=\"0.1.0\"\nformats=true\n"),
             ("demo/plugin.wasm", b"\0asm-stub"),
         ])
+    }
+
+    #[test]
+    fn installs_a_plugin_from_local_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip = good_zip();
+        install_plugin_from_bytes(&zip, "demo", dir.path()).unwrap();
+        assert!(dir.path().join("demo/plugin.toml").exists());
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_installed_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip = good_zip();
+        install_plugin_from_bytes(&zip, "demo", dir.path()).unwrap();
+        let err = install_plugin_from_bytes(&zip, "demo", dir.path()).unwrap_err();
+        assert!(err.contains("already installed"), "{err}");
+    }
+
+    #[test]
+    fn reads_the_plugin_name_out_of_the_zip() {
+        assert_eq!(plugin_name_from_zip(&good_zip()).unwrap(), "demo");
+    }
+
+    #[test]
+    fn rejects_a_zip_whose_manifest_name_disagrees() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(install_plugin_from_bytes(&good_zip(), "other", dir.path()).is_err());
     }
 
     fn entry_for(bytes: &[u8]) -> CatalogEntry {

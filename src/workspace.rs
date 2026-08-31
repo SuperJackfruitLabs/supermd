@@ -33,6 +33,7 @@ actions!(
         ToggleSearch,
         TogglePalette,
         OpenPluginsFolder,
+        ImportPlugin,
         RevealSettingsFolder,
         ReloadPlugins,
         TogglePreview,
@@ -1621,6 +1622,44 @@ impl Workspace {
         let dir = crate::settings::config_dir().join("plugins");
         let _ = std::fs::create_dir_all(&dir);
         crate::platform::reveal_dir(&dir);
+    }
+
+    /// Install a plugin the user downloaded themselves. The floor of the
+    /// install story: the app never fetches code, so App Review 2.4.5(iv)
+    /// does not engage. Ships in every build, not just the sandboxed one.
+    fn import_plugin(&mut self, _: &ImportPlugin, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let result = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    let name = crate::catalog::plugin_name_from_zip(&bytes)?;
+                    crate::catalog::install_plugin_from_bytes(
+                        &bytes,
+                        &name,
+                        &crate::settings::config_dir().join("plugins"),
+                    )
+                    .map(|_| name)
+                });
+            this.update(cx, |this, cx| {
+                this.show_command_error(
+                    match result {
+                        Ok(name) => format!("Installed {name} — restart to load it"),
+                        Err(e) => e,
+                    },
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Sandboxed builds relocate ~/.supermd into the app container,
@@ -3907,6 +3946,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_plugins_folder))
             .on_action(cx.listener(Self::reveal_settings_folder))
+            .on_action(cx.listener(Self::import_plugin))
             .on_action(cx.listener(Self::reload_plugins))
             .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent_ix(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent_ix(1, w, cx)))

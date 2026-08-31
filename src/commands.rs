@@ -202,6 +202,8 @@ commands! {
         keys: ["cmd-shift-p"], ctx: None, menu: Some((Tools, 0)), help: Some(General) },
     ws::InstallPlugins => { id: "install_plugins", label: "Install Plugins…",
         keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
+    ws::ImportPlugin => { id: "import_plugin", label: "Import Plugin…",
+        keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
     ws::OpenPluginsFolder => { id: "plugins_folder", label: "Open Plugins Folder",
         keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
     ws::ReloadPlugins => { id: "reload_plugins", label: "Reload Plugins",
