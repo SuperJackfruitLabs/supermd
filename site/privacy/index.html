@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Privacy Policy — SuperMD</title>
+<meta name="description" content="SuperMD collects no data. No analytics, no telemetry, no accounts. Your documents never leave your Mac unless you ask them to.">
+<link rel="canonical" href="https://supermd.app/privacy/">
+<meta name="robots" content="index, follow">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #fdfbf6; --fg: #33302a; --strong: #211f1a; --muted: #918b7d;
+    --accent: #c9821c; --panel: #f8f5ec; --border: #eae5d8; --code: #f6f2e9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #211f1a; --fg: #d9d4c8; --strong: #f2ede2; --muted: #8f897a;
+      --accent: #e5a63b; --panel: #262420; --border: #383428; --code: #2b2822;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 17px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 0 24px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header.wrap { padding: 72px 24px 32px; }
+  h1 { font-size: 34px; line-height: 1.2; color: var(--strong); letter-spacing: -0.02em; }
+  .lede { margin-top: 14px; color: var(--muted); font-size: 18px; }
+  main.wrap { padding-bottom: 64px; }
+  h2 {
+    font-size: 20px; color: var(--strong); margin: 36px 0 12px;
+    letter-spacing: -0.01em;
+  }
+  p { margin: 12px 0; }
+  ul { margin: 12px 0 12px 22px; }
+  li { margin: 7px 0; }
+  code {
+    background: var(--code); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .callout {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; margin: 24px 0;
+  }
+  .callout p:first-child { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 15px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--strong); font-weight: 600; }
+  footer {
+    border-top: 1px solid var(--border); padding: 26px 0 44px;
+    color: var(--muted); font-size: 14px; text-align: center;
+  }
+  .updated { color: var(--muted); font-size: 14px; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <h1>Privacy Policy</h1>
+  <p class="lede">SuperMD collects nothing. There is no analytics, no telemetry, no crash reporting, and no account.</p>
+  <p class="updated">Last updated: 31 August 2026</p>
+</header>
+
+<main class="wrap">
+
+  <div class="callout">
+    <p><strong>The short version.</strong> SuperMD is a Markdown editor that runs entirely on your Mac. Your documents are plain files in your own folders. We never see them, never upload them, and have no server that could receive them. We do not know who you are, whether you use the app, or how often.</p>
+  </div>
+
+  <h2>What we collect</h2>
+  <p>Nothing. SuperMD contains no analytics SDK, no telemetry, no crash reporter, no advertising identifier, and no user accounts. There is no SuperMD server, so there is no place for your data to go.</p>
+
+  <h2>Your documents</h2>
+  <p>SuperMD reads and writes plain CommonMark files in folders you choose. Those files stay on your Mac. The app never transmits document content anywhere.</p>
+  <p>On the Mac App Store version, macOS additionally sandboxes the app: it can only reach folders you have explicitly opened through the system's open panel. Settings, themes and plugins live inside the app's own container.</p>
+
+  <h2>When SuperMD uses the network</h2>
+  <p>Only when you ask it to. The Mac App Store version makes no network request at launch, in the background, or on any schedule. Every connection below is the direct result of an action you took:</p>
+
+  <table>
+    <tr><th>Connection</th><th>What triggers it</th></tr>
+    <tr>
+      <td>Plugin catalog<br><code>raw.githubusercontent.com</code></td>
+      <td>Only when you follow a plugin install link. Fetches the list of available plugins.</td>
+    </tr>
+    <tr>
+      <td>Plugin download<br><code>github.com</code></td>
+      <td>Only after you confirm an install. Downloads that plugin's archive, checked against a published SHA-256.</td>
+    </tr>
+    <tr>
+      <td>A plugin's own request</td>
+      <td>Only if you install a plugin that declares network access, and only after you approve each website it asks for.</td>
+    </tr>
+  </table>
+
+  <p>These requests carry no identifier of you or your Mac beyond what any HTTPS request necessarily reveals to the server it contacts, such as your IP address. GitHub receives those requests under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">its own privacy statement</a>; we receive nothing.</p>
+
+  <h2>Plugins</h2>
+  <p>Plugins run in a WebAssembly sandbox with no access to anything by default — no files, no network, no environment. Two capabilities exist and both ask your permission first:</p>
+  <ul>
+    <li><strong>Reading your open folder</strong> — a one-time consent prompt, granting read-only access to that folder alone.</li>
+    <li><strong>Network access</strong> — asked per website, naming the site. Grants are remembered and can be revoked.</li>
+  </ul>
+  <p>A plugin that has been granted network access can send data to the site you approved. That is the plugin's behaviour, under permission you gave it. The bundled plugins that use this do so only to enrich what you are editing, such as fetching the title of a link you pasted.</p>
+
+  <h2>What is stored on your Mac</h2>
+  <ul>
+    <li>Your settings, themes and installed plugins.</li>
+    <li>A list of recently opened folders, so the app can reopen your last workspace.</li>
+    <li>Local backups of documents, so an interrupted edit is recoverable.</li>
+  </ul>
+  <p>All of this is local. None of it is transmitted. Deleting the app's container or its settings folder removes it.</p>
+
+  <h2>Children</h2>
+  <p>SuperMD is a general-purpose writing tool. It does not collect personal information from anyone, including children.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy ever changes, the revised version will be posted here with a new date above. Because the app collects no data, we do not expect material changes.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy, or about SuperMD's handling of your data, can be raised at <a href="https://github.com/SuperJackfruitLabs/supermd/issues">github.com/SuperJackfruitLabs/supermd/issues</a>.</p>
+  <p>SuperMD is developed by Super Jackfruit Labs.</p>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="https://github.com/SuperJackfruitLabs/supermd">GitHub</a></p>
+    <p style="margin-top:10px">© 2026 Super Jackfruit Labs · Apache-2.0</p>
+  </div>
+</footer>
+
+</body>
+</html>
