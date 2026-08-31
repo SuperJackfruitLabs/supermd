@@ -565,8 +565,18 @@ pub struct ExtensionHost {
 
 impl ExtensionHost {
     pub fn load(plugins_dir: &Path) -> Self {
+        Self::load_with_target(plugins_dir, None)
+    }
+
+    /// `target` overrides the compilation target; `Some("pulley64")`
+    /// compiles to Pulley bytecode and interprets it (no executable
+    /// pages). None = native codegen.
+    pub fn load_with_target(plugins_dir: &Path, target: Option<&str>) -> Self {
         let mut config = wasmtime::Config::new();
         config.epoch_interruption(true);
+        if let Some(t) = target {
+            config.target(t).expect("wasm target");
+        }
         let engine = wasmtime::Engine::new(&config).expect("wasmtime engine");
         // Tick the epoch forever; deadlines are per-call offsets.
         {
@@ -1588,6 +1598,169 @@ mod export_tests {
             .export_document("fetcher", "d", "evil", &crate::diagram::DiagramTheme::default_light())
             .unwrap();
         assert!(validate_export_paths(&files).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bench_backends {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Synthetic markdown with the features the bench plugins act on:
+    /// headings (toc), prose (word-count/tidy), emoji shortcodes and
+    /// calc expressions (inline), TODO marks (decorations).
+    fn synth_doc(sections: usize) -> String {
+        let mut s = String::from("# Benchmark Document\n\n");
+        for i in 0..sections {
+            s.push_str(&format!("## Section {i}\n\n"));
+            s.push_str(
+                "Lorem ipsum dolor sit amet, consectetur adipiscing elit -- \
+                 sed do eiusmod tempor incididunt ut labore et dolore magna \
+                 aliqua. \"Quoted prose\" with an ellipsis... and a :smile: \
+                 shortcode. TODO: revisit this paragraph.\n\n",
+            );
+            s.push_str("A computed value {{2 km + 300 m}} sits inline.\n\n");
+            s.push_str("- list item one\n- list item two\n\n");
+        }
+        s
+    }
+
+    fn median(mut v: Vec<Duration>) -> Duration {
+        v.sort();
+        v[v.len() / 2]
+    }
+
+    /// Time `f` after one warmup call (the first call instantiates).
+    fn timed(iters: usize, mut f: impl FnMut() -> Result<(), String>) -> Result<Duration, String> {
+        f()?;
+        let mut samples = Vec::with_capacity(iters);
+        for _ in 0..iters {
+            let t = Instant::now();
+            f()?;
+            samples.push(t.elapsed());
+        }
+        Ok(median(samples))
+    }
+
+    /// Does the plugin host run under a hardened-runtime signature
+    /// with NO JIT entitlements? Build, then:
+    ///   codesign --force --options runtime --sign - <test-bin>
+    ///   SUPERMD_PROBE_TARGET=pulley64 <test-bin> hardened_runtime_probe --ignored
+    #[test]
+    #[ignore = "run manually against a hardened-runtime-signed test binary"]
+    fn hardened_runtime_probe() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dist/plugins");
+        if !dir.join("word-count/plugin.wasm").exists() {
+            eprintln!("SKIP: plugins not built");
+            return;
+        }
+        let target = std::env::var("SUPERMD_PROBE_TARGET").ok();
+        eprintln!("probe target: {target:?}");
+        let mut host = ExtensionHost::load_with_target(&dir, target.as_deref());
+        let out = host.status_text("word-count", "hello world from the probe");
+        eprintln!("status_text -> {out:?}");
+        assert!(out.is_ok(), "plugin call failed: {out:?}");
+    }
+
+    #[test]
+    #[ignore = "benchmark; run: cargo test --release bench_backends -- --ignored --nocapture"]
+    fn pulley_vs_cranelift() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dist/plugins");
+        if !dir.join("word-count/plugin.wasm").exists() {
+            eprintln!("SKIP: plugins not built (bash scripts/build_plugins.sh)");
+            return;
+        }
+
+        let small = synth_doc(10);
+        let large = synth_doc(400);
+        let huge = synth_doc(3200);
+        eprintln!(
+            "doc sizes: small {} B, large {} B, huge {} B\n",
+            small.len(),
+            large.len(),
+            huge.len()
+        );
+
+        for (label, target) in [("cranelift (native)", None), ("pulley64 (interp)", Some("pulley64"))]
+        {
+            let t0 = Instant::now();
+            let mut host = ExtensionHost::load_with_target(&dir, target);
+            let compile_all = t0.elapsed();
+            let n = host.plugins().len();
+            eprintln!("=== {label} ===");
+            eprintln!("  compile {n} plugins       {:>10.1?}", compile_all);
+            if !host.failures().is_empty() {
+                eprintln!("  failures: {:?}", host.failures());
+            }
+
+            let cases: Vec<(&str, Box<dyn FnMut(&mut ExtensionHost) -> Result<(), String>>)> = vec![
+                (
+                    "word-count status (small)",
+                    Box::new({
+                        let d = small.clone();
+                        move |h: &mut ExtensionHost| h.status_text("word-count", &d).map(|_| ())
+                    }),
+                ),
+                (
+                    "word-count status (large)",
+                    Box::new({
+                        let d = large.clone();
+                        move |h: &mut ExtensionHost| h.status_text("word-count", &d).map(|_| ())
+                    }),
+                ),
+                (
+                    "calc render_inline",
+                    Box::new(|h: &mut ExtensionHost| {
+                        h.render_inline("calc", "expr", "2 km + 300 m").map(|_| ())
+                    }),
+                ),
+                (
+                    "emoji render_inline",
+                    Box::new(|h: &mut ExtensionHost| {
+                        h.render_inline("emoji", "shortcode", "tada").map(|_| ())
+                    }),
+                ),
+                (
+                    "tidy format (small)",
+                    Box::new({
+                        let d = small.clone();
+                        move |h: &mut ExtensionHost| h.format_document("tidy", &d).map(|_| ())
+                    }),
+                ),
+                (
+                    "tidy format (large)",
+                    Box::new({
+                        let d = large.clone();
+                        move |h: &mut ExtensionHost| h.format_document("tidy", &d).map(|_| ())
+                    }),
+                ),
+                (
+                    "tidy format (huge 1MB)",
+                    Box::new({
+                        let d = huge.clone();
+                        move |h: &mut ExtensionHost| h.format_document("tidy", &d).map(|_| ())
+                    }),
+                ),
+                (
+                    "toc on_save (large)",
+                    Box::new({
+                        let d = large.clone();
+                        move |h: &mut ExtensionHost| {
+                            h.on_save("toc", "bench.md", &d).map(|_| ())
+                        }
+                    }),
+                ),
+            ];
+
+            for (name, mut case) in cases {
+                match timed(20, |
+                | case(&mut host)) {
+                    Ok(d) => eprintln!("  {name:<26} {:>10.1?}", d),
+                    Err(e) => eprintln!("  {name:<26} ERR: {e}"),
+                }
+            }
+            eprintln!();
+        }
     }
 }
 
