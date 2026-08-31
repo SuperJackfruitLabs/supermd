@@ -89,6 +89,73 @@ jobs:
           path: dist/supermd-*.dmg
           if-no-files-found: error
 
+  mas:
+    name: Build App Store package
+    runs-on: macos-latest
+    env:
+      # `secrets` is not a valid context in a job- or step-level `if`;
+      # bridge it, exactly as the `macos` job does.
+      HAVE_CERT: ${{ secrets.MAS_CERT_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Import Apple Distribution and installer certificates
+        if: ${{ env.HAVE_CERT == 'true' }}
+        env:
+          CERT_P12: ${{ secrets.MAS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MAS_CERT_PASSWORD }}
+          INSTALLER_P12: ${{ secrets.MAS_INSTALLER_P12 }}
+          INSTALLER_PASSWORD: ${{ secrets.MAS_INSTALLER_PASSWORD }}
+          PROFILE_B64: ${{ secrets.MAS_PROFILE }}
+        run: |
+          KEYCHAIN=build.keychain
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Two identities: "Apple Distribution" signs the .app,
+          # "3rd Party Mac Developer Installer" signs the .pkg.
+          echo "$CERT_P12" | base64 -d > app.p12
+          echo "$INSTALLER_P12" | base64 -d > installer.p12
+          security import app.p12 -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security import installer.p12 -k "$KEYCHAIN" -P "$INSTALLER_PASSWORD" \
+            -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain
+          rm app.p12 installer.p12
+          APP_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep "Apple Distribution" | head -1 \
+            | sed 's/.*"\(.*\)"/\1/')
+          INSTALLER_IDENTITY=$(security find-identity -v "$KEYCHAIN" \
+            | grep "3rd Party Mac Developer Installer" | head -1 \
+            | sed 's/.*"\(.*\)"/\1/')
+          echo "APP_IDENTITY=$APP_IDENTITY" >> "$GITHUB_ENV"
+          echo "INSTALLER_IDENTITY=$INSTALLER_IDENTITY" >> "$GITHUB_ENV"
+          echo "$PROFILE_B64" | base64 -d > mas.provisionprofile
+          echo "PROFILE=$PWD/mas.provisionprofile" >> "$GITHUB_ENV"
+          echo "Signing as: $APP_IDENTITY / $INSTALLER_IDENTITY"
+
+      - name: Build plugins
+        if: ${{ env.HAVE_CERT == 'true' }}
+        run: bash scripts/build_plugins.sh
+      - name: Bundle
+        if: ${{ env.HAVE_CERT == 'true' }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_NUMBER="${GITHUB_RUN_NUMBER}" bash scripts/bundle_mas.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        if: ${{ env.HAVE_CERT == 'true' }}
+        with:
+          name: mas
+          path: dist/SuperMD-mas-*.pkg
+          if-no-files-found: error
+
   linux:
     name: Build Linux packages
     runs-on: ubuntu-latest
@@ -174,6 +241,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The App Store package is uploaded to App Store Connect via
+          # Transporter, never attached to a GitHub Release. merge-multiple
+          # pulls every artifact in the run, so drop it explicitly.
+          rm -f artifacts/SuperMD-mas-*.pkg
           ls -la artifacts/
           gh release create "$GITHUB_REF_NAME" \
             artifacts/* \

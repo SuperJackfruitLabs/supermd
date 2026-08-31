@@ -184,6 +184,15 @@
 <li>Windows: <code>%USERPROFILE%\.supermd\plugins\</code></li>
 </ul>
 <p>then run <strong>Reload Plugins</strong> from the palette (or restart). If a plugin fails to load, the reason appears at the bottom of the command palette — a broken plugin never breaks the app.</p>
+<h3>On the Mac App Store build</h3>
+<p>The App Store version of SuperMD runs inside Apple's sandbox, which changes how plugins arrive — every plugin still works the same once installed.</p>
+<ul>
+<li><strong>All fourteen plugins ship inside the app.</strong> Nothing has to be downloaded to use them.</li>
+<li><strong>There is no in-app catalog to browse.</strong> Browse plugins on the website and click <strong>Install</strong> there: the link hands the plugin's name to SuperMD, which asks you to confirm — naming the plugin and anything it wants access to — before installing.</li>
+<li><strong>Import Plugin…</strong> (Tools menu) installs a plugin archive you downloaded yourself. This route works in every build.</li>
+<li><strong>Grammar plugins are unavailable.</strong> A plugin that adds syntax highlighting for a new language (the GraphQL plugin is the only one today) needs a compiler Apple's sandbox does not permit. GraphQL code renders as plain text there; every other plugin is unaffected.</li>
+</ul>
+<p>Your plugins folder lives inside the app's container rather than at <code>~/.supermd/</code>. Reach it with <strong>Reveal Settings Folder</strong> from the Help menu.</p>
 <h2>The safety model</h2>
 <p>Plugins run inside a WebAssembly sandbox with <strong>no access to anything by default</strong> — no files, no network, no environment, no clock.</p>
 <p>Two capabilities exist, and both ask you first:</p>

@@ -4,7 +4,7 @@ Everything consciously deferred, cut from a spec's scope, or discussed and
 parked — with why, so future planning starts from decisions instead of
 archaeology. Living document: prune what ships, add what gets cut.
 
-_Last groomed: 2026-08-26, after the shortcuts/menus/chrome pass._
+_Last groomed: 2026-08-31, after the Mac App Store pass._
 
 ## Knowledge features (deferred from M1–M4)
 
@@ -58,6 +58,8 @@ _Last groomed: 2026-08-26, after the shortcuts/menus/chrome pass._
 | Windows code signing | SmartScreen still shows one "unrecognized app" prompt |
 | In-app auto-update | About (⌘/ → About) checks on demand and links out. Self-replacement is **three** implementations, not one, and on a `.deb` install the binary is root-owned in `/usr/bin` — the correct Linux answer is an apt repository, not self-update. Wants its own spec |
 | Homebrew cask / winget | Cheap once naming is stable |
+| Mac App Store rollout past TestFlight | The `mas` build (sandbox, Pulley host, no wasm grammars) is implemented — see `docs/superpowers/plans/2026-08-31-mac-app-store.md` and its spec for what the sandbox cost and why. What remains is release work, not engineering: external TestFlight (needs Beta App Review), full submission, and App Store Connect metadata. If App Review rejects the plugin system on 2.4.5(iv), turn off `install_ui::catalog_browsable()` and the `supermd://` handler under `mas` — Import Plugin… survives both |
+| GraphQL highlighting in the App Store build | Grammar plugins need tree-sitter's wasmtime 24, which JITs. Static linking is blocked too: `tree-sitter-graphql` 0.2.1 emits grammar ABI 15 and tree-sitter 0.23 accepts 13-14. Revisit on a tree-sitter upgrade |
 
 ## Shortcuts, menus & chrome
 

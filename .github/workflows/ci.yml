@@ -39,6 +39,15 @@ jobs:
         run: cargo test
       - name: Build
         run: cargo build
+      # The sandboxed App Store configuration is a different feature set
+      # (Pulley host, no wasm grammars), so it can rot silently unless it
+      # is built and tested too. macOS only — `mas` is a macOS target.
+      - name: Build the App Store configuration
+        if: runner.os == 'macOS'
+        run: cargo build --no-default-features --features mas
+      - name: Test the App Store configuration
+        if: runner.os == 'macOS'
+        run: cargo test --no-default-features --features mas
 
   coverage:
     runs-on: ubuntu-latest
