@@ -293,6 +293,32 @@ under Pulley.
   `scripts/bundle_macos.sh:31` currently sets it equal to the marketing
   version, so a re-upload of the same tag would be rejected.
 
+## Staged rollout — TestFlight before submission
+
+TestFlight supports macOS, and it turns a single all-or-nothing submission
+into a ladder where each rung retires a specific risk. **It does not reduce
+the engineering** — a TestFlight build is an App Store build, sandboxed and
+Apple Distribution–signed, so Tasks 1–11 must all land first. What it buys
+is evidence before exposure.
+
+| Rung | Review gate | What it settles |
+| ---- | ----------- | --------------- |
+| 1. Upload to App Store Connect | none — automated validation | Whether the `.pkg` is acceptable at all: signing, embedded profile, entitlements, and **private-API usage in gpui** (open risk 3). |
+| 2. Internal TestFlight — up to 100 team members holding an App Store Connect role | **none at all**; builds go live once processed | Everything runtime, on real machines, installed the way a user would: Pulley plugins executing under the sandbox, bookmarks surviving relaunch, `NSFileManager` trashing, `NSWorkspace` reveal, and whether `runtime_shaders` Metal compilation works sandboxed (open risk 2). |
+| 3. External TestFlight — up to 10,000 testers | **Beta App Review**, ~24h, on the first build of each version | The guideline question (open risk 1) at a fraction of a full submission's cost: if the plugin system draws a 2.4.5(iv) objection, it surfaces here, privately, in about a day. |
+| 4. App Store submission | full App Review | Public release. |
+
+Rung 2 is the reason to do this at all: **no human reviews it**, so every
+sandbox and runtime question in this spec can be answered empirically before
+anyone at Apple forms an opinion about the plugin system. Rung 3 then probes
+the one question that is a genuine judgment call, cheaply and reversibly.
+
+Practical notes: external testing requires a beta app description and beta
+review notes; TestFlight on macOS needs macOS 12+, which matches our
+`LSMinimumSystemVersion`; and if rung 3 draws a rejection, the fallback is
+already designed — disable the `supermd://` handler and the catalog under
+`mas` (D3 tier 1 survives) and resubmit.
+
 ## Accepted losses
 
 | Loss | Severity |
@@ -308,18 +334,24 @@ under Pulley.
 
 ## Open risks
 
+Each risk names the rollout rung that retires it, so none need be carried
+into a public submission.
+
 1. **Review may reject the plugin system outright** on 2.4.5(iv), despite
    §3.3.2. Mitigation: tier 1 (open-panel import) never downloads code, so
-   the fallback build is one cfg away.
+   the fallback build is one cfg away. *Retired at rung 3* — a private ~24h
+   Beta App Review probe instead of a public rejection.
 2. **`runtime_shaders`** compiles Metal shaders at launch via
    `newLibraryWithSource`. This goes through the out-of-process Metal
    compiler and should not need JIT entitlements, but it has **not** been
-   verified under the sandbox. Task 11 verifies it before submission.
+   verified under the sandbox. *Retired at rung 2* (internal TestFlight, no
+   review), and locally before that by Task 11's install-and-run check.
 3. **Private API usage in gpui** would fail App Store Connect validation.
-   Unknown until a real upload is attempted; `altool --validate-app`
-   catches it early.
+   *Retired at rung 1* — `altool --validate-app` catches it before upload,
+   and the upload itself confirms it.
 
 ## Effort
 
-Roughly 6–11 engineering days across the 12 tasks in the plan, plus review
-turnaround, which is not under our control.
+Roughly 6–11 engineering days across the 12 tasks in the plan. The rollout
+ladder adds calendar time but little engineering: rungs 1 and 2 are the same
+upload with a tester group attached, and only rung 3 onward waits on Apple.

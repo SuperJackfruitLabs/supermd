@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `mas` build target that produces a sandboxed, App Store–signed `.pkg`, leaving the Developer ID / DMG build byte-for-byte unchanged in behaviour.
+**Goal:** Add a `mas` build target that produces a sandboxed, App Store–signed `.pkg` validated and uploaded to internal TestFlight, leaving the Developer ID / DMG build byte-for-byte unchanged in behaviour. Promotion to external TestFlight and App Review is a release decision outside this plan.
 
 **Architecture:** One cargo feature, `mas`, selects three swaps: the plugin host compiles to Pulley bytecode instead of native code (no executable pages, so no JIT entitlements); the wasm grammar surface is compiled out (costing one plugin's GraphQL highlighting); and the plugin installer loses its in-app catalog browser but keeps installing via an open-panel import and a `supermd://` URL handoff. Alongside those, six sandbox papercuts are fixed — security-scoped bookmarks for recent workspaces, `NSFileManager` trashing, `NSWorkspace` reveal, and the removal of three process spawns. All new policy lands in pure, tested modules; the objc2 shim stays under 40 lines.
 
@@ -1621,13 +1621,34 @@ a file to the Trash; reveal opens Finder. Then check
 Also confirm **open risk 2** from the spec: GPUI's `runtime_shaders`
 compiles Metal shaders at launch. If the window renders, it passed.
 
-- [ ] **Step 6: Validate against App Store Connect before submitting**
+- [ ] **Step 6: Validate, then upload to TestFlight — do not submit yet**
+
+The spec's staged rollout (see its *Staged rollout* section) says the first
+build goes to TestFlight, not to App Review. Rungs 1 and 2 need no human
+review, so they answer the runtime questions before anyone at Apple sees
+the plugin system.
+
+Rung 1 — validate and upload:
 
 ```bash
 xcrun altool --validate-app -f dist/SuperMD-mas-0.0.14.pkg \
     -t macos --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID"
+xcrun altool --upload-app -f dist/SuperMD-mas-0.0.14.pkg \
+    -t macos --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID"
 ```
-Expected: no errors. Private-API usage in gpui, if any, surfaces here.
+Expected: no errors. Private-API usage in gpui, if any, surfaces here —
+this is the whole of open risk 3, retired before a single tester installs.
+
+Rung 2 — internal TestFlight (**no review of any kind**): in App Store
+Connect, add the processed build to an internal tester group (up to 100
+team members holding an App Store Connect role). Install it through the
+TestFlight app on a Mac that has never run a dev build, and walk Step 5's
+checklist again there. A clean Step 5 locally is not the same evidence: an
+Apple-installed, TestFlight-delivered build is the first time the container,
+the provisioning profile, and the sandbox are all real at once.
+
+Do **not** promote to an external group or submit for App Review from this
+task — that is a release decision, and the plan ends at a validated build.
 
 - [ ] **Step 7: Commit**
 
@@ -1743,9 +1764,14 @@ git commit -m "ci: build and test the App Store configuration; document it"
    §3.3.2. If it does, set `catalog_browsable()` and the `supermd://`
    handler to `false` under `mas` — Task 9's Import… path survives, and
    third-party plugins keep working.
-2. **App Store Connect metadata** — screenshots, privacy policy URL,
+2. **The rollout ladder past rung 2.** Rung 3 is external TestFlight, whose
+   first build per version goes through **Beta App Review** (~24h) — the
+   cheap, private probe of the 2.4.5(iv) question above. Only after that
+   does rung 4, full submission, make sense. External testing additionally
+   needs a beta app description and beta review notes.
+3. **App Store Connect metadata** — screenshots, privacy policy URL,
    privacy nutrition labels ("Data Not Collected"), age rating, export
    compliance (`ITSAppUsesNonExemptEncryption=false`; HTTPS only). Not
-   engineering work, but it blocks submission.
-3. **`docs/BACKLOG.md`** should gain a line pointing at this plan so the
+   engineering work, but it blocks rung 3 onward.
+4. **`docs/BACKLOG.md`** should gain a line pointing at this plan so the
    decision history stays findable.
