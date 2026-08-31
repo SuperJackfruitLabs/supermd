@@ -74,7 +74,27 @@ pub fn create_dir(dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// Which trash backend this build uses. macOS defaults to Finder
+/// (osascript + Apple events), which the App Sandbox blocks, so we pin
+/// NSFileManager. Cost: no Finder sound and no "Put Back" entry.
+pub fn delete_method_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "NsFileManager"
+    } else {
+        "platform-default"
+    }
+}
+
 /// Send a file or folder to the OS trash.
+#[cfg(target_os = "macos")]
+pub fn delete(path: &Path) -> Result<(), String> {
+    use trash::macos::{DeleteMethod, TrashContextExtMacos as _};
+    let mut ctx = trash::TrashContext::default();
+    ctx.set_delete_method(DeleteMethod::NsFileManager);
+    ctx.delete(path).map_err(|e| format!("cannot delete {}: {e}", path.display()))
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn delete(path: &Path) -> Result<(), String> {
     trash::delete(path).map_err(|e| format!("cannot delete {}: {e}", path.display()))
 }
@@ -180,5 +200,16 @@ mod tests {
         // Unrelated, and prefix-similar names that are not ancestors.
         assert_eq!(retarget(&p("/w/other.md"), &p("/w/a.md"), &p("/w/b.md")), None);
         assert_eq!(retarget(&p("/w/docsier/n.md"), &p("/w/docs"), &p("/w/notes")), None);
+    }
+
+    #[test]
+    fn delete_uses_the_file_manager_on_macos() {
+        // The Finder backend spawns osascript, which the App Sandbox blocks.
+        // This asserts the policy, not the OS call: `delete_method_name`
+        // is the seam the shell reads.
+        #[cfg(target_os = "macos")]
+        assert_eq!(delete_method_name(), "NsFileManager");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(delete_method_name(), "platform-default");
     }
 }
