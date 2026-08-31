@@ -5,3 +5,7 @@ plugins/fixtures/*/target/
 tests/fixtures/plugins/
 dist/
 .claude/
+
+# Working notes that are not part of the project's public record:
+# submission copy, credentials context, anything account-specific.
+docs/internal/
