@@ -362,6 +362,18 @@ impl Editor {
         self.diff.is_some()
     }
 
+    /// The "repository is out of scope" hint for the empty-diff message,
+    /// asked of the open workspace root. No workspace, no hint.
+    fn git_scope_hint(&self, cx: &App) -> Option<&'static str> {
+        let root = cx
+            .try_global::<crate::knowledge::KnowledgeState>()
+            .and_then(|s| s.0.lock().ok().map(|ix| ix.root.clone()))?;
+        crate::workspace::git_scope_hint(
+            false,
+            crate::workspace::repo_root_may_be_out_of_scope(&root),
+        )
+    }
+
     /// Enter (or recompute) the read-only diff-vs-HEAD view.
     pub fn enter_diff(&mut self, langs: &Languages, cx: &mut Context<Self>) {
         let (doc, missing) = match crate::git::head_text(&self.path) {
@@ -2991,13 +3003,20 @@ impl Render for Editor {
                 )
                 .child(div().text_color(t.fg_muted).child("esc to close"))
         });
-        let diff_empty: Option<&'static str> = self.diff.as_ref().and_then(|d| {
+        let scope_hint = self.git_scope_hint(cx);
+        let diff_empty: Option<String> = self.diff.as_ref().and_then(|d| {
             use crate::git::Baseline;
             match &d.missing {
-                Some(Baseline::NotInRepo) => Some("Not in a git repository."),
-                Some(Baseline::Untracked) => Some("Not tracked in git yet."),
-                Some(Baseline::Binary) => Some("No text baseline at HEAD."),
-                _ => d.changes.is_empty().then_some("No uncommitted changes."),
+                Some(Baseline::NotInRepo) => Some(match scope_hint {
+                    Some(hint) => format!("Not in a git repository — or {hint}."),
+                    None => "Not in a git repository.".into(),
+                }),
+                Some(Baseline::Untracked) => Some("Not tracked in git yet.".into()),
+                Some(Baseline::Binary) => Some("No text baseline at HEAD.".into()),
+                _ => d
+                    .changes
+                    .is_empty()
+                    .then(|| "No uncommitted changes.".to_string()),
             }
         });
 

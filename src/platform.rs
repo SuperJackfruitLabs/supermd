@@ -152,17 +152,39 @@ mod tests {
         assert_eq!(home_dir(), expected);
         assert!(!home_dir().as_os_str().is_empty());
     }
+
+    #[test]
+    fn reveal_spawns_no_subprocess_on_macos() {
+        // The sandbox forbids spawning /usr/bin/open; NSWorkspace is the
+        // sanctioned route. This asserts the policy the shell reads.
+        assert_eq!(
+            reveal_backend(),
+            if cfg!(target_os = "macos") { "NSWorkspace" } else { "spawn" }
+        );
+    }
+}
+
+/// Which mechanism `reveal_dir` uses. macOS must not spawn `open` —
+/// the App Sandbox blocks subprocesses.
+pub fn reveal_backend() -> &'static str {
+    if cfg!(target_os = "macos") { "NSWorkspace" } else { "spawn" }
 }
 
 /// Open a directory in the system file manager.
+#[cfg(target_os = "macos")]
 pub fn reveal_dir(path: &std::path::Path) {
-    let tool = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(target_os = "windows") {
-        "explorer"
-    } else {
-        "xdg-open"
+    use objc2_foundation::{NSArray, NSString, NSURL};
+    let s = NSString::from_str(&path.to_string_lossy());
+    let url = NSURL::fileURLWithPath(&s);
+    let urls = NSArray::from_retained_slice(&[url]);
+    unsafe {
+        objc2_app_kit::NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls)
     };
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reveal_dir(path: &std::path::Path) {
+    let tool = if cfg!(target_os = "windows") { "explorer" } else { "xdg-open" };
     let _ = std::process::Command::new(tool).arg(path).spawn();
 }
 

@@ -214,6 +214,10 @@ commands! {
     // Help there and added to the app menu by `app_menus`.
     ws::ToggleAbout => { id: "about", label: "About SuperMD", keys: [],
         ctx: None, menu: Some((Help, 1)), help: None },
+    // No keystroke: the sandboxed build hides ~/.supermd in its container,
+    // so this is a discoverability affordance, not a hot path.
+    ws::RevealSettingsFolder => { id: "settings_folder", label: "Reveal Settings Folder",
+        keys: [], ctx: None, menu: Some((Help, 1)), help: None },
 
     // ── Editor: menus arrive with the restructure (Task 10) ────────────
     // ── Edit ───────────────────────────────────────────────────────────

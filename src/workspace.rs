@@ -33,6 +33,7 @@ actions!(
         ToggleSearch,
         TogglePalette,
         OpenPluginsFolder,
+        RevealSettingsFolder,
         ReloadPlugins,
         TogglePreview,
         ShowChanges,
@@ -89,6 +90,22 @@ pub(crate) fn ensure_welcome_file(config_dir: &Path) -> PathBuf {
         }
     }
     path
+}
+
+/// Why Show Changes found no baseline. Under the sandbox, `gix::discover`
+/// walks upward out of the granted scope and fails silently; say so
+/// rather than implying the folder has no history.
+pub fn git_scope_hint(has_baseline: bool, repo_root_above_workspace: bool) -> Option<&'static str> {
+    (!has_baseline && repo_root_above_workspace)
+        .then_some("the git repository is outside the opened folder")
+}
+
+/// Whether "no baseline" here might mean "out of scope" rather than "no
+/// repository". Only a sandboxed build can be fooled, and only for a
+/// folder that is not itself a repo root — `gix::discover` stops at a
+/// `.git` inside the grant, so finding one settles the question.
+pub fn repo_root_may_be_out_of_scope(workspace_root: &Path) -> bool {
+    crate::bookmarks::needs_scope() && !workspace_root.join(".git").exists()
 }
 
 /// Persist a just-opened workspace root into the recents list.
@@ -1599,6 +1616,19 @@ impl Workspace {
         _cx: &mut Context<Self>,
     ) {
         let dir = crate::settings::config_dir().join("plugins");
+        let _ = std::fs::create_dir_all(&dir);
+        crate::platform::reveal_dir(&dir);
+    }
+
+    /// Sandboxed builds relocate ~/.supermd into the app container,
+    /// where themes and settings.toml are otherwise unreachable.
+    fn reveal_settings_folder(
+        &mut self,
+        _: &RevealSettingsFolder,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let dir = crate::settings::config_dir();
         let _ = std::fs::create_dir_all(&dir);
         crate::platform::reveal_dir(&dir);
     }
@@ -3873,6 +3903,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_plugins_folder))
+            .on_action(cx.listener(Self::reveal_settings_folder))
             .on_action(cx.listener(Self::reload_plugins))
             .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent_ix(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent_ix(1, w, cx)))
@@ -4362,6 +4393,33 @@ mod tests {
         std::fs::write(&p, "user edited").unwrap();
         ensure_welcome_file(dir.path());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "user edited");
+    }
+
+    #[test]
+    fn git_scope_hint_only_fires_when_sandboxed_and_baseline_is_missing() {
+        // (has_baseline, in_repo_subdir) -> hint
+        assert_eq!(git_scope_hint(true, true), None);
+        assert_eq!(git_scope_hint(true, false), None);
+        assert_eq!(git_scope_hint(false, false), None);
+        assert_eq!(
+            git_scope_hint(false, true),
+            Some("the git repository is outside the opened folder"),
+        );
+    }
+
+    #[test]
+    fn repo_root_is_only_ambiguous_for_a_sandboxed_non_repo_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder carrying its own .git is never ambiguous: discover
+        // stops there, inside the granted scope.
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert!(!repo_root_may_be_out_of_scope(dir.path()));
+
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(
+            repo_root_may_be_out_of_scope(plain.path()),
+            crate::bookmarks::needs_scope()
+        );
     }
 
     #[test]
