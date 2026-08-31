@@ -44,6 +44,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>supermd</string>
     <key>CFBundleIconFile</key><string>icon</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
+    <!-- Required by the Mac App Store. Must match the category chosen in
+         App Store Connect. -->
+    <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>CFBundleDocumentTypes</key>
     <array>
       <dict>
