@@ -90,6 +90,10 @@ if [ -d "$ROOT/dist/default-plugins" ]; then
     cp -R "$ROOT/dist/default-plugins/." "$APP/Contents/Resources/plugins/"
 fi
 
+# Downloaded assets can carry com.apple.quarantine, which notarization
+# rejects; strip before signing, since xattr changes invalidate a signature.
+xattr -cr "$APP"
+
 # Entitlements: the wasm plugin runtime needs JIT under the hardened
 # runtime (see assets/entitlements.plist) — without them the notarized
 # app is SIGKILLed on the first plugin execution.

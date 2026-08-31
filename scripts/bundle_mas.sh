@@ -94,6 +94,13 @@ cp -R "$ROOT/dist/plugins/." "$APP/Contents/Resources/plugins/"
 
 cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
 
+# A profile downloaded through a browser carries com.apple.quarantine, and
+# cp preserves it. App Store processing rejects any quarantined file with
+# ITMS-91109 — after a clean --validate-app, so it only surfaces once the
+# build is already uploaded. Strip before signing: changing xattrs after
+# would invalidate the signature.
+xattr -cr "$APP"
+
 codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/assets/mas.entitlements" \
     --sign "$APP_IDENTITY" "$APP"
