@@ -1122,6 +1122,12 @@ Store build. Add to `plugins/graphql/plugin.toml`:
 # JIT-compiles; unavailable in the sandboxed App Store build.
 ```
 
+**Decision: (a), accept the loss.** Verified 2026-08-31: the only crate is
+`tree-sitter-graphql` 0.2.1, whose `parser.c` declares `LANGUAGE_VERSION 15`
+while `tree-sitter` 0.23.2's `api.h` accepts 13-14 (`TREE_SITTER_LANGUAGE_VERSION`
+/ `..._MIN_COMPATIBLE_...`); it also dev-depends on tree-sitter 0.25.3. (b)
+would require the forbidden tree-sitter upgrade.
+
 **(b) Link a grammar statically.** Only if a `tree-sitter-graphql` release
 targets tree-sitter 0.23 / grammar ABI 14 — check first:
 

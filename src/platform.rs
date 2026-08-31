@@ -177,9 +177,7 @@ pub fn reveal_dir(path: &std::path::Path) {
     let s = NSString::from_str(&path.to_string_lossy());
     let url = NSURL::fileURLWithPath(&s);
     let urls = NSArray::from_retained_slice(&[url]);
-    unsafe {
-        objc2_app_kit::NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls)
-    };
+    objc2_app_kit::NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls);
 }
 
 #[cfg(not(target_os = "macos"))]

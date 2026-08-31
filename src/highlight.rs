@@ -151,15 +151,25 @@ impl Languages {
 
 // ── plugin grammar registry ───────────────────────────────────────────
 
+/// Whether this build can load third-party tree-sitter grammar plugins.
+/// The MAS build cannot: tree-sitter's wasm support is wasmtime 24, which
+/// JIT-compiles and has no interpreter backend.
+pub fn grammars_enabled() -> bool {
+    cfg!(feature = "grammars")
+}
+
 /// Plugin grammars: name → compiled highlight config. The WasmStore
 /// must sit in a parser during a parse (the API moves it), so it lives
 /// beside the registry and is taken/put around each highlight.
 /// WasmStore wraps a raw pointer and lacks Send; every access here is
 /// serialized behind the GRAMMARS mutex and a store never crosses
 /// threads mid-parse, so moving it between locked sections is sound.
+#[cfg(feature = "grammars")]
 struct SendStore(tree_sitter::WasmStore);
+#[cfg(feature = "grammars")]
 unsafe impl Send for SendStore {}
 
+#[cfg(feature = "grammars")]
 struct GrammarRegistry {
     store: Option<SendStore>,
     grammars: Vec<(String, HighlightConfiguration)>,
@@ -167,10 +177,12 @@ struct GrammarRegistry {
     extensions: Vec<(String, String)>,
 }
 
+#[cfg(feature = "grammars")]
 static GRAMMARS: std::sync::Mutex<Option<GrammarRegistry>> = std::sync::Mutex::new(None);
 
 /// Load grammar plugins into the registry, replacing its contents
 /// (reload semantics). Returns (plugin name, error) per failed grammar.
+#[cfg(feature = "grammars")]
 pub fn load_plugin_grammars(
     specs: &[(String, std::path::PathBuf, crate::extensions::GrammarInfo)],
 ) -> Vec<(String, String)> {
@@ -220,6 +232,7 @@ pub fn load_plugin_grammars(
 }
 
 /// Grammar name a plugin registered for this file extension.
+#[cfg(feature = "grammars")]
 pub fn plugin_grammar_for_extension(ext: &str) -> Option<String> {
     let guard = GRAMMARS.lock().unwrap();
     let reg = guard.as_ref()?;
@@ -227,6 +240,7 @@ pub fn plugin_grammar_for_extension(ext: &str) -> Option<String> {
 }
 
 /// Highlight through a plugin grammar; None = not a plugin grammar.
+#[cfg(feature = "grammars")]
 fn plugin_highlight(name: &str, code: &str) -> Option<Vec<(Range<usize>, u8)>> {
     let mut guard = GRAMMARS.lock().unwrap();
     let reg = guard.as_mut()?;
@@ -256,6 +270,30 @@ fn plugin_highlight(name: &str, code: &str) -> Option<Vec<(Range<usize>, u8)>> {
             Some(Vec::new())
         }
     }
+}
+
+/// Without the feature there is no registry, so every grammar spec
+/// fails the same way and nothing resolves.
+#[cfg(not(feature = "grammars"))]
+pub fn load_plugin_grammars(
+    specs: &[(String, std::path::PathBuf, crate::extensions::GrammarInfo)],
+) -> Vec<(String, String)> {
+    specs
+        .iter()
+        .map(|(p, ..)| {
+            (p.clone(), "grammar plugins are unavailable in this build".to_string())
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "grammars"))]
+pub fn plugin_grammar_for_extension(_ext: &str) -> Option<String> {
+    None
+}
+
+#[cfg(not(feature = "grammars"))]
+fn plugin_highlight(_name: &str, _code: &str) -> Option<Vec<(Range<usize>, u8)>> {
+    None
 }
 
 fn collect_spans(events: impl Iterator<Item = HighlightEvent>) -> Vec<(Range<usize>, u8)> {
@@ -393,8 +431,18 @@ mod grammar_tests {
         )
     }
 
+    #[test]
+    fn grammar_plugins_are_absent_without_the_feature() {
+        assert_eq!(grammars_enabled(), cfg!(feature = "grammars"));
+        if !grammars_enabled() {
+            assert!(load_plugin_grammars(&[]).is_empty());
+            assert_eq!(plugin_grammar_for_extension("graphql"), None);
+        }
+    }
+
     /// One test, sequential scenarios: the registry is a process
     /// global and parallel tests would race it.
+    #[cfg(feature = "grammars")]
     #[test]
     fn grammar_registry_scenarios() {
         let _tables = crate::extensions::table_test_guard();
