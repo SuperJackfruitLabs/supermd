@@ -1,26 +1,33 @@
 #!/bin/bash
-# Build supermd.app and supermd.dmg into dist/.
-# Usage: scripts/bundle_macos.sh [version]   (default: 0.0.0-dev)
+# Build the sandboxed App Store package into dist/.
+# Usage: scripts/bundle_mas.sh <version>
+# Requires: APP_IDENTITY       ("Apple Distribution: ...")
+#           INSTALLER_IDENTITY ("3rd Party Mac Developer Installer: ...")
+#           PROFILE            (path to the .provisionprofile)
 set -euo pipefail
 
-VERSION="${1:-0.0.0-dev}"
+VERSION="${1:?version required}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
-APP="$DIST/supermd.app"
+APP="$DIST/SuperMD.app"
 
-echo "building release binary…"
-cargo build --release --manifest-path "$ROOT/Cargo.toml"
+: "${APP_IDENTITY:?APP_IDENTITY required}"
+: "${INSTALLER_IDENTITY:?INSTALLER_IDENTITY required}"
+: "${PROFILE:?PROFILE required}"
 
-# Clear only our own outputs — dist/ may hold the staged default
-# plugins from build_plugins.sh, which ride inside the bundle.
-rm -rf "$APP" "$DIST"/supermd-*.dmg "$DIST/dmg-staging"
+echo "building sandboxed release binary…"
+# --no-default-features drops `grammars`, and with it tree-sitter's
+# wasmtime 24 — the second JIT. `mas` swaps the plugin host to Pulley.
+cargo build --release --no-default-features --features mas \
+    --manifest-path "$ROOT/Cargo.toml"
+
+rm -rf "$APP" "$DIST"/SuperMD-mas*.pkg
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-
 cp "$ROOT/target/release/supermd" "$APP/Contents/MacOS/supermd"
 cp "$ROOT/assets/icon.icns" "$APP/Contents/Resources/icon.icns"
 
-# CFBundleVersion must strictly increase across uploads and is compared
-# build-to-build; the marketing version is CFBundleShortVersionString.
+# CFBundleVersion must strictly increase per upload; the App Store
+# rejects a re-upload that reuses one. Callers pass a build number.
 BUILD="${BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -76,49 +83,19 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Sign with a Developer ID identity when provided (hardened runtime,
-# notarization-ready); otherwise ad-hoc (right-click → Open on first
-# launch).
-# Default plugins ride inside the bundle (seeded on first run); they
-# must be in place before signing so the signature covers them.
-if [ -d "$ROOT/dist/default-plugins" ]; then
-    mkdir -p "$APP/Contents/Resources/plugins"
-    cp -R "$ROOT/dist/default-plugins/." "$APP/Contents/Resources/plugins/"
-fi
+# All 14 plugins ride inside the bundle — the MAS build has no catalog
+# browser, so anything not shipped is unreachable until the user imports it.
+mkdir -p "$APP/Contents/Resources/plugins"
+cp -R "$ROOT/dist/plugins/." "$APP/Contents/Resources/plugins/"
 
-# Entitlements: the wasm plugin runtime needs JIT under the hardened
-# runtime (see assets/entitlements.plist) — without them the notarized
-# app is SIGKILLed on the first plugin execution.
-if [ -n "${SIGN_IDENTITY:-}" ]; then
-    codesign --force --deep --options runtime --timestamp \
-        --entitlements "$ROOT/assets/entitlements.plist" \
-        --sign "$SIGN_IDENTITY" "$APP"
-else
-    codesign --force --deep --entitlements "$ROOT/assets/entitlements.plist" --sign - "$APP"
-fi
+cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
 
-echo "creating dmg…"
-DMG="$DIST/supermd-${VERSION}.dmg"
-# Dressed DMG: display-named app, /Applications symlink, background,
-# and the committed Finder layout (.DS_Store).
-STAGING="$DIST/dmg-staging"
-rm -rf "$STAGING"
-mkdir -p "$STAGING/.background"
-ditto "$APP" "$STAGING/SuperMD.app"   # ditto preserves signatures
-ln -s /Applications "$STAGING/Applications"
-cp "$ROOT/assets/dmg/bg@2x.png" "$STAGING/.background/bg@2x.png"
-if [ -f "$ROOT/assets/dmg/DS_Store" ]; then
-    cp "$ROOT/assets/dmg/DS_Store" "$STAGING/.DS_Store"
-fi
-hdiutil create -volname SuperMD -srcfolder "$STAGING" -ov -format UDZO \
-    "$DMG" > /dev/null
-rm -rf "$STAGING"
+codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/assets/mas.entitlements" \
+    --sign "$APP_IDENTITY" "$APP"
 
-# The DMG needs its own signature too — spctl assesses the image's
-# primary signature, not just the app inside it.
-if [ -n "${SIGN_IDENTITY:-}" ]; then
-    codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
-fi
+productbuild --component "$APP" /Applications \
+    --sign "$INSTALLER_IDENTITY" \
+    "$DIST/SuperMD-mas-${VERSION}.pkg"
 
-echo "done:"
-ls -lh "$DIST"
+echo "done: $DIST/SuperMD-mas-${VERSION}.pkg"

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Mandatory for the Mac App Store. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <!-- Workspaces and exports the user picks in an open/save panel. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <!-- Reopen-last-workspace across launches (see src/bookmarks.rs). -->
+    <key>com.apple.security.files.bookmarks.app-scope</key>
+    <true/>
+    <!-- Plugin catalog + the host-mediated fetch plugins use for data. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- NOTE: no com.apple.security.cs.* keys. The mas build interprets
+         Pulley bytecode and maps no executable pages; verified with
+         extensions::bench_backends::hardened_runtime_probe. -->
+</dict>
+</plist>
