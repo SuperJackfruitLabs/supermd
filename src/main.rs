@@ -137,15 +137,34 @@ fn recent_menu_items(recents: &[String]) -> Vec<(String, usize)> {
 
 /// Launched bare (Dock/Finder) with reopen enabled: return to the most
 /// recent workspace that still exists.
+///
+/// A sandboxed build gets no Powerbox grant with argv, so a CLI path is
+/// unusable — return None and let the workspace open the panel instead
+/// of failing to read a folder we appear to have been given.
 fn resolve_startup_arg(arg: Option<PathBuf>, settings: &settings::Settings) -> Option<PathBuf> {
-    if arg.is_some() || !settings.reopen_last {
-        return arg;
+    if arg.is_some() {
+        return if crate::bookmarks::needs_scope() { None } else { arg };
+    }
+    if !settings.reopen_last {
+        return None;
     }
     settings
         .recent_workspaces
         .iter()
+        .find(|p| {
+            if crate::bookmarks::needs_scope() {
+                // Sandboxed: existence is unknowable without a grant, so
+                // a resolvable bookmark IS the existence check.
+                settings.workspace_bookmarks.get(*p).is_some_and(|blob| {
+                    !matches!(crate::bookmarks::resolve(blob), crate::bookmarks::Resolution::Missing)
+                })
+            } else {
+                // Unsandboxed. Blobs left by a sandboxed build sharing this
+                // settings.toml are irrelevant here — the path decides.
+                Path::new(p).is_dir()
+            }
+        })
         .map(PathBuf::from)
-        .find(|p| p.is_dir())
 }
 
 /// Queue paths from `file://` open-event URLs for the workspace poll loop.
@@ -497,16 +516,49 @@ mod startup_tests {
             ..Default::default()
         };
         let explicit = PathBuf::from("/explicit/arg");
+        // A sandboxed build has no grant for either an argv path or a
+        // bookmark-less recent, so both collapse to None there.
+        let (want_explicit, want_recent) = if crate::bookmarks::needs_scope() {
+            (None, None)
+        } else {
+            (Some(explicit.clone()), Some(dir.path().to_path_buf()))
+        };
+        assert_eq!(resolve_startup_arg(Some(explicit), &on), want_explicit);
         assert_eq!(
-            resolve_startup_arg(Some(explicit.clone()), &on),
-            Some(explicit)
-        );
-        assert_eq!(
-            resolve_startup_arg(None, &on).as_deref(),
-            Some(dir.path()),
+            resolve_startup_arg(None, &on),
+            want_recent,
             "first existing recent wins"
         );
         assert_eq!(resolve_startup_arg(None, &off), None);
+    }
+
+    #[test]
+    fn unsandboxed_reopen_ignores_bookmarks_left_by_a_sandboxed_build() {
+        // One settings.toml, two builds: the MAS build stores blobs the
+        // Developer ID build cannot resolve. Reopen must still work.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        let settings = settings::Settings {
+            reopen_last: true,
+            recent_workspaces: vec![path.clone()],
+            workspace_bookmarks: std::collections::BTreeMap::from([(path, "00".to_string())]),
+            ..Default::default()
+        };
+        let want = (!crate::bookmarks::needs_scope()).then(|| dir.path().to_path_buf());
+        assert_eq!(resolve_startup_arg(None, &settings), want);
+    }
+
+    #[test]
+    fn sandboxed_builds_treat_a_cli_path_as_unscoped() {
+        let settings = settings::Settings { reopen_last: false, ..Default::default() };
+        let arg = Some(PathBuf::from("/some/dir"));
+        let got = resolve_startup_arg(arg.clone(), &settings);
+        if crate::bookmarks::needs_scope() {
+            // No Powerbox grant comes with argv; the workspace prompts.
+            assert_eq!(got, None);
+        } else {
+            assert_eq!(got, arg);
+        }
     }
 
     #[test]

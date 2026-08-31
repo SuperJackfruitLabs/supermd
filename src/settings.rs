@@ -12,6 +12,10 @@ pub struct Settings {
     pub reopen_last: bool,
     /// Absolute workspace paths, most recent first, max 8.
     pub recent_workspaces: Vec<String>,
+    /// Security-scoped bookmark blobs for `recent_workspaces`, keyed by
+    /// path. Only the sandboxed macOS build writes these; every other
+    /// build leaves the map empty and reopens by path.
+    pub workspace_bookmarks: std::collections::BTreeMap<String, String>,
     /// Run the first formatter plugin before every save (default off).
     pub format_on_save: bool,
     /// Per-plugin capability grants ("workspace-read") or refusals
@@ -58,6 +62,7 @@ impl Default for Settings {
             dark_theme: "Jackfruit Dark".into(),
             reopen_last: true,
             recent_workspaces: Vec::new(),
+            workspace_bookmarks: Default::default(),
             format_on_save: false,
             plugin_grants: Default::default(),
             flux: FluxSettings::default(),
@@ -67,11 +72,17 @@ impl Default for Settings {
 
 impl Settings {
     /// Record a just-opened workspace: dedupe, push front, cap at 8.
-    pub fn note_workspace(&mut self, path: &Path) {
+    /// `bookmark` is the hex-encoded scoped grant, when this build
+    /// captures one.
+    pub fn note_workspace(&mut self, path: &Path, bookmark: Option<String>) {
         let p = path.to_string_lossy().into_owned();
         self.recent_workspaces.retain(|x| *x != p);
-        self.recent_workspaces.insert(0, p);
+        self.recent_workspaces.insert(0, p.clone());
         self.recent_workspaces.truncate(8);
+        if let Some(blob) = bookmark {
+            self.workspace_bookmarks.insert(p, blob);
+        }
+        crate::bookmarks::prune(&mut self.workspace_bookmarks, &self.recent_workspaces);
     }
 }
 
@@ -189,13 +200,42 @@ mod tests {
         let mut s = Settings::default();
         assert!(s.reopen_last);
         for i in 0..10 {
-            s.note_workspace(Path::new(&format!("/w/{i}")));
+            s.note_workspace(Path::new(&format!("/w/{i}")), None);
         }
         assert_eq!(s.recent_workspaces.len(), 8);
         assert_eq!(s.recent_workspaces[0], "/w/9");
-        s.note_workspace(Path::new("/w/5"));
+        s.note_workspace(Path::new("/w/5"), None);
         assert_eq!(s.recent_workspaces[0], "/w/5");
         assert_eq!(s.recent_workspaces.iter().filter(|p| *p == "/w/5").count(), 1);
+    }
+
+    #[test]
+    fn note_workspace_stores_and_prunes_bookmarks() {
+        let mut s = Settings::default();
+        for i in 0..9 {
+            s.note_workspace(Path::new(&format!("/w/{i}")), Some(format!("{i:02x}")));
+        }
+        // Eight recents cap, and the bookmark map never outgrows them.
+        assert_eq!(s.recent_workspaces.len(), 8);
+        assert_eq!(s.workspace_bookmarks.len(), 8);
+        assert!(!s.workspace_bookmarks.contains_key("/w/0"));
+        assert_eq!(s.workspace_bookmarks.get("/w/8"), Some(&"08".to_string()));
+    }
+
+    #[test]
+    fn note_workspace_without_a_bookmark_leaves_the_map_alone() {
+        let mut s = Settings::default();
+        s.note_workspace(Path::new("/w/a"), None);
+        assert_eq!(s.recent_workspaces, vec!["/w/a".to_string()]);
+        assert!(s.workspace_bookmarks.is_empty());
+    }
+
+    #[test]
+    fn settings_without_bookmarks_still_parse() {
+        // Forward/backward compatibility: an old settings.toml has no
+        // workspace_bookmarks key.
+        let s: Settings = toml::from_str("reopen_last = true\n").unwrap();
+        assert!(s.workspace_bookmarks.is_empty());
     }
 
     #[test]

@@ -95,7 +95,8 @@ pub(crate) fn ensure_welcome_file(config_dir: &Path) -> PathBuf {
 fn record_recent(root: &Path) {
     let dir = crate::settings::config_dir();
     let mut settings = crate::settings::load(&dir);
-    settings.note_workspace(root);
+    let blob = crate::bookmarks::create(root);
+    settings.note_workspace(root, blob);
     if let Err(err) = crate::settings::save(&dir, &settings) {
         eprintln!("supermd: cannot save settings: {err}");
     }
