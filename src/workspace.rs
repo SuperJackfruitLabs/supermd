@@ -403,23 +403,26 @@ impl Workspace {
         };
         workspace.refresh_git_status();
 
-        // One quiet update check per launch; failures are silent.
-        cx.spawn(async move |this, cx| {
-            let tag = cx
-                .background_executor()
-                .spawn(async { crate::update::fetch_latest_tag() })
-                .await;
-            if let Some(tag) = tag {
-                if crate::update::is_newer(env!("CARGO_PKG_VERSION"), &tag) {
-                    this.update(cx, |this, cx| {
-                        this.update_available = Some(SharedString::from(tag));
-                        cx.notify();
-                    })
-                    .ok();
+        // One quiet update check per launch; failures are silent. The
+        // App Store build ships no checker, so it spawns no task either.
+        if crate::update::checks_enabled() {
+            cx.spawn(async move |this, cx| {
+                let tag = cx
+                    .background_executor()
+                    .spawn(async { crate::update::fetch_latest_tag() })
+                    .await;
+                if let Some(tag) = tag {
+                    if crate::update::is_newer(env!("CARGO_PKG_VERSION"), &tag) {
+                        this.update(cx, |this, cx| {
+                            this.update_available = Some(SharedString::from(tag));
+                            cx.notify();
+                        })
+                        .ok();
+                    }
                 }
-            }
-        })
-        .detach();
+            })
+            .detach();
+        }
 
         workspace
     }
@@ -2306,7 +2309,7 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.about_checking {
+        if self.about_checking || !crate::update::checks_enabled() {
             return;
         }
         self.about_checking = true;

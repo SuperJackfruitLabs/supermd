@@ -15,6 +15,9 @@ fn detect(exe: &Path) -> bool {
 /// running from a mounted disk image or a translocated copy.
 /// Always false off macOS.
 pub fn needs_install(exe: &Path) -> bool {
+    if cfg!(feature = "mas") {
+        return false; // the App Store installs into /Applications itself
+    }
     crate::platform::MACOS && detect(exe)
 }
 
@@ -57,6 +60,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn app_store_builds_never_offer_to_move_themselves() {
+        if cfg!(feature = "mas") {
+            assert!(!needs_install(std::path::Path::new(
+                "/Users/x/Downloads/SuperMD.app"
+            )));
+        }
+    }
+
+    #[test]
     fn detects_dmg_and_translocated_paths() {
         assert!(detect(Path::new(
             "/Volumes/SuperMD/SuperMD.app/Contents/MacOS/supermd"
@@ -74,13 +86,15 @@ mod tests {
 
     #[test]
     fn needs_install_gates_on_platform_and_location() {
-        // Pure path inspection — never launches or moves anything.
+        // Pure path inspection — never launches or moves anything. The
+        // App Store places the bundle itself, so the MAS build never offers.
+        let offers = cfg!(target_os = "macos") && !cfg!(feature = "mas");
         let dmg = Path::new("/Volumes/SuperMD/SuperMD.app/Contents/MacOS/supermd");
-        assert_eq!(needs_install(dmg), cfg!(target_os = "macos"));
+        assert_eq!(needs_install(dmg), offers);
         let translocated = Path::new(
             "/private/var/folders/x/AppTranslocation/9F41/d/SuperMD.app/Contents/MacOS/supermd",
         );
-        assert_eq!(needs_install(translocated), cfg!(target_os = "macos"));
+        assert_eq!(needs_install(translocated), offers);
         assert!(!needs_install(Path::new(
             "/Applications/SuperMD.app/Contents/MacOS/supermd"
         )));
