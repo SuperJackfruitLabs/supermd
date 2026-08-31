@@ -167,12 +167,24 @@ fn resolve_startup_arg(arg: Option<PathBuf>, settings: &settings::Settings) -> O
         .map(PathBuf::from)
 }
 
-/// Queue paths from `file://` open-event URLs for the workspace poll loop.
-fn queue_open_urls(pending: &std::sync::Mutex<Vec<PathBuf>>, urls: Vec<String>) {
+/// Something a macOS open event asked us to do, drained by the
+/// workspace's poll loop.
+#[derive(Debug, PartialEq)]
+pub enum PendingOpen {
+    Path(PathBuf),
+    /// `supermd://install-plugin?name=X` — the website's Install link.
+    InstallPlugin(String),
+}
+
+/// Queue work from open-event URLs (`file://` opens and `supermd://`
+/// plugin-install handoffs) for the workspace poll loop.
+fn queue_open_urls(pending: &std::sync::Mutex<Vec<PendingOpen>>, urls: Vec<String>) {
     let mut lock = pending.lock().unwrap();
     for url in urls {
         if let Some(path) = file_url_to_path(&url) {
-            lock.push(path);
+            lock.push(PendingOpen::Path(path));
+        } else if let Some(name) = catalog::parse_install_url(&url) {
+            lock.push(PendingOpen::InstallPlugin(name));
         }
     }
 }
@@ -317,7 +329,7 @@ fn main() {
 
     // Files/folders arriving via macOS open events (double-click, Dock
     // drop, `open -a`). Drained by the workspace's poll loop.
-    let pending_opens: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let pending_opens: Arc<std::sync::Mutex<Vec<PendingOpen>>> = Arc::default();
 
     let app = Application::new().with_assets(Assets);
     app.on_open_urls({
@@ -574,7 +586,28 @@ mod startup_tests {
         );
         assert_eq!(
             *pending.lock().unwrap(),
-            vec![PathBuf::from("/tmp/a b.md"), PathBuf::from("/tmp/c.md")]
+            vec![
+                PendingOpen::Path(PathBuf::from("/tmp/a b.md")),
+                PendingOpen::Path(PathBuf::from("/tmp/c.md")),
+            ]
+        );
+    }
+
+    #[test]
+    fn open_urls_queue_plugin_install_handoffs() {
+        let pending = std::sync::Mutex::new(Vec::new());
+        queue_open_urls(
+            &pending,
+            vec![
+                "supermd://install-plugin?name=calc".to_string(),
+                // A foreign scheme and a traversal attempt both drop.
+                "supermd://install-plugin?name=../evil".to_string(),
+                "otherapp://install-plugin?name=calc".to_string(),
+            ],
+        );
+        assert_eq!(
+            *pending.lock().unwrap(),
+            vec![PendingOpen::InstallPlugin("calc".to_string())]
         );
     }
 

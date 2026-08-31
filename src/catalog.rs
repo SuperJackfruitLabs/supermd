@@ -148,6 +148,29 @@ pub fn validate_plugin_zip(bytes: &[u8], expected_name: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Extract the plugin name from a `supermd://install-plugin?name=X`
+/// handoff. Anything else — a foreign scheme, a different host, a name
+/// with path separators — is rejected outright; the name is then looked
+/// up in the pinned catalog, so only known plugins can ever install.
+pub fn parse_install_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("supermd://install-plugin?")?;
+    let name = rest
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("name="))?
+        .trim()
+        .to_string();
+    let safe = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    safe.then_some(name)
+}
+
+/// Look one catalog entry up by name.
+pub fn entry_by_name<'a>(entries: &'a [CatalogEntry], name: &str) -> Option<&'a CatalogEntry> {
+    entries.iter().find(|e| e.name == name)
+}
+
 /// Validate and install an already-fetched plugin archive. Shared by
 /// the catalog install (which fetches first) and the local Import
 /// command (where the user supplied the bytes).
@@ -253,6 +276,34 @@ mod install_tests {
             ("demo/plugin.toml", b"name=\"demo\"\nversion=\"0.1.0\"\nformats=true\n"),
             ("demo/plugin.wasm", b"\0asm-stub"),
         ])
+    }
+
+    #[test]
+    fn parses_a_plugin_name_out_of_an_install_url() {
+        assert_eq!(
+            parse_install_url("supermd://install-plugin?name=calc"),
+            Some("calc".into())
+        );
+    }
+
+    #[test]
+    fn rejects_install_urls_that_are_not_ours() {
+        assert_eq!(parse_install_url("https://evil.example.com/?name=calc"), None);
+        assert_eq!(parse_install_url("supermd://open?name=calc"), None);
+        assert_eq!(parse_install_url("supermd://install-plugin"), None);
+    }
+
+    #[test]
+    fn rejects_a_name_with_path_separators() {
+        assert_eq!(parse_install_url("supermd://install-plugin?name=../evil"), None);
+        assert_eq!(parse_install_url("supermd://install-plugin?name=a/b"), None);
+    }
+
+    #[test]
+    fn finds_a_catalog_entry_by_name() {
+        let entries = vec![entry_for(&good_zip())];
+        assert!(entry_by_name(&entries, "demo").is_some());
+        assert!(entry_by_name(&entries, "nope").is_none());
     }
 
     #[test]

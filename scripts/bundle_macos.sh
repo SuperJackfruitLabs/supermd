@@ -59,6 +59,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
         <array><string>public.folder</string></array>
       </dict>
     </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleURLName</key><string>com.superjackfruitlabs.supermd.install</string>
+        <key>CFBundleURLSchemes</key><array><string>supermd</string></array>
+      </dict>
+    </array>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
 </dict>
