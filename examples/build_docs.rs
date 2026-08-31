@@ -145,6 +145,78 @@ fn escape_attr(s: &str) -> String {
     s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;")
 }
 
+// ── plugin install grid ─────────────────────────────────────────────
+// The website's half of the `supermd://` handoff. The App Store build
+// ships no catalog browser, so this page is where a plugin is chosen;
+// generating it from plugins/catalog.json means a new plugin cannot ship
+// without a button, and the sha256-pinned download stays the same one
+// the in-app installer uses.
+
+/// Marker in docs/site/*.md that the generated grid replaces.
+const GRID_MARKER: &str = "<!-- plugin-install-grid -->";
+
+/// Render one install card per catalog entry.
+fn plugin_install_grid(catalog_json: &str) -> Result<String, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(catalog_json).map_err(|e| format!("catalog.json: {e}"))?;
+    let plugins = value
+        .get("plugins")
+        .and_then(|p| p.as_array())
+        .ok_or("catalog.json needs a plugins array")?;
+    if plugins.is_empty() {
+        return Err("catalog.json lists no plugins".to_string());
+    }
+    let mut out = String::from("<div class=\"plugin-grid\">\n");
+    for entry in plugins {
+        let field = |k: &str| entry.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+        let name = field("name");
+        let download = field("download");
+        if name.is_empty() || download.is_empty() {
+            return Err(format!("catalog entry needs name and download: {entry}"));
+        }
+        let caps: Vec<&str> = entry
+            .get("capabilities")
+            .and_then(|c| c.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        // The same wording the app's consent banner uses, so the page and
+        // the prompt cannot describe a capability differently.
+        let blurb = if caps.contains(&"net") {
+            Some("needs network access — asks per site")
+        } else if caps.contains(&"workspace-read") {
+            Some("reads your open folder — asks first")
+        } else {
+            None
+        };
+        out.push_str(&format!(
+            "  <div class=\"plugin-card\">\n    <h3>{}</h3>\n    <p>{}</p>\n",
+            escape_attr(name),
+            escape_attr(field("description"))
+        ));
+        if let Some(blurb) = blurb {
+            out.push_str(&format!("    <p class=\"cap\">{blurb}</p>\n"));
+        }
+        out.push_str(&format!(
+            "    <p class=\"actions\">\
+             <a class=\"install\" href=\"supermd://install-plugin?name={}\">Install in SuperMD</a>\
+             <a class=\"zip\" href=\"{}\">Download .zip</a></p>\n  </div>\n",
+            escape_attr(name),
+            escape_attr(download)
+        ));
+    }
+    out.push_str("</div>\n");
+    Ok(out)
+}
+
+/// Swap the marker for the grid. Returns whether this page carried one,
+/// so `main` can fail rather than silently ship a page without buttons.
+fn inject_plugin_grid(html: &str, grid: &str) -> (String, bool) {
+    if !html.contains(GRID_MARKER) {
+        return (html.to_string(), false);
+    }
+    (html.replace(GRID_MARKER, grid), true)
+}
+
 // ── diagram previews ────────────────────────────────────────────────
 // Fenced examples whose content is a ```mermaid or ```dot block get a
 // real rendered preview injected below the code, in light and dark,
@@ -489,6 +561,26 @@ const PAGE_CSS: &str = r#"  :root {
     .diagram-preview .dark { display: block; }
   }
   .diagram-preview figcaption { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .plugin-grid {
+    display: grid; gap: 12px; margin: 18px 0 24px;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  }
+  .plugin-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; display: flex; flex-direction: column;
+  }
+  .plugin-card h3 { margin: 0 0 6px; font-size: 15px; color: var(--strong); }
+  .plugin-card p { margin: 0 0 10px; font-size: 13px; color: var(--fg); }
+  .plugin-card .cap { color: var(--accent); font-size: 12px; }
+  .plugin-card .actions {
+    margin: auto 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  }
+  .plugin-card .install {
+    background: var(--accent); color: var(--bg); border-radius: 6px;
+    padding: 5px 10px; font-size: 13px; white-space: nowrap;
+  }
+  .plugin-card .zip { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .plugin-card .zip:hover { color: var(--accent); }
   @media (max-width: 900px) {
     .layout { flex-direction: column; }
     .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); min-height: 0; }
@@ -552,14 +644,29 @@ fn main() -> Result<(), String> {
         .collect();
     check_drift(&nav, &files)?;
 
+    // The install grid is injected AFTER rewrite_links: its supermd://
+    // hrefs are not page links and rewrite_links would reject them.
+    let grid = plugin_install_grid(
+        &std::fs::read_to_string(root.join("plugins/catalog.json"))
+            .map_err(|e| format!("plugins/catalog.json: {e}"))?,
+    )?;
+
     let slugs: BTreeSet<String> = nav.iter().map(|p| slug_of(&p.file)).collect();
     let mut rendered: Vec<(String, String)> = Vec::new(); // (slug, html)
+    let mut grid_pages = 0;
     for page in &nav {
         let markdown = std::fs::read_to_string(src_dir.join(&page.file))
             .map_err(|e| format!("{}: {e}", page.file))?;
         let html = render_page(page, &nav, &markdown)?;
         let html = rewrite_links(&html, &slugs)?;
+        let (html, had_grid) = inject_plugin_grid(&html, &grid);
+        grid_pages += usize::from(had_grid);
         rendered.push((slug_of(&page.file), html));
+    }
+    if grid_pages != 1 {
+        return Err(format!(
+            "expected exactly one page carrying {GRID_MARKER}, found {grid_pages}"
+        ));
     }
     internal_links_resolve(&rendered, &slugs)?;
 
@@ -732,5 +839,67 @@ group = "Extending SuperMD"
         assert!(internal_links_resolve(&ok, &slugs()).is_ok());
         let bad = vec![("".to_string(), r#"<a href="/docs/ghost/">g</a>"#.to_string())];
         assert!(internal_links_resolve(&bad, &slugs()).is_err());
+    }
+
+    const CATALOG: &str = r#"{
+      "catalog_version": 1,
+      "plugins": [
+        {"name":"calc","description":"Calc & prose","version":"0.1.0","capabilities":[],
+         "download":"https://example.invalid/plugin-calc.zip","sha256":"00"},
+        {"name":"url-title","description":"Link titles","version":"0.1.0","capabilities":["net"],
+         "download":"https://example.invalid/plugin-url-title.zip","sha256":"11"}
+      ]
+    }"#;
+
+    #[test]
+    fn install_grid_renders_a_card_per_catalog_entry() {
+        let grid = plugin_install_grid(CATALOG).unwrap();
+        assert_eq!(grid.matches("plugin-card").count(), 2);
+        // Both routes on every card: the handoff and the raw archive.
+        assert!(grid.contains("supermd://install-plugin?name=calc"));
+        assert!(grid.contains("supermd://install-plugin?name=url-title"));
+        assert_eq!(grid.matches("class=\"zip\"").count(), 2);
+        assert!(grid.contains("https://example.invalid/plugin-calc.zip"));
+        // Capabilities are shown in the app's own words, and only when declared.
+        assert_eq!(grid.matches("class=\"cap\"").count(), 1);
+        assert!(grid.contains("needs network access"));
+        // Ampersands in text must not break the markup.
+        assert!(grid.contains("Calc &amp; prose"));
+    }
+
+    #[test]
+    fn install_grid_rejects_a_catalog_it_cannot_render() {
+        assert!(plugin_install_grid("not json").is_err());
+        assert!(plugin_install_grid(r#"{"catalog_version":1}"#).is_err());
+        assert!(plugin_install_grid(r#"{"plugins":[]}"#).is_err());
+        // An entry with no download would render a dead button.
+        let no_download = r#"{"plugins":[{"name":"x","description":"d","capabilities":[]}]}"#;
+        assert!(plugin_install_grid(no_download).is_err());
+    }
+
+    #[test]
+    fn grid_injection_replaces_the_marker_and_reports_it() {
+        let (out, had) = inject_plugin_grid(&format!("<p>a</p>{GRID_MARKER}<p>b</p>"), "GRID");
+        assert!(had);
+        assert_eq!(out, "<p>a</p>GRID<p>b</p>");
+        let (untouched, had) = inject_plugin_grid("<p>no marker</p>", "GRID");
+        assert!(!had);
+        assert_eq!(untouched, "<p>no marker</p>");
+    }
+
+    /// The shipped catalog must render, and the page that promises the
+    /// buttons must be the one carrying the marker.
+    #[test]
+    fn the_real_catalog_and_marker_stay_in_step() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let catalog = std::fs::read_to_string(root.join("plugins/catalog.json")).unwrap();
+        let grid = plugin_install_grid(&catalog).unwrap();
+        let entries = serde_json::from_str::<serde_json::Value>(&catalog).unwrap()["plugins"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(grid.matches("plugin-card").count(), entries);
+        let md = std::fs::read_to_string(root.join("docs/site/plugins.md")).unwrap();
+        assert!(md.contains(GRID_MARKER), "plugins.md must carry the grid marker");
     }
 }

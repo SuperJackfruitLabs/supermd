@@ -6,5 +6,5 @@ Exec=supermd %F
 Icon=supermd
 Terminal=false
 Categories=Utility;TextEditor;Development;
-MimeType=text/markdown;text/plain;
+MimeType=text/markdown;text/plain;x-scheme-handler/supermd;
 StartupWMClass=supermd

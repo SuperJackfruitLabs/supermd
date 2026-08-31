@@ -43,6 +43,10 @@ The first eight in the table above come **pre-installed** — SuperMD seeds them
 
 For the rest (and to re-install anything you deleted), open the command palette and run **Install Plugins…** — pick from the catalog and it downloads from the SuperMD repository, verifies, and installs in one step.
 
+Or install one straight from this page. **Install in SuperMD** hands the plugin's name to the app, which shows you what it is and what it wants access to before anything is downloaded; **Download .zip** gets you the archive to feed **Tools → Import Plugin…**. Both land the same sha256-verified file the in-app installer uses. If you do not have SuperMD yet, [download it first](https://github.com/SuperJackfruitLabs/supermd/releases/latest).
+
+<!-- plugin-install-grid -->
+
 Manual installation also works: a plugin is just a folder. Drop it into:
 
 - macOS / Linux: `~/.supermd/plugins/`
@@ -55,7 +59,7 @@ then run **Reload Plugins** from the palette (or restart). If a plugin fails to 
 The App Store version of SuperMD runs inside Apple's sandbox, which changes how plugins arrive — every plugin still works the same once installed.
 
 - **All fourteen plugins ship inside the app.** Nothing has to be downloaded to use them.
-- **There is no in-app catalog to browse.** Browse plugins on the website and click **Install** there: the link hands the plugin's name to SuperMD, which asks you to confirm — naming the plugin and anything it wants access to — before installing.
+- **There is no in-app catalog to browse.** Use the **Install in SuperMD** buttons above instead: the link hands the plugin's name to SuperMD, which asks you to confirm — naming the plugin and anything it wants access to — before installing.
 - **Import Plugin…** (Tools menu) installs a plugin archive you downloaded yourself. This route works in every build.
 - **Grammar plugins are unavailable.** A plugin that adds syntax highlighting for a new language (the GraphQL plugin is the only one today) needs a compiler Apple's sandbox does not permit. GraphQL code renders as plain text there; every other plugin is unaffected.
 
