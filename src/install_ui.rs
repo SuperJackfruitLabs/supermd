@@ -39,6 +39,13 @@ pub(crate) fn capability_blurb(capabilities: &[String]) -> Option<&'static str> 
     }
 }
 
+/// The App Store build shows no browsable catalog: a list of
+/// downloadable plugins reads as a storefront for other code under
+/// DPLA 3.3.2(b). Install arrives via Import… or a supermd:// link.
+pub fn catalog_browsable() -> bool {
+    !cfg!(feature = "mas")
+}
+
 impl InstallOverlay {
     pub fn new(
         entries: Vec<CatalogEntry>,
@@ -46,7 +53,9 @@ impl InstallOverlay {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            entries,
+            // Dropped rather than merely hidden: an unlistable entry must
+            // not be reachable by keyboard selection either.
+            entries: if catalog_browsable() { entries } else { Vec::new() },
             installed,
             selected: 0,
             focus_handle: cx.focus_handle(),
@@ -206,7 +215,24 @@ impl Render for InstallOverlay {
                     .text_color(t.fg_strong)
                     .child("Install Plugins"),
             )
-            .child(div().flex_1().min_h_0().py_1().child(list))
+            .child(if catalog_browsable() {
+                div().flex_1().min_h_0().py_1().child(list).into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.))
+                    .text_color(t.fg_muted)
+                    .child(
+                        "Browse plugins at supermd.app and click Install there, \
+                         or use Tools → Import Plugin… for one you have downloaded.",
+                    )
+                    .into_any_element()
+            })
             .child(
                 div()
                     .px_3()
@@ -258,6 +284,17 @@ mod tests {
         (overlay, cx)
     }
 
+    #[gpui::test]
+    fn app_store_builds_list_no_catalog(cx: &mut TestAppContext) {
+        assert_eq!(catalog_browsable(), !cfg!(feature = "mas"));
+        if catalog_browsable() {
+            return;
+        }
+        let overlay =
+            cx.update(|cx| cx.new(|cx| InstallOverlay::new(vec![entry("a", &[])], vec![], cx)));
+        cx.update(|cx| assert!(overlay.read(cx).entries.is_empty()));
+    }
+
     #[test]
     fn capability_blurbs_speak_user() {
         assert!(capability_blurb(&["net".to_string()]).unwrap().contains("network"));
@@ -267,6 +304,11 @@ mod tests {
 
     #[gpui::test]
     fn navigation_wraps_and_confirm_emits_install(cx: &mut TestAppContext) {
+        // Rows only exist where the catalog is browsable; see
+        // app_store_builds_list_no_catalog for the other build.
+        if !catalog_browsable() {
+            return;
+        }
         let entries = vec![entry("alpha", &[]), entry("beta", &["net"]), entry("gamma", &[])];
         let (overlay, cx) = open(cx, entries, Vec::new());
         let got: Rc<RefCell<Option<String>>> = Rc::default();
@@ -293,6 +335,9 @@ mod tests {
 
     #[gpui::test]
     fn installed_entries_do_not_emit_and_dismiss_works(cx: &mut TestAppContext) {
+        if !catalog_browsable() {
+            return;
+        }
         let entries = vec![entry("alpha", &[])];
         let (overlay, cx) = open(cx, entries, vec!["alpha".to_string()]);
         let events: Rc<RefCell<Vec<&'static str>>> = Rc::default();

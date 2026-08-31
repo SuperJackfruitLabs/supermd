@@ -33,6 +33,8 @@ actions!(
         ToggleSearch,
         TogglePalette,
         OpenPluginsFolder,
+        ImportPlugin,
+        RevealSettingsFolder,
         ReloadPlugins,
         TogglePreview,
         ShowChanges,
@@ -91,11 +93,28 @@ pub(crate) fn ensure_welcome_file(config_dir: &Path) -> PathBuf {
     path
 }
 
+/// Why Show Changes found no baseline. Under the sandbox, `gix::discover`
+/// walks upward out of the granted scope and fails silently; say so
+/// rather than implying the folder has no history.
+pub fn git_scope_hint(has_baseline: bool, repo_root_above_workspace: bool) -> Option<&'static str> {
+    (!has_baseline && repo_root_above_workspace)
+        .then_some("the git repository is outside the opened folder")
+}
+
+/// Whether "no baseline" here might mean "out of scope" rather than "no
+/// repository". Only a sandboxed build can be fooled, and only for a
+/// folder that is not itself a repo root — `gix::discover` stops at a
+/// `.git` inside the grant, so finding one settles the question.
+pub fn repo_root_may_be_out_of_scope(workspace_root: &Path) -> bool {
+    crate::bookmarks::needs_scope() && !workspace_root.join(".git").exists()
+}
+
 /// Persist a just-opened workspace root into the recents list.
 fn record_recent(root: &Path) {
     let dir = crate::settings::config_dir();
     let mut settings = crate::settings::load(&dir);
-    settings.note_workspace(root);
+    let blob = crate::bookmarks::create(root);
+    settings.note_workspace(root, blob);
     if let Err(err) = crate::settings::save(&dir, &settings) {
         eprintln!("supermd: cannot save settings: {err}");
     }
@@ -208,6 +227,9 @@ pub struct Workspace {
     /// (plugin, capability) awaiting a consent decision; capability is
     /// "workspace-read" or "net:<domain>".
     consent_request: Option<(String, String)>,
+    /// A `supermd://` handoff resolved against the catalog, awaiting the
+    /// user's yes or no.
+    install_request: Option<crate::catalog::CatalogEntry>,
     /// Index of the transient preview tab (at most one; italic title).
     preview_tab: Option<usize>,
     /// Newer released version tag, when the launch check found one.
@@ -350,6 +372,7 @@ impl Workspace {
             install_overlay: None,
             command_error: None,
             consent_request: None,
+            install_request: None,
             preview_tab: None,
             update_available: None,
             startup_recents: crate::settings::load(&crate::settings::config_dir())
@@ -385,23 +408,26 @@ impl Workspace {
         };
         workspace.refresh_git_status();
 
-        // One quiet update check per launch; failures are silent.
-        cx.spawn(async move |this, cx| {
-            let tag = cx
-                .background_executor()
-                .spawn(async { crate::update::fetch_latest_tag() })
-                .await;
-            if let Some(tag) = tag {
-                if crate::update::is_newer(env!("CARGO_PKG_VERSION"), &tag) {
-                    this.update(cx, |this, cx| {
-                        this.update_available = Some(SharedString::from(tag));
-                        cx.notify();
-                    })
-                    .ok();
+        // One quiet update check per launch; failures are silent. The
+        // App Store build ships no checker, so it spawns no task either.
+        if crate::update::checks_enabled() {
+            cx.spawn(async move |this, cx| {
+                let tag = cx
+                    .background_executor()
+                    .spawn(async { crate::update::fetch_latest_tag() })
+                    .await;
+                if let Some(tag) = tag {
+                    if crate::update::is_newer(env!("CARGO_PKG_VERSION"), &tag) {
+                        this.update(cx, |this, cx| {
+                            this.update_available = Some(SharedString::from(tag));
+                            cx.notify();
+                        })
+                        .ok();
+                    }
                 }
-            }
-        })
-        .detach();
+            })
+            .detach();
+        }
 
         workspace
     }
@@ -607,7 +633,7 @@ impl Workspace {
     /// Poll the shared open-event queue (fed by `on_open_urls`).
     pub fn watch_external_opens(
         &mut self,
-        pending: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+        pending: std::sync::Arc<std::sync::Mutex<Vec<crate::PendingOpen>>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -616,13 +642,27 @@ impl Workspace {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(300))
                     .await;
-                let paths: Vec<PathBuf> = std::mem::take(&mut *pending.lock().unwrap());
-                if paths.is_empty() {
+                let queued: Vec<crate::PendingOpen> =
+                    std::mem::take(&mut *pending.lock().unwrap());
+                if queued.is_empty() {
                     continue;
+                }
+                let mut paths = Vec::new();
+                let mut installs = Vec::new();
+                for item in queued {
+                    match item {
+                        crate::PendingOpen::Path(p) => paths.push(p),
+                        crate::PendingOpen::InstallPlugin(name) => installs.push(name),
+                    }
                 }
                 let live = this
                     .update_in(cx, |workspace, window, cx| {
-                        workspace.open_external_paths(paths, window, cx);
+                        if !paths.is_empty() {
+                            workspace.open_external_paths(paths, window, cx);
+                        }
+                        for name in installs {
+                            workspace.request_plugin_install(name, window, cx);
+                        }
                     })
                     .is_ok();
                 if !live {
@@ -1174,6 +1214,12 @@ impl Workspace {
 
     /// Fetch the catalog (background) and show the install overlay.
     fn open_install_overlay(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // No browsable catalog means no reason to fetch one: the overlay
+        // just points at Import… and the website.
+        if !crate::install_ui::catalog_browsable() {
+            self.show_install_overlay(Vec::new(), _window, cx);
+            return;
+        }
         let fetch = cx
             .try_global::<crate::catalog::CatalogFetcher>()
             .map(|f| f.0.clone())
@@ -1260,6 +1306,71 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// What the `supermd://` confirmation says. The name comes from the
+    /// URL but the capabilities come from the pinned catalog entry, so a
+    /// link can never understate what it is asking for.
+    fn install_confirmation(entry: &crate::catalog::CatalogEntry) -> String {
+        match crate::install_ui::capability_blurb(&entry.capabilities) {
+            Some(blurb) => format!("Install plugin \"{}\"? It {blurb}.", entry.name),
+            None => format!("Install plugin \"{}\"?", entry.name),
+        }
+    }
+
+    /// Handle a `supermd://install-plugin?name=X` handoff: resolve the
+    /// name against the pinned catalog and ASK. Never installs silently —
+    /// the link supplies a name, not code.
+    fn request_plugin_install(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if crate::settings::config_dir().join("plugins").join(&name).is_dir() {
+            self.show_command_error(format!("{name} is already installed"), cx);
+            return;
+        }
+        let fetch = cx
+            .try_global::<crate::catalog::CatalogFetcher>()
+            .map(|f| f.0.clone())
+            .unwrap_or_else(crate::catalog::ureq_fetcher);
+        let run = cx.background_executor().spawn(async move {
+            let entries = fetch(crate::catalog::CATALOG_URL)
+                .and_then(|bytes| String::from_utf8(bytes).map_err(|e| e.to_string()))
+                .and_then(|json| crate::catalog::parse_catalog(&json))?;
+            crate::catalog::entry_by_name(&entries, &name)
+                .cloned()
+                .ok_or_else(|| format!("no plugin named {name} in the catalog"))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = run.await;
+            this.update(cx, |this, cx| match result {
+                Ok(entry) => {
+                    this.install_request = Some(entry);
+                    cx.notify();
+                }
+                Err(e) => this.show_command_error(e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn resolve_install_request(
+        &mut self,
+        allow: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.install_request.take() else {
+            return;
+        };
+        if allow {
+            self.install_catalog_plugin(entry, window, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn show_command_error(&mut self, msg: String, cx: &mut Context<Self>) {
@@ -1598,6 +1709,57 @@ impl Workspace {
         _cx: &mut Context<Self>,
     ) {
         let dir = crate::settings::config_dir().join("plugins");
+        let _ = std::fs::create_dir_all(&dir);
+        crate::platform::reveal_dir(&dir);
+    }
+
+    /// Install a plugin the user downloaded themselves. The floor of the
+    /// install story: the app never fetches code, so App Review 2.4.5(iv)
+    /// does not engage. Ships in every build, not just the sandboxed one.
+    fn import_plugin(&mut self, _: &ImportPlugin, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let result = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    let name = crate::catalog::plugin_name_from_zip(&bytes)?;
+                    crate::catalog::install_plugin_from_bytes(
+                        &bytes,
+                        &name,
+                        &crate::settings::config_dir().join("plugins"),
+                    )
+                    .map(|_| name)
+                });
+            this.update(cx, |this, cx| {
+                this.show_command_error(
+                    match result {
+                        Ok(name) => format!("Installed {name} — restart to load it"),
+                        Err(e) => e,
+                    },
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sandboxed builds relocate ~/.supermd into the app container,
+    /// where themes and settings.toml are otherwise unreachable.
+    fn reveal_settings_folder(
+        &mut self,
+        _: &RevealSettingsFolder,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let dir = crate::settings::config_dir();
         let _ = std::fs::create_dir_all(&dir);
         crate::platform::reveal_dir(&dir);
     }
@@ -2275,7 +2437,7 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.about_checking {
+        if self.about_checking || !crate::update::checks_enabled() {
             return;
         }
         self.about_checking = true;
@@ -3872,6 +4034,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_plugins_folder))
+            .on_action(cx.listener(Self::reveal_settings_folder))
+            .on_action(cx.listener(Self::import_plugin))
             .on_action(cx.listener(Self::reload_plugins))
             .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent_ix(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent_ix(1, w, cx)))
@@ -4296,6 +4460,63 @@ impl Render for Workspace {
                         ),
                 )
             })
+            .when_some(self.install_request.clone(), |root, entry| {
+                let t = theme(cx);
+                let msg = Self::install_confirmation(&entry);
+                root.child(
+                    div()
+                        .absolute()
+                        .bottom_4()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_3()
+                                .py(px(8.))
+                                .rounded_md()
+                                .bg(t.panel_bg)
+                                .border_1()
+                                .border_color(t.border)
+                                .shadow_lg()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_3()
+                                .text_size(px(12.))
+                                .child(div().text_color(t.fg).child(SharedString::from(msg)))
+                                .child(
+                                    div()
+                                        .id("install-allow")
+                                        .px_2()
+                                        .py(px(3.))
+                                        .rounded_md()
+                                        .bg(t.accent)
+                                        .text_color(t.bg)
+                                        .cursor_pointer()
+                                        .child("Install")
+                                        .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
+                                            this.resolve_install_request(true, w, cx);
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("install-cancel")
+                                        .px_2()
+                                        .py(px(3.))
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_color(t.fg_muted)
+                                        .hover(|s| s.bg(t.hover_bg))
+                                        .child("Cancel")
+                                        .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
+                                            this.resolve_install_request(false, w, cx);
+                                        })),
+                                ),
+                        ),
+                )
+            })
             .when_some(self.command_error.clone(), |root, msg| {
                 let t = theme(cx);
                 root.child(
@@ -4361,6 +4582,33 @@ mod tests {
         std::fs::write(&p, "user edited").unwrap();
         ensure_welcome_file(dir.path());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "user edited");
+    }
+
+    #[test]
+    fn git_scope_hint_only_fires_when_sandboxed_and_baseline_is_missing() {
+        // (has_baseline, in_repo_subdir) -> hint
+        assert_eq!(git_scope_hint(true, true), None);
+        assert_eq!(git_scope_hint(true, false), None);
+        assert_eq!(git_scope_hint(false, false), None);
+        assert_eq!(
+            git_scope_hint(false, true),
+            Some("the git repository is outside the opened folder"),
+        );
+    }
+
+    #[test]
+    fn repo_root_is_only_ambiguous_for_a_sandboxed_non_repo_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder carrying its own .git is never ambiguous: discover
+        // stops there, inside the granted scope.
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert!(!repo_root_may_be_out_of_scope(dir.path()));
+
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(
+            repo_root_may_be_out_of_scope(plain.path()),
+            crate::bookmarks::needs_scope()
+        );
     }
 
     #[test]
@@ -5818,7 +6066,7 @@ mod tests {
         let (root, a, _b) = workspace_fixture();
         let (ws, cx) = open_workspace(cx, root.path());
 
-        let pending: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let pending: Arc<Mutex<Vec<crate::PendingOpen>>> = Arc::new(Mutex::new(Vec::new()));
         ws.update_in(cx, |ws, window, cx| {
             ws.watch_external_opens(pending.clone(), window, cx)
         });
@@ -5830,10 +6078,11 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         let other_root = other.path().canonicalize().unwrap();
         let missing = root.path().join("gone.md");
-        pending
-            .lock()
-            .unwrap()
-            .extend([other_root.clone(), a.clone(), missing]);
+        pending.lock().unwrap().extend([
+            crate::PendingOpen::Path(other_root.clone()),
+            crate::PendingOpen::Path(a.clone()),
+            crate::PendingOpen::Path(missing),
+        ]);
         cx.background_executor
             .advance_clock(std::time::Duration::from_millis(350));
         cx.run_until_parked();
@@ -5991,7 +6240,8 @@ mod tests {
         let root_canon = root.path().canonicalize().unwrap();
         let (ws, cx) = open_workspace(cx, &root_canon);
 
-        let pending: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(vec![a.clone()]));
+        let pending: Arc<Mutex<Vec<crate::PendingOpen>>> =
+            Arc::new(Mutex::new(vec![crate::PendingOpen::Path(a.clone())]));
         ws.update_in(cx, |ws, window, cx| {
             ws.setup_watcher(cx);
             ws.watch_external_opens(pending.clone(), window, cx);
@@ -6900,6 +7150,66 @@ mod tests {
                 state.0.lock().unwrap().plugins().iter().map(|p| p.name.clone()).collect();
             assert_eq!(names, ["demo"], "host reloaded with the new plugin");
         });
+    }
+
+    #[test]
+    fn install_confirmation_names_the_plugin_and_its_capabilities() {
+        let mut entry = crate::catalog::CatalogEntry {
+            name: "demo".into(),
+            description: "d".into(),
+            version: "0.1.0".into(),
+            capabilities: vec![],
+            download: "https://example.invalid/demo.zip".into(),
+            sha256: "0".into(),
+        };
+        let plain = Workspace::install_confirmation(&entry);
+        assert!(plain.contains("\"demo\""), "{plain}");
+        entry.capabilities = vec!["net".into()];
+        let with_caps = Workspace::install_confirmation(&entry);
+        assert!(with_caps.contains("network"), "{with_caps}");
+    }
+
+    /// The security property of the supermd:// handoff: a link supplies a
+    /// name, never code, and nothing installs without a yes.
+    #[gpui::test]
+    fn a_supermd_link_asks_before_installing(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let catalog_json = r#"{"catalog_version":1,"plugins":[{"name":"demo","description":"a demo","version":"0.1.0","capabilities":["net"],"download":"https://github.com/SuperJackfruitLabs/supermd/releases/download/v0/plugin-demo.zip","sha256":"00"}]}"#;
+        cx.update(|cx| {
+            cx.set_global(crate::catalog::CatalogFetcher(Arc::new(move |_url: &str| {
+                Ok(catalog_json.as_bytes().to_vec())
+            })));
+        });
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.request_plugin_install("demo".into(), window, cx)
+        });
+        cx.run_until_parked();
+        let landed = crate::settings::config_dir().join("plugins/demo");
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let req = w.install_request.as_ref().expect("confirmation raised");
+            assert_eq!(req.name, "demo");
+        });
+        assert!(!landed.exists(), "nothing installed before the user answers");
+
+        // An unknown name never raises one.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.resolve_install_request(false, window, cx);
+            ws.request_plugin_install("nope".into(), window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.install_request.is_none(), "no confirmation for an unknown name");
+            assert!(
+                w.command_error.as_ref().is_some_and(|m| m.contains("nope")),
+                "the user is told why"
+            );
+        });
+        assert!(!landed.exists());
     }
 
     #[gpui::test]

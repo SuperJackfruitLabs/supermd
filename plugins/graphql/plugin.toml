@@ -3,6 +3,11 @@ version = "0.1.0"
 description = "GraphQL syntax highlighting for fences and files"
 authors = ["SuperJackfruitLabs"]
 
+# Grammar plugins load as wasm through tree-sitter's wasmtime 24, which
+# JIT-compiles; unavailable in the sandboxed App Store build. Linking
+# tree-sitter-graphql statically instead is not an option today: its
+# 0.2.1 release emits grammar ABI 15 and tree-sitter 0.23 accepts 13-14.
+
 [[grammars]]
 name = "graphql"
 extensions = ["graphql", "gql"]

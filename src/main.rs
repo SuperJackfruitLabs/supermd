@@ -1,6 +1,8 @@
 // No console window on Windows release builds.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
+mod bookmarks;
+mod bookmarks_mac;
 mod commands;
 mod diagram;
 mod diff;
@@ -135,23 +137,54 @@ fn recent_menu_items(recents: &[String]) -> Vec<(String, usize)> {
 
 /// Launched bare (Dock/Finder) with reopen enabled: return to the most
 /// recent workspace that still exists.
+///
+/// A sandboxed build gets no Powerbox grant with argv, so a CLI path is
+/// unusable — return None and let the workspace open the panel instead
+/// of failing to read a folder we appear to have been given.
 fn resolve_startup_arg(arg: Option<PathBuf>, settings: &settings::Settings) -> Option<PathBuf> {
-    if arg.is_some() || !settings.reopen_last {
-        return arg;
+    if arg.is_some() {
+        return if crate::bookmarks::needs_scope() { None } else { arg };
+    }
+    if !settings.reopen_last {
+        return None;
     }
     settings
         .recent_workspaces
         .iter()
+        .find(|p| {
+            if crate::bookmarks::needs_scope() {
+                // Sandboxed: existence is unknowable without a grant, so
+                // a resolvable bookmark IS the existence check.
+                settings.workspace_bookmarks.get(*p).is_some_and(|blob| {
+                    !matches!(crate::bookmarks::resolve(blob), crate::bookmarks::Resolution::Missing)
+                })
+            } else {
+                // Unsandboxed. Blobs left by a sandboxed build sharing this
+                // settings.toml are irrelevant here — the path decides.
+                Path::new(p).is_dir()
+            }
+        })
         .map(PathBuf::from)
-        .find(|p| p.is_dir())
 }
 
-/// Queue paths from `file://` open-event URLs for the workspace poll loop.
-fn queue_open_urls(pending: &std::sync::Mutex<Vec<PathBuf>>, urls: Vec<String>) {
+/// Something a macOS open event asked us to do, drained by the
+/// workspace's poll loop.
+#[derive(Debug, PartialEq)]
+pub enum PendingOpen {
+    Path(PathBuf),
+    /// `supermd://install-plugin?name=X` — the website's Install link.
+    InstallPlugin(String),
+}
+
+/// Queue work from open-event URLs (`file://` opens and `supermd://`
+/// plugin-install handoffs) for the workspace poll loop.
+fn queue_open_urls(pending: &std::sync::Mutex<Vec<PendingOpen>>, urls: Vec<String>) {
     let mut lock = pending.lock().unwrap();
     for url in urls {
         if let Some(path) = file_url_to_path(&url) {
-            lock.push(path);
+            lock.push(PendingOpen::Path(path));
+        } else if let Some(name) = catalog::parse_install_url(&url) {
+            lock.push(PendingOpen::InstallPlugin(name));
         }
     }
 }
@@ -296,7 +329,7 @@ fn main() {
 
     // Files/folders arriving via macOS open events (double-click, Dock
     // drop, `open -a`). Drained by the workspace's poll loop.
-    let pending_opens: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let pending_opens: Arc<std::sync::Mutex<Vec<PendingOpen>>> = Arc::default();
 
     let app = Application::new().with_assets(Assets);
     app.on_open_urls({
@@ -495,16 +528,49 @@ mod startup_tests {
             ..Default::default()
         };
         let explicit = PathBuf::from("/explicit/arg");
+        // A sandboxed build has no grant for either an argv path or a
+        // bookmark-less recent, so both collapse to None there.
+        let (want_explicit, want_recent) = if crate::bookmarks::needs_scope() {
+            (None, None)
+        } else {
+            (Some(explicit.clone()), Some(dir.path().to_path_buf()))
+        };
+        assert_eq!(resolve_startup_arg(Some(explicit), &on), want_explicit);
         assert_eq!(
-            resolve_startup_arg(Some(explicit.clone()), &on),
-            Some(explicit)
-        );
-        assert_eq!(
-            resolve_startup_arg(None, &on).as_deref(),
-            Some(dir.path()),
+            resolve_startup_arg(None, &on),
+            want_recent,
             "first existing recent wins"
         );
         assert_eq!(resolve_startup_arg(None, &off), None);
+    }
+
+    #[test]
+    fn unsandboxed_reopen_ignores_bookmarks_left_by_a_sandboxed_build() {
+        // One settings.toml, two builds: the MAS build stores blobs the
+        // Developer ID build cannot resolve. Reopen must still work.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        let settings = settings::Settings {
+            reopen_last: true,
+            recent_workspaces: vec![path.clone()],
+            workspace_bookmarks: std::collections::BTreeMap::from([(path, "00".to_string())]),
+            ..Default::default()
+        };
+        let want = (!crate::bookmarks::needs_scope()).then(|| dir.path().to_path_buf());
+        assert_eq!(resolve_startup_arg(None, &settings), want);
+    }
+
+    #[test]
+    fn sandboxed_builds_treat_a_cli_path_as_unscoped() {
+        let settings = settings::Settings { reopen_last: false, ..Default::default() };
+        let arg = Some(PathBuf::from("/some/dir"));
+        let got = resolve_startup_arg(arg.clone(), &settings);
+        if crate::bookmarks::needs_scope() {
+            // No Powerbox grant comes with argv; the workspace prompts.
+            assert_eq!(got, None);
+        } else {
+            assert_eq!(got, arg);
+        }
     }
 
     #[test]
@@ -520,7 +586,28 @@ mod startup_tests {
         );
         assert_eq!(
             *pending.lock().unwrap(),
-            vec![PathBuf::from("/tmp/a b.md"), PathBuf::from("/tmp/c.md")]
+            vec![
+                PendingOpen::Path(PathBuf::from("/tmp/a b.md")),
+                PendingOpen::Path(PathBuf::from("/tmp/c.md")),
+            ]
+        );
+    }
+
+    #[test]
+    fn open_urls_queue_plugin_install_handoffs() {
+        let pending = std::sync::Mutex::new(Vec::new());
+        queue_open_urls(
+            &pending,
+            vec![
+                "supermd://install-plugin?name=calc".to_string(),
+                // A foreign scheme and a traversal attempt both drop.
+                "supermd://install-plugin?name=../evil".to_string(),
+                "otherapp://install-plugin?name=calc".to_string(),
+            ],
+        );
+        assert_eq!(
+            *pending.lock().unwrap(),
+            vec![PendingOpen::InstallPlugin("calc".to_string())]
         );
     }
 

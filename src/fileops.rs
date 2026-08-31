@@ -74,7 +74,43 @@ pub fn create_dir(dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// The one place the macOS trash backend is chosen. `delete` uses it and
+/// `delete_method_name` reports it, so the two cannot drift apart.
+/// Defaults to Finder (osascript + Apple events) in the trash crate, which
+/// the App Sandbox blocks, so we pin NSFileManager. Cost: no Finder sound
+/// and no "Put Back" entry.
+#[cfg(target_os = "macos")]
+fn macos_delete_method() -> trash::macos::DeleteMethod {
+    trash::macos::DeleteMethod::NsFileManager
+}
+
+/// Reports which trash backend this build uses. Test-only: asserting the
+/// policy by matching on the actual method used, so if the method changes
+/// the report must follow.
+pub fn delete_method_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        match macos_delete_method() {
+            trash::macos::DeleteMethod::NsFileManager => "NsFileManager",
+            trash::macos::DeleteMethod::Finder => "Finder",
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "platform-default"
+    }
+}
+
 /// Send a file or folder to the OS trash.
+#[cfg(target_os = "macos")]
+pub fn delete(path: &Path) -> Result<(), String> {
+    use trash::macos::TrashContextExtMacos as _;
+    let mut ctx = trash::TrashContext::default();
+    ctx.set_delete_method(macos_delete_method());
+    ctx.delete(path).map_err(|e| format!("cannot delete {}: {e}", path.display()))
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn delete(path: &Path) -> Result<(), String> {
     trash::delete(path).map_err(|e| format!("cannot delete {}: {e}", path.display()))
 }
@@ -180,5 +216,29 @@ mod tests {
         // Unrelated, and prefix-similar names that are not ancestors.
         assert_eq!(retarget(&p("/w/other.md"), &p("/w/a.md"), &p("/w/b.md")), None);
         assert_eq!(retarget(&p("/w/docsier/n.md"), &p("/w/docs"), &p("/w/notes")), None);
+    }
+
+    #[test]
+    fn delete_uses_the_file_manager_on_macos() {
+        // The Finder backend spawns osascript, which the App Sandbox blocks.
+        // This asserts the policy, not the OS call: `delete_method_name`
+        // is the seam the shell reads.
+        #[cfg(target_os = "macos")]
+        assert_eq!(delete_method_name(), "NsFileManager");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(delete_method_name(), "platform-default");
+    }
+
+    #[test]
+    #[ignore = "writes to the user's real Trash; CI should not litter it, but developers can run with --ignored"]
+    fn delete_removes_file_from_source_path() {
+        let dir = tempdir();
+        let file = dir.path().join("trash-me.txt");
+        std::fs::write(&file, "temp file to trash").unwrap();
+        assert!(file.exists(), "test file should exist before delete");
+
+        delete(&file).expect("delete should succeed");
+
+        assert!(!file.exists(), "file should be gone after delete");
     }
 }

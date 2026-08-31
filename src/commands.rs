@@ -202,6 +202,8 @@ commands! {
         keys: ["cmd-shift-p"], ctx: None, menu: Some((Tools, 0)), help: Some(General) },
     ws::InstallPlugins => { id: "install_plugins", label: "Install Plugins…",
         keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
+    ws::ImportPlugin => { id: "import_plugin", label: "Import Plugin…",
+        keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
     ws::OpenPluginsFolder => { id: "plugins_folder", label: "Open Plugins Folder",
         keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
     ws::ReloadPlugins => { id: "reload_plugins", label: "Reload Plugins",
@@ -214,6 +216,10 @@ commands! {
     // Help there and added to the app menu by `app_menus`.
     ws::ToggleAbout => { id: "about", label: "About SuperMD", keys: [],
         ctx: None, menu: Some((Help, 1)), help: None },
+    // No keystroke: the sandboxed build hides ~/.supermd in its container,
+    // so this is a discoverability affordance, not a hot path.
+    ws::RevealSettingsFolder => { id: "settings_folder", label: "Reveal Settings Folder",
+        keys: [], ctx: None, menu: Some((Help, 1)), help: None },
 
     // ── Editor: menus arrive with the restructure (Task 10) ────────────
     // ── Edit ───────────────────────────────────────────────────────────

@@ -14,7 +14,7 @@ notify = "6"
 anyhow = "1.0.104"
 inkjet = { version = "0.11.1", features = ["all_languages"] }
 tree-sitter-xml = "0.7"
-tree-sitter = { version = "0.23", features = ["wasm"] }
+tree-sitter = { version = "0.23" }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
 similar = { version = "2", features = ["unicode"] }
@@ -26,7 +26,7 @@ gix = { version = "0.87.0", default-features = false, features = ["status", "ind
 merman = "=0.8.0-alpha.5"
 resvg = "0.48"
 serde_json = "1.0.151"
-wasmtime = { version = "48", default-features = false, features = ["runtime", "component-model", "cranelift", "parallel-compilation"] }
+wasmtime = { version = "48", default-features = false, features = ["runtime", "component-model", "cranelift", "pulley", "parallel-compilation"] }
 wasmtime-wasi = "48"
 regex = "1.13.1"
 ureq = "3"
@@ -35,6 +35,21 @@ tempfile = "3"
 sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 trash = "5.2.6"
+
+[features]
+default = ["grammars"]
+# Third-party tree-sitter grammar plugins, loaded as wasm. Pulls
+# wasmtime 24 via tree-sitter's C API, which JITs and therefore cannot
+# ship in the sandboxed App Store build.
+grammars = ["tree-sitter/wasm"]
+# Mac App Store build: interprets plugin bytecode instead of JIT-compiling
+# it, so the bundle needs no hardened-runtime JIT entitlements.
+mas = []
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSURL", "NSArray", "NSError", "NSString", "NSData", "NSDictionary"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
 
 [dev-dependencies]
 tempfile = "3"

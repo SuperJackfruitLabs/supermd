@@ -28,6 +28,8 @@ A theme is a single TOML file dropped into your themes folder:
 - macOS / Linux: `~/.supermd/themes/`
 - Windows: `%USERPROFILE%\.supermd\themes\`
 
+The Mac App Store build is sandboxed, so its settings and themes live inside the app's container instead: `~/Library/Containers/com.superjackfruitlabs.supermd/Data/.supermd/themes/`. You do not have to type that — **Reveal Settings Folder** in the Help menu opens it in Finder.
+
 The shape:
 
 ```toml

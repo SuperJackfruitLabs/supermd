@@ -39,9 +39,18 @@ pub fn parse_tag(json: &str) -> Option<String> {
     (!tag.is_empty()).then(|| tag.to_string())
 }
 
+/// The App Store distributes updates itself, and the sandbox blocks the
+/// curl subprocess this check uses. Off in the MAS build.
+pub fn checks_enabled() -> bool {
+    !cfg!(feature = "mas")
+}
+
 /// Blocking: fetch the latest release tag (e.g. "v0.0.5"). Runs on the
 /// background executor; any failure is a silent None.
 pub fn fetch_latest_tag() -> Option<String> {
+    if !checks_enabled() {
+        return None;
+    }
     let out = std::process::Command::new("curl")
         .args(["-fsSL", "-m", "10", "-H", "User-Agent: supermd", LATEST_API])
         .output()
@@ -93,6 +102,18 @@ impl UpdateStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_checks_are_off_in_the_app_store_build() {
+        assert_eq!(checks_enabled(), !cfg!(feature = "mas"));
+    }
+
+    #[test]
+    fn fetch_returns_none_without_checks() {
+        if !checks_enabled() {
+            assert_eq!(fetch_latest_tag(), None);
+        }
+    }
 
     #[test]
     fn version_comparison() {
