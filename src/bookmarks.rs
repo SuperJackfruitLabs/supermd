@@ -100,4 +100,32 @@ mod tests {
     fn scope_is_only_needed_in_the_sandboxed_build() {
         assert_eq!(needs_scope(), cfg!(all(target_os = "macos", feature = "mas")));
     }
+
+    #[test]
+    fn unsandboxed_builds_capture_no_grants() {
+        if !needs_scope() {
+            assert_eq!(create(std::path::Path::new("/tmp")), None);
+            assert_eq!(resolve("00"), Resolution::Missing);
+            stop(std::path::Path::new("/tmp")); // must not panic
+        }
+    }
 }
+
+/// Capture the sandbox grant for `path`, if this build needs one.
+#[cfg(not(all(target_os = "macos", feature = "mas")))]
+pub fn create(_path: &std::path::Path) -> Option<String> {
+    None
+}
+
+/// Resolve a stored grant. Unsandboxed builds never stored one.
+#[cfg(not(all(target_os = "macos", feature = "mas")))]
+pub fn resolve(_blob: &str) -> Resolution {
+    Resolution::Missing
+}
+
+/// Release a scoped grant. A no-op where there are no grants.
+#[cfg(not(all(target_os = "macos", feature = "mas")))]
+pub fn stop(_path: &std::path::Path) {}
+
+#[cfg(all(target_os = "macos", feature = "mas"))]
+pub use crate::bookmarks_mac::{create, resolve, stop};

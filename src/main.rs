@@ -2,6 +2,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod bookmarks;
+mod bookmarks_mac;
 mod commands;
 mod diagram;
 mod diff;

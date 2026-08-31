@@ -42,6 +42,11 @@ default = []
 # it, so the bundle needs no hardened-runtime JIT entitlements.
 mas = []
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSURL", "NSArray", "NSError", "NSString", "NSData", "NSDictionary"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
+
 [dev-dependencies]
 tempfile = "3"
 # test-support unlocks TestAppContext/VisualTestContext for driving the
