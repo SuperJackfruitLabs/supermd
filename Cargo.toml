@@ -36,6 +36,12 @@ sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 trash = "5.2.6"
 
+[features]
+default = []
+# Mac App Store build: interprets plugin bytecode instead of JIT-compiling
+# it, so the bundle needs no hardened-runtime JIT entitlements.
+mas = []
+
 [dev-dependencies]
 tempfile = "3"
 # test-support unlocks TestAppContext/VisualTestContext for driving the

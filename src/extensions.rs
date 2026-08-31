@@ -308,9 +308,14 @@ use supermd::extension::types as wit_types;
 // ReplaceSelection, InsertAtCursor).
 
 /// How long a single plugin call may run before the epoch deadline
-/// interrupts it (epoch ticks every 500ms; 4 ticks ≈ 2s).
+/// interrupts it (epoch ticks every 500ms).
+///
+/// The MAS build interprets Pulley bytecode, measured at 19-29x slower
+/// than native codegen, so the same wall clock buys ~24x less work. 16
+/// ticks (8s) restores roughly 333ms of native-equivalent budget; the
+/// heaviest first-party call is 190ms of Pulley time on a 1MB document.
 const EPOCH_TICK_MS: u64 = 500;
-const CALL_DEADLINE_TICKS: u64 = 4;
+const CALL_DEADLINE_TICKS: u64 = if cfg!(feature = "mas") { 16 } else { 4 };
 
 // ── net: host-mediated fetch ──────────────────────────────────────────
 
@@ -563,9 +568,17 @@ pub struct ExtensionHost {
     transport: FetchTransport,
 }
 
+/// Compilation target for the plugin host. The App Store build compiles
+/// to Pulley bytecode and interprets it — no executable pages, so no
+/// `com.apple.security.cs.*` entitlements. Every other build uses
+/// native codegen.
+pub fn wasm_target() -> Option<&'static str> {
+    cfg!(feature = "mas").then_some("pulley64")
+}
+
 impl ExtensionHost {
     pub fn load(plugins_dir: &Path) -> Self {
-        Self::load_with_target(plugins_dir, None)
+        Self::load_with_target(plugins_dir, wasm_target())
     }
 
     /// `target` overrides the compilation target; `Some("pulley64")`
@@ -1760,6 +1773,24 @@ mod bench_backends {
                 }
             }
             eprintln!();
+        }
+    }
+
+    #[test]
+    fn wasm_target_is_pulley_only_under_mas() {
+        if cfg!(feature = "mas") {
+            assert_eq!(wasm_target(), Some("pulley64"));
+        } else {
+            assert_eq!(wasm_target(), None);
+        }
+    }
+
+    #[test]
+    fn mas_widens_the_call_deadline() {
+        if cfg!(feature = "mas") {
+            assert_eq!(CALL_DEADLINE_TICKS, 16);
+        } else {
+            assert_eq!(CALL_DEADLINE_TICKS, 4);
         }
     }
 }
