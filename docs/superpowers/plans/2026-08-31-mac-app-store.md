@@ -16,8 +16,8 @@
 - **CI enforces a 90% line-coverage floor** (`cargo llvm-cov`). Every task adds tests alongside its code.
 - Tests live inline as `#[cfg(test)] mod tests` beside the code they cover.
 - **Per-OS decisions live in `src/platform.rs`**, never as scattered `cfg!()`. The one exception this plan permits is `cfg!(feature = "mas")` inside the module that owns the affected policy, because it is a *distribution* decision, not an OS decision.
-- **The Developer ID build must not change.** Every behavioural difference is gated on `feature = "mas"`, which is **off by default**. After each task, `cargo test` (no feature flags) must still show the same pass count.
-- **Baseline is 647 passing tests, 2 ignored** (the two `bench_backends` benchmarks). Do not let the ignored count grow without saying why.
+- **The Developer ID build must not change.** Every behavioural difference is gated on `feature = "mas"`, which is **off by default**. After each task, `cargo test` (no feature flags) must show **zero failures**, and the pass count must not decrease.
+- **Baseline is 647 passing tests, 2 ignored** (the two `bench_backends` benchmarks). Each task adds tests, so the pass count grows — a *drop* is a regression. Do not let the ignored count grow without saying why.
 - Cargo features are **additive** — you cannot subtract `tree-sitter/wasm` with a feature. The MAS build is therefore `--no-default-features --features mas`, and `grammars` must become a *default* feature (Task 8).
 - Adding a `KeyBinding` means bumping the count in `main.rs`'s `every_keybinding_parses_and_binds`, and updating `SHORTCUTS` in `workspace.rs` plus `docs/site/shortcuts.md`.
 - `src/seti.rs` is GENERATED — do not edit.
