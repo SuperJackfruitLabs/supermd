@@ -299,6 +299,32 @@ mod install_tests {
         assert_eq!(parse_install_url("supermd://install-plugin?name=a/b"), None);
     }
 
+    /// The website generates one `supermd://install-plugin?name=X` link
+    /// per shipped catalog entry (examples/build_docs.rs). A name this
+    /// parser rejects would render a button that silently does nothing,
+    /// so every shipped name must survive the round trip.
+    #[test]
+    fn every_shipped_plugin_name_survives_an_install_url() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/catalog.json");
+        let entries = parse_catalog(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(!entries.is_empty());
+        for entry in &entries {
+            let url = format!("supermd://install-plugin?name={}", entry.name);
+            assert_eq!(
+                parse_install_url(&url).as_deref(),
+                Some(entry.name.as_str()),
+                "catalog name {:?} does not survive its own install URL",
+                entry.name
+            );
+            assert!(
+                entry_by_name(&entries, &entry.name).is_some(),
+                "{} must resolve back to its entry",
+                entry.name
+            );
+        }
+    }
+
     #[test]
     fn finds_a_catalog_entry_by_name() {
         let entries = vec![entry_for(&good_zip())];

@@ -35,3 +35,11 @@ Root: HKA; Subkey: "Software\Classes\.markdown\OpenWithProgids"; ValueType: stri
 Root: HKA; Subkey: "Software\Classes\SuperMD.md"; ValueType: string; ValueName: ""; ValueData: "Markdown Document"; Flags: uninsdeletekey; Tasks: mdassoc
 Root: HKA; Subkey: "Software\Classes\SuperMD.md\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\supermd.exe,0"; Tasks: mdassoc
 Root: HKA; Subkey: "Software\Classes\SuperMD.md\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\supermd.exe"" ""%1"""; Tasks: mdassoc
+
+; supermd:// — the website's plugin Install links hand one plugin name to
+; the app, which confirms before installing. Not tied to the mdassoc task:
+; the scheme is how the app is reached, not a file association.
+Root: HKA; Subkey: "Software\Classes\supermd"; ValueType: string; ValueName: ""; ValueData: "URL:SuperMD Protocol"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\supermd"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\supermd\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\supermd.exe,0"
+Root: HKA; Subkey: "Software\Classes\supermd\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\supermd.exe"" ""%1"""

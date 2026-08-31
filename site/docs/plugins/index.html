@@ -102,6 +102,26 @@
     .diagram-preview .dark { display: block; }
   }
   .diagram-preview figcaption { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .plugin-grid {
+    display: grid; gap: 12px; margin: 18px 0 24px;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  }
+  .plugin-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; display: flex; flex-direction: column;
+  }
+  .plugin-card h3 { margin: 0 0 6px; font-size: 15px; color: var(--strong); }
+  .plugin-card p { margin: 0 0 10px; font-size: 13px; color: var(--fg); }
+  .plugin-card .cap { color: var(--accent); font-size: 12px; }
+  .plugin-card .actions {
+    margin: auto 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  }
+  .plugin-card .install {
+    background: var(--accent); color: var(--bg); border-radius: 6px;
+    padding: 5px 10px; font-size: 13px; white-space: nowrap;
+  }
+  .plugin-card .zip { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .plugin-card .zip:hover { color: var(--accent); }
   @media (max-width: 900px) {
     .layout { flex-direction: column; }
     .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); min-height: 0; }
@@ -178,6 +198,81 @@
 <h2>Installing plugins</h2>
 <p>The first eight in the table above come <strong>pre-installed</strong> — SuperMD seeds them on first launch. Delete any from your plugins folder and it stays gone; SuperMD never re-adds a plugin you removed, and never touches one you've modified.</p>
 <p>For the rest (and to re-install anything you deleted), open the command palette and run <strong>Install Plugins…</strong> — pick from the catalog and it downloads from the SuperMD repository, verifies, and installs in one step.</p>
+<p>Or install one straight from this page. <strong>Install in SuperMD</strong> hands the plugin's name to the app, which shows you what it is and what it wants access to before anything is downloaded; <strong>Download .zip</strong> gets you the archive to feed <strong>Tools → Import Plugin…</strong>. Both land the same sha256-verified file the in-app installer uses. If you do not have SuperMD yet, <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">download it first</a>.</p>
+<div class="plugin-grid">
+  <div class="plugin-card">
+    <h3>dot</h3>
+    <p>Graphviz DOT diagrams as live blocks (pure Rust)</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=dot">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-dot.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>toc</h3>
+    <p>Table of contents: insert, update, and auto-refresh on save</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=toc">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-toc.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>emoji</h3>
+    <p>Emoji shortcodes rendered inline</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=emoji">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-emoji.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>tidy</h3>
+    <p>Smart punctuation formatter and CSV-paste-to-table</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=tidy">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-tidy.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>todo-marks</h3>
+    <p>Highlight TODO / FIXME / NOTE in prose</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=todo-marks">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-todo-marks.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>url-title</h3>
+    <p>Pasted links gain their page title (asks per-site consent)</p>
+    <p class="cap">needs network access — asks per site</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=url-title">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-url-title.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>html-export</h3>
+    <p>Export the document as a self-contained themed HTML file</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=html-export">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-html-export.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>word-count</h3>
+    <p>Word count and reading time in the status strip</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=word-count">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-word-count.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>csv-view</h3>
+    <p>Open CSV/TSV files as rendered tables</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=csv-view">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-csv-view.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>daily-note</h3>
+    <p>Create today's journal note from the palette</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=daily-note">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-daily-note.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>graphql</h3>
+    <p>GraphQL syntax highlighting for fences and files</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=graphql">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-graphql.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>calc</h3>
+    <p>Calculations in prose: {{2 km + 300 m}} shows its result inline</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=calc">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-calc.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>chart</h3>
+    <p>Bar and line charts from simple label: value fences</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=chart">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-chart.zip">Download .zip</a></p>
+  </div>
+  <div class="plugin-card">
+    <h3>ipynb-view</h3>
+    <p>Open Jupyter notebooks as rendered documents</p>
+    <p class="actions"><a class="install" href="supermd://install-plugin?name=ipynb-view">Install in SuperMD</a><a class="zip" href="https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.13/plugin-ipynb-view.zip">Download .zip</a></p>
+  </div>
+</div>
+
 <p>Manual installation also works: a plugin is just a folder. Drop it into:</p>
 <ul>
 <li>macOS / Linux: <code>~/.supermd/plugins/</code></li>
@@ -188,7 +283,7 @@
 <p>The App Store version of SuperMD runs inside Apple's sandbox, which changes how plugins arrive — every plugin still works the same once installed.</p>
 <ul>
 <li><strong>All fourteen plugins ship inside the app.</strong> Nothing has to be downloaded to use them.</li>
-<li><strong>There is no in-app catalog to browse.</strong> Browse plugins on the website and click <strong>Install</strong> there: the link hands the plugin's name to SuperMD, which asks you to confirm — naming the plugin and anything it wants access to — before installing.</li>
+<li><strong>There is no in-app catalog to browse.</strong> Use the <strong>Install in SuperMD</strong> buttons above instead: the link hands the plugin's name to SuperMD, which asks you to confirm — naming the plugin and anything it wants access to — before installing.</li>
 <li><strong>Import Plugin…</strong> (Tools menu) installs a plugin archive you downloaded yourself. This route works in every build.</li>
 <li><strong>Grammar plugins are unavailable.</strong> A plugin that adds syntax highlighting for a new language (the GraphQL plugin is the only one today) needs a compiler Apple's sandbox does not permit. GraphQL code renders as plain text there; every other plugin is unaffected.</li>
 </ul>
