@@ -74,13 +74,29 @@ pub fn create_dir(dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-/// Which trash backend this build uses. macOS defaults to Finder
-/// (osascript + Apple events), which the App Sandbox blocks, so we pin
-/// NSFileManager. Cost: no Finder sound and no "Put Back" entry.
+/// The one place the macOS trash backend is chosen. `delete` uses it and
+/// `delete_method_name` reports it, so the two cannot drift apart.
+/// Defaults to Finder (osascript + Apple events) in the trash crate, which
+/// the App Sandbox blocks, so we pin NSFileManager. Cost: no Finder sound
+/// and no "Put Back" entry.
+#[cfg(target_os = "macos")]
+fn macos_delete_method() -> trash::macos::DeleteMethod {
+    trash::macos::DeleteMethod::NsFileManager
+}
+
+/// Reports which trash backend this build uses. Test-only: asserting the
+/// policy by matching on the actual method used, so if the method changes
+/// the report must follow.
 pub fn delete_method_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "NsFileManager"
-    } else {
+    #[cfg(target_os = "macos")]
+    {
+        match macos_delete_method() {
+            trash::macos::DeleteMethod::NsFileManager => "NsFileManager",
+            trash::macos::DeleteMethod::Finder => "Finder",
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
         "platform-default"
     }
 }
@@ -88,9 +104,9 @@ pub fn delete_method_name() -> &'static str {
 /// Send a file or folder to the OS trash.
 #[cfg(target_os = "macos")]
 pub fn delete(path: &Path) -> Result<(), String> {
-    use trash::macos::{DeleteMethod, TrashContextExtMacos as _};
+    use trash::macos::TrashContextExtMacos as _;
     let mut ctx = trash::TrashContext::default();
-    ctx.set_delete_method(DeleteMethod::NsFileManager);
+    ctx.set_delete_method(macos_delete_method());
     ctx.delete(path).map_err(|e| format!("cannot delete {}: {e}", path.display()))
 }
 
@@ -211,5 +227,18 @@ mod tests {
         assert_eq!(delete_method_name(), "NsFileManager");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(delete_method_name(), "platform-default");
+    }
+
+    #[test]
+    #[ignore = "writes to the user's real Trash; CI should not litter it, but developers can run with --ignored"]
+    fn delete_removes_file_from_source_path() {
+        let dir = tempdir();
+        let file = dir.path().join("trash-me.txt");
+        std::fs::write(&file, "temp file to trash").unwrap();
+        assert!(file.exists(), "test file should exist before delete");
+
+        delete(&file).expect("delete should succeed");
+
+        assert!(!file.exists(), "file should be gone after delete");
     }
 }
