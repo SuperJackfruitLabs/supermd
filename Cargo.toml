@@ -74,6 +74,11 @@ opt-level = 2
 # fix; drop this patch when upstream ships a compiling release.
 [patch.crates-io]
 merman-render = { path = "vendor/merman-render" }
+# gpui 0.2.2 references four private Apple APIs, which App Store review
+# rejects on sight — even where the code path cannot execute. Vendored with
+# those removed; see vendor/gpui/PATCH.md. Drop when upstream stops
+# referencing them.
+gpui = { path = "vendor/gpui" }
 
 [build-dependencies]
 winresource = "0.1.31"
