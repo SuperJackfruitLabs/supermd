@@ -73,6 +73,24 @@ cat > "$APP/Contents/Info.plist" <<PLIST
         <key>CFBundleURLSchemes</key><array><string>supermd</string></array>
       </dict>
     </array>
+    <!-- Purpose strings. SuperMD is a file editor: the user picks a folder
+         and the sidebar lists what is inside it. Opening the Home folder
+         therefore reaches macOS's protected locations, each of which prompts.
+         App Review rejected 0.0.14 (202609012108) under 5.1.1(ii) because
+         these prompts appeared with no explanation. Each string says what is
+         accessed and gives an example, as the guideline requires. -->
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>SuperMD needs access to your Documents folder to open and save Markdown files stored there — for example, if you open a notes folder inside Documents, it reads those files to show them and writes your edits back.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>SuperMD needs access to your Desktop to open and save Markdown files stored there — for example, if you open a project folder on your Desktop, it reads those files to show them and writes your edits back.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>SuperMD needs access to your Downloads folder to open Markdown files stored there — for example, a set of notes you downloaded, or a plugin archive you chose to import.</string>
+    <key>NSAppleMusicUsageDescription</key>
+    <string>SuperMD does not play or use music. It asks only because your Music folder appears when you open your Home folder in the file sidebar, and it must list that folder's contents to show it to you.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>SuperMD needs access to removable volumes to open and save Markdown files stored on them — for example, a folder of notes on a USB drive that you choose to open.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>SuperMD needs access to network volumes to open and save Markdown files stored on them — for example, a shared folder of documents on a file server that you choose to open.</string>
     <key>ITSAppUsesNonExemptEncryption</key><false/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
