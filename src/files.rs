@@ -15,6 +15,32 @@ const IGNORED_DIRS: &[&str] = &[
     ".venv",
 ];
 
+/// macOS puts these behind a per-folder consent prompt. Indexing them for
+/// Markdown is wasted work, and walking one raises a modal the user has to
+/// answer for no benefit — opening the Home folder used to raise three.
+///
+/// Only skipped directly under the workspace root, which is where the
+/// protected folders live. A `Pictures` folder nested inside a notes
+/// repository is ordinary and still indexed.
+const PROTECTED_ROOT_DIRS: &[&str] = &["Music", "Pictures", "Movies"];
+
+/// Whether the walk should descend into `path`, given the workspace root.
+/// Pure so the rule is testable without touching a real protected folder.
+pub fn should_descend(root: &Path, path: &Path, is_dir: bool) -> bool {
+    if !is_dir {
+        return true;
+    }
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return true;
+    };
+    if IGNORED_DIRS.contains(&name.as_str()) {
+        return false;
+    }
+    // Depth 1 only: the parent of a protected folder is the root itself.
+    let at_root = path.parent() == Some(root);
+    !(at_root && PROTECTED_ROOT_DIRS.contains(&name.as_str()))
+}
+
 fn walk_builder(root: &Path) -> ignore::WalkBuilder {
     let mut b = ignore::WalkBuilder::new(root);
     b.hidden(true)
@@ -22,9 +48,11 @@ fn walk_builder(root: &Path) -> ignore::WalkBuilder {
         .require_git(false)
         .git_global(false)
         .git_exclude(true)
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !(e.file_type().is_some_and(|t| t.is_dir()) && IGNORED_DIRS.contains(&name.as_ref()))
+        .filter_entry({
+            let root = root.to_path_buf();
+            move |e| {
+                should_descend(&root, e.path(), e.file_type().is_some_and(|t| t.is_dir()))
+            }
         });
     b
 }
@@ -214,6 +242,77 @@ pub fn pick_untitled(existing: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_folders_are_skipped_only_at_the_workspace_root() {
+        let root = Path::new("/w");
+        // macOS prompts for each of these; indexing them finds nothing
+        // useful, and opening the Home folder used to raise three modals.
+        for name in ["Music", "Pictures", "Movies"] {
+            assert!(
+                !should_descend(root, &root.join(name), true),
+                "{name} at the root should be skipped"
+            );
+        }
+        // Nested ones are ordinary folders and must still be walked — a
+        // notes repository may legitimately contain Pictures/.
+        assert!(should_descend(root, Path::new("/w/notes/Pictures"), true));
+        assert!(should_descend(root, Path::new("/w/project/Music"), true));
+    }
+
+    /// The pure rule above is only useful if the walker actually consults
+    /// it — this covers the filter_entry wiring, where a regression would
+    /// silently reintroduce the consent prompts.
+    #[test]
+    fn workspace_walk_skips_protected_root_folders_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for d in ["Music", "Pictures", "Movies", "notes", "notes/Pictures", "target"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for f in [
+            "top.md",
+            "Music/a.md",
+            "Pictures/b.md",
+            "Movies/c.md",
+            "notes/d.md",
+            "notes/Pictures/e.md",
+            "target/f.md",
+        ] {
+            std::fs::write(root.join(f), "# x").unwrap();
+        }
+
+        let found: Vec<String> = workspace_walk(root)
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+            .map(|e| {
+                e.path()
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert!(found.contains(&"top.md".to_string()));
+        assert!(found.contains(&"notes/d.md".to_string()));
+        // Nested Pictures is an ordinary folder and stays indexed.
+        assert!(found.contains(&"notes/Pictures/e.md".to_string()));
+        // Protected roots and build dirs never contribute.
+        for skipped in ["Music/a.md", "Pictures/b.md", "Movies/c.md", "target/f.md"] {
+            assert!(!found.contains(&skipped.to_string()), "{skipped} should be skipped");
+        }
+    }
+
+    #[test]
+    fn build_dirs_are_skipped_at_any_depth_and_files_always_descend() {
+        let root = Path::new("/w");
+        assert!(!should_descend(root, Path::new("/w/target"), true));
+        assert!(!should_descend(root, Path::new("/w/a/b/node_modules"), true));
+        assert!(should_descend(root, Path::new("/w/src"), true));
+        // A *file* named Music is not a protected folder.
+        assert!(should_descend(root, &root.join("Music"), false));
+    }
 
     #[test]
     fn listing_respects_gitignore_and_hides_dotfiles() {
