@@ -4,7 +4,11 @@ SuperMD is a Markdown editor that reads like a finished page and edits like plai
 
 ## Install
 
-**macOS** — [Download the DMG](https://github.com/SuperJackfruitLabs/supermd/releases/latest), open it, and drag SuperMD into Applications. The app is signed and notarized, so it opens without warnings. If you launch it straight from the DMG, SuperMD offers to move itself into Applications for you.
+**macOS — Mac App Store** — [get SuperMD Editor](https://apps.apple.com/app/supermd-editor/id6807117461?mt=12). Installs and updates itself, and runs in Apple's sandbox. Needs Apple silicon and macOS 12 or later.
+
+**macOS — direct download** — [get the DMG](https://github.com/SuperJackfruitLabs/supermd/releases/latest), open it, and drag SuperMD into Applications. Signed and notarized, so it opens without warnings, and if you launch it straight from the DMG, SuperMD offers to move itself into Applications for you. Also needs Apple silicon.
+
+The two builds are the same editor. The sandboxed one asks permission the first time it opens a folder, keeps its settings inside the app container rather than `~/.supermd`, and cannot load [grammar plugins](grammars.md) — so GraphQL fences render as plain text there. Everything else is identical.
 
 **Linux** — grab the `.deb` or the `.tar.gz` from the [latest release](https://github.com/SuperJackfruitLabs/supermd/releases/latest).
 
