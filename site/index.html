@@ -31,7 +31,8 @@
   "applicationCategory": "DeveloperApplication",
   "description": "A native, GPU-rendered Markdown editor for macOS. Hybrid WYSIWYG, live tables and mermaid diagrams, git diffs, workspace search — plain CommonMark files on disk.",
   "url": "https://supermd.app/",
-  "downloadUrl": "https://github.com/SuperJackfruitLabs/supermd/releases/latest",
+  "downloadUrl": "https://apps.apple.com/app/supermd-editor/id6807117461?mt=12",
+  "installUrl": "https://apps.apple.com/app/supermd-editor/id6807117461?mt=12",
   "license": "https://www.apache.org/licenses/LICENSE-2.0",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
 }
@@ -81,6 +82,16 @@
     font-weight: 600; font-size: 16px; text-decoration: none; transition: transform .12s ease;
   }
   .btn:hover { transform: translateY(-1px); }
+  /* Apple's supplied badge artwork. Its own proportions are fixed by the
+     Identity Guidelines, so it is sized but never restyled. */
+  .badge-link { display: inline-flex; align-items: center; transition: transform .15s ease; }
+  .badge-link:hover { transform: translateY(-1px); }
+  .badge { height: 44px; width: auto; display: block; }
+  .badge.dark { display: none; }
+  @media (prefers-color-scheme: dark) {
+    .badge.light { display: none; }
+    .badge.dark { display: block; }
+  }
   .btn.primary { background: var(--accent); color: #fff; box-shadow: 0 4px 18px rgba(201,130,28,.3); }
   .btn.ghost { color: var(--strong); border: 1px solid var(--border); background: var(--panel); }
   .note { margin-top: 14px; font-size: 13px; color: var(--muted); }
@@ -152,12 +163,17 @@
   <p class="tagline">Markdown that gets out of the way.</p>
   <p class="sub">A native, GPU-rendered editor for macOS. Syntax folds away as you write.<br>Plain CommonMark on disk — always.</p>
   <div class="cta">
-    <a class="btn primary" href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download for macOS</a>
+    <a class="badge-link" href="https://apps.apple.com/app/supermd-editor/id6807117461?mt=12" aria-label="Download SuperMD Editor on the Mac App Store">
+      <img class="badge light" src="/badges/mac-app-store-black.svg" alt="Download on the Mac App Store" width="156" height="40">
+      <img class="badge dark" src="/badges/mac-app-store-white.svg" alt="Download on the Mac App Store" width="156" height="40">
+    </a>
+    <a class="btn ghost" href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">Download the DMG</a>
     <a class="btn ghost" href="/docs/">Read the Docs</a>
     <a class="btn ghost" href="https://github.com/SuperJackfruitLabs/supermd">View on GitHub</a>
   </div>
-  <p class="note">Free &amp; open source · Apache-2.0 · macOS signed &amp; notarized<br>
-  Also new: <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest" style="color:var(--accent);text-decoration:none">Linux (.deb / tar)</a> · <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest" style="color:var(--accent);text-decoration:none">Windows installer</a> — first releases, feedback welcome</p>
+  <p class="note">Free &amp; open source · Apache-2.0 · signed &amp; notarized<br>
+  macOS builds need Apple&nbsp;silicon and macOS&nbsp;12+. The App Store version is sandboxed; the DMG is not.<br>
+  Also: <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest" style="color:var(--accent);text-decoration:none">Linux (.deb / tar)</a> · <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest" style="color:var(--accent);text-decoration:none">Windows installer</a> — feedback welcome</p>
 
   <div class="mock" aria-hidden="true">
     <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="tab">notes.md</span></div>
