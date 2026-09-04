@@ -274,14 +274,38 @@ impl Index {
         } else {
             let base = from.parent()?;
             let resolved = normalize(&base.join(&link.target));
-            // The index answers "what links to what" and holds only .md.
-            // Opening is a different question: any file inside the
-            // workspace that exists on disk is a valid target, which is
-            // what makes `[config](./config.toml)` work.
-            if !resolved.starts_with(&self.root) {
-                return None; // must not escape the opened folder
+            // A known note answers straight from the index: it was
+            // only ever inserted from a file the workspace scan found
+            // inside `root`, so it needs no filesystem or escape check
+            // here — that matters during a rename, where the *old*
+            // path can still be indexed after the file has already
+            // moved off disk under it.
+            if self.notes.contains_key(&resolved) {
+                return Some(resolved);
             }
-            (self.notes.contains_key(&resolved) || resolved.is_file()).then_some(resolved)
+            // Opening is a different question from indexing: any file
+            // inside the workspace that exists on disk is a valid
+            // target, which is what makes `[config](./config.toml)`
+            // work even though the index holds only `.md`.
+            if !resolved.is_file() {
+                return None;
+            }
+            // A lexical `starts_with(&self.root)` is not enough: a
+            // symlink *inside* the workspace can point outside it
+            // (`<root>/esc -> /etc`). A target like `./esc/passwd` has
+            // no `..` for `normalize` to collapse, so a lexical check
+            // would pass it straight through, and `is_file()` above
+            // already followed the symlink to wherever it really
+            // leads. Canonicalise both sides so the comparison sees
+            // where the path actually lands. If either side fails to
+            // canonicalise, fail closed and deny the link — for a
+            // workspace-escape guard the unsafe default is failing
+            // open (a link that escapes), not failing closed (a link
+            // that doesn't resolve), and this check exists specifically
+            // to hold up under the sandboxed App Store build.
+            let Ok(canon_root) = self.root.canonicalize() else { return None };
+            let Ok(canon_resolved) = resolved.canonicalize() else { return None };
+            canon_resolved.starts_with(&canon_root).then_some(resolved)
         }
     }
 
@@ -659,6 +683,33 @@ mod tests {
         };
         assert_eq!(index.resolve(&root.join("note.md"), &link), None,
                    "a link must not reach outside the opened folder");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_links_through_a_symlink_cannot_escape_the_workspace_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        // A symlink living *inside* the workspace but pointing outside
+        // it: `../secret.txt`-style lexical checks never see this,
+        // because the link text itself contains no `..`.
+        symlink(&outside, root.join("esc")).unwrap();
+        let index = Index::scan(&root);
+        let link = RawLink {
+            target: "./esc/secret.txt".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(
+            index.resolve(&root.join("note.md"), &link), None,
+            "a symlink inside the workspace must not be usable to escape it"
+        );
     }
 
     #[test]
