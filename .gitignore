@@ -9,3 +9,7 @@ dist/
 # Working notes that are not part of the project's public record:
 # submission copy, credentials context, anything account-specific.
 docs/internal/
+
+# Reference material for design study: competitor screenshots and case
+# studies, downloaded from public marketing pages. Not ours to redistribute.
+docs/inspiration/
