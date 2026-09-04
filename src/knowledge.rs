@@ -72,7 +72,24 @@ impl gpui::Global for KnowledgeState {}
 /// Extract wiki + markdown links. Fenced code blocks and inline code
 /// are skipped; `[[Target|label]]` yields `Target`; only relative
 /// `.md` targets count for standard links.
+///
+/// This feeds the note index (backlinks, rename rewriting), which only
+/// tracks note-to-note links — an external URL or a non-Markdown file
+/// is not a note relationship. To find *any* link under the cursor
+/// (for follow-link), use [`extract_all_links`] instead.
 pub fn extract_links(text: &str) -> Vec<RawLink> {
+    scan(text, true)
+}
+
+/// Extract every `[[wiki]]` and `[text](target)` link, whatever the
+/// target — external URLs and non-Markdown relative paths included.
+/// Used to find the link under the cursor; the note index itself
+/// wants the narrower [`extract_links`].
+pub fn extract_all_links(text: &str) -> Vec<RawLink> {
+    scan(text, false)
+}
+
+fn scan(text: &str, notes_only: bool) -> Vec<RawLink> {
     let mut out = Vec::new();
     let mut in_fence = false;
     let mut line_start = 0usize;
@@ -84,15 +101,17 @@ pub fn extract_links(text: &str) -> Vec<RawLink> {
             continue;
         }
         if !in_fence {
-            scan_line(trimmed, line_start, &mut out);
+            scan_line(trimmed, line_start, notes_only, &mut out);
         }
         line_start += line.len();
     }
     out
 }
 
-/// Links on one line, honoring inline-code spans.
-fn scan_line(line: &str, line_start: usize, out: &mut Vec<RawLink>) {
+/// Links on one line, honoring inline-code spans. `notes_only` gates
+/// standard `[text](target)` links to relative `.md` targets — the
+/// shape the note index cares about; wiki links are always captured.
+fn scan_line(line: &str, line_start: usize, notes_only: bool, out: &mut Vec<RawLink>) {
     let bytes = line.as_bytes();
     let context = line.trim().to_string();
     let mut i = 0;
@@ -129,7 +148,8 @@ fn scan_line(line: &str, line_start: usize, out: &mut Vec<RawLink>) {
                     if bytes.get(after) == Some(&b'(') {
                         if let Some(paren) = line[after + 1..].find(')') {
                             let target = line[after + 1..after + 1 + paren].trim();
-                            if target.ends_with(".md") && !target.contains("://") {
+                            let is_note_link = target.ends_with(".md") && !target.contains("://");
+                            if !target.is_empty() && (is_note_link || !notes_only) {
                                 out.push(RawLink {
                                     target: target.to_string(),
                                     wiki: false,
@@ -429,7 +449,7 @@ impl Index {
 
     /// The link (if any) whose range contains `offset` in `text`.
     pub fn link_at(text: &str, offset: usize) -> Option<RawLink> {
-        extract_links(text)
+        extract_all_links(text)
             .into_iter()
             .find(|l| l.range.contains(&offset))
     }

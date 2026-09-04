@@ -665,6 +665,11 @@ impl Editor {
         let Some(link) = crate::knowledge::Index::link_at(&text, offset) else {
             return false;
         };
+        // An external link never touches the index — classify first.
+        if let crate::knowledge::LinkTarget::External(url) = crate::knowledge::classify(&link) {
+            cx.open_url(&url);
+            return true;
+        }
         let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
             return false;
         };
@@ -4262,6 +4267,22 @@ mod tests {
         cx.dispatch_action(FollowLink);
         cx.run_until_parked();
         assert_eq!(opened.borrow().len(), 2);
+    }
+
+    #[gpui::test]
+    fn external_links_are_handled_rather_than_falling_through(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "see [apple](https://apple.com)\n");
+        // Offset 12 sits inside the link text.
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(12, cx));
+        assert!(handled, "an https link must be handled, not passed to the index");
+    }
+
+    #[gpui::test]
+    fn non_http_schemes_are_not_opened(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "see [x](supermd://install-plugin?name=evil)\n");
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(9, cx));
+        assert!(!handled, "only http(s) is opened from a document");
     }
 
     #[gpui::test]
