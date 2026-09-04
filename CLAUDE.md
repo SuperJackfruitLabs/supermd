@@ -17,7 +17,17 @@ bash scripts/build_plugins.sh --fixtures # build test-fixture plugins (required 
 
 Plugin builds need `rustup target add wasm32-wasip2`. On Linux, install the system deps listed in README.md before building. CI runs `cargo test` + `cargo build` on macOS/Linux/Windows; changes under `site/**`, `docs/**`, and `README.md` skip app CI entirely. `WELCOME.md` is NOT ignored — it is `include_str!`'d into the binary and render tests assert on it.
 
-Two change-detector conventions: `main.rs` has a keybinding-count test (`every_keybinding_parses_and_binds`) — adding a `KeyBinding` means bumping the count, and updating the ⌘/ dialog (`SHORTCUTS` in workspace.rs) plus `docs/site/shortcuts.md`, which are hand-synced. Releases: bump `version` in Cargo.toml (plus lockfile) and commit BEFORE tagging — cargo-deb reads it; the DMG/exe take the tag and will mask the mistake.
+Keybindings and the ⌘/ dialog are mostly self-syncing. `main.rs`'s `every_keybinding_parses_and_binds` asserts every binding parses and
+resolves, but has **no count assertion** — it was removed deliberately as a weak
+detector. There is no `SHORTCUTS` table in workspace.rs; the ⌘/ dialog renders
+from `commands::help_sections()`, so giving a new `Action` a `help:` entry in
+`commands.rs` propagates to the dialog automatically. `docs/site/shortcuts.md`
+is generated and machine-checked against the binding table by a test in
+`commands.rs`. The one hand-synced artifact left is the rendered
+`site/docs/shortcuts/index.html`, which has no staleness test — regenerate it
+with `cargo run --example build_docs` after changing a binding.
+
+Releases: bump `version` in Cargo.toml (plus lockfile) and commit BEFORE tagging — cargo-deb reads it; the DMG/exe take the tag and will mask the mistake.
 
 ## Architecture
 
