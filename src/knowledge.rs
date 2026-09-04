@@ -19,6 +19,38 @@ pub struct RawLink {
     pub context: String,
 }
 
+/// What a link points at. Classification happens before resolution
+/// because the index can only answer for workspace files — a URL has no
+/// path to look up, and joining it onto the workspace root produces
+/// nonsense like `<root>/https:/apple.com`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// An http(s) URL, opened by the platform.
+    External(String),
+    /// `[[Note]]` — resolved by stem against the index.
+    Wiki(String),
+    /// A path relative to the containing file.
+    Relative(String),
+}
+
+/// Sort a link into one of the three kinds.
+///
+/// Only http and https are treated as external. Other schemes stay
+/// relative and therefore fail to resolve, which is deliberate: a
+/// document is untrusted content, and `file://` or `supermd://` must not
+/// become a one-click action.
+pub fn classify(link: &RawLink) -> LinkTarget {
+    if link.wiki {
+        return LinkTarget::Wiki(link.target.clone());
+    }
+    let lower = link.target.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        LinkTarget::External(link.target.clone())
+    } else {
+        LinkTarget::Relative(link.target.clone())
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct NoteData {
     pub links: Vec<RawLink>,
@@ -464,6 +496,35 @@ pub fn relative_path(dir: &Path, target: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw(target: &str, wiki: bool) -> RawLink {
+        RawLink { target: target.into(), wiki, range: 0..1, context: String::new() }
+    }
+
+    #[test]
+    fn classify_separates_external_wiki_and_relative() {
+        assert_eq!(classify(&raw("https://apple.com", false)),
+                   LinkTarget::External("https://apple.com".into()));
+        assert_eq!(classify(&raw("http://localhost:8080", false)),
+                   LinkTarget::External("http://localhost:8080".into()));
+        assert_eq!(classify(&raw("Note", true)), LinkTarget::Wiki("Note".into()));
+        assert_eq!(classify(&raw("./config.toml", false)),
+                   LinkTarget::Relative("./config.toml".into()));
+    }
+
+    #[test]
+    fn classify_treats_other_schemes_as_relative_not_external() {
+        // Only http(s) is opened. A note is untrusted content; file://,
+        // mailto: and supermd:// must not become one-click actions.
+        for t in ["file:///etc/passwd", "mailto:a@b.c", "supermd://install-plugin?name=x"] {
+            assert!(matches!(classify(&raw(t, false)), LinkTarget::Relative(_)), "{t}");
+        }
+    }
+
+    #[test]
+    fn a_wiki_link_is_wiki_even_if_it_looks_like_a_url() {
+        assert_eq!(classify(&raw("https://x", true)), LinkTarget::Wiki("https://x".into()));
+    }
 
     const NOTE: &str = "# Project\n\
         See [[Roadmap]] and [[plans/Budget|the budget]].\n\
