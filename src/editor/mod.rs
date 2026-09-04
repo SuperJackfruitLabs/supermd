@@ -471,8 +471,19 @@ impl Editor {
         }
         let items = self.compute_projection();
         if items != self.projection {
+            // reset() clears logical_scroll_top AND discards every
+            // measured height, so a following scroll_to_reveal_item
+            // computes goal_top = 0 and pins to item 0. Capture the
+            // anchor first and restore it with scroll_to, which sets the
+            // anchor directly and needs no measurements.
+            let anchor = self.list_state.logical_scroll_top();
             self.projection = items;
             self.list_state.reset(self.projection.len());
+            let clamped = ListOffset {
+                item_ix: anchor.item_ix.min(self.projection.len().saturating_sub(1)),
+                offset_in_item: anchor.offset_in_item,
+            };
+            self.list_state.scroll_to(clamped);
             self.reveal_cursor();
         }
     }
@@ -3379,6 +3390,40 @@ mod tests {
                 .filter(|item| matches!(item, projection::Item::Widget { .. }))
                 .count()
         })
+    }
+
+    /// Clicking a table far down a document must not scroll to the top.
+    #[gpui::test]
+    fn revealing_a_widget_keeps_the_scroll_position(cx: &mut TestAppContext) {
+        // A long document with a table near the end.
+        let mut text = String::new();
+        for i in 0..300 {
+            text.push_str(&format!("line {i}\n\n"));
+        }
+        text.push_str("| a | b |\n| - | - |\n| 1 | 2 |\n");
+        let (_fx, editor, cx) = open_editor(cx, "long.md", &text);
+        cx.run_until_parked();
+
+        // Scroll to the table and let the projection settle.
+        editor.update(cx, |ed, _| {
+            let last = ed.projection.len().saturating_sub(1);
+            ed.list_state.scroll_to_reveal_item(last);
+        });
+        cx.run_until_parked();
+        let before = editor.read_with(cx, |ed, _| ed.list_state.logical_scroll_top().item_ix);
+        assert!(before > 0, "precondition: we are not at the top");
+
+        // Put the cursor in the table, which reveals it and changes the
+        // projection — the path that used to reset the scroll.
+        editor.update(cx, |ed, cx| {
+            let offset = ed.core.buffer.text().find("| a |").unwrap();
+            ed.core.set_cursor(offset);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let after = editor.read_with(cx, |ed, _| ed.list_state.logical_scroll_top().item_ix);
+        assert!(after > 0, "revealing a widget must not jump to the top (was {after})");
     }
 
     /// Widgets (table, image, diagrams) render through the projector
