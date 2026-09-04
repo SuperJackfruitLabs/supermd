@@ -501,6 +501,16 @@ impl Editor {
             let anchor = self.list_state.logical_scroll_top();
             self.projection = items;
             self.list_state.reset(self.projection.len());
+            // The anchor is a raw item index, not a document position:
+            // if the projection change happened *above* the viewport
+            // (a widget up there collapsed or expanded, changing how
+            // many items precede this one), the same index now names a
+            // different line and the view shifts by that difference.
+            // Only clamping is done here. Fixing it properly means
+            // anchoring on a buffer offset and mapping it back through
+            // the new projection; the drift is bounded by the size of
+            // one claim and is strictly better than the pin-to-item-0
+            // top-jump this replaced.
             let clamped = ListOffset {
                 item_ix: anchor.item_ix.min(self.projection.len().saturating_sub(1)),
                 offset_in_item: anchor.offset_in_item,
@@ -3547,8 +3557,14 @@ mod tests {
         });
         cx.run_until_parked();
 
+        // Not just "somewhere below the top": `after > 0` alone would
+        // pass for a fix that landed on item 1 of 300. The anchor must
+        // still be where the reader left it.
         let after = editor.read_with(cx, |ed, _| ed.list_state.logical_scroll_top().item_ix);
-        assert!(after > 0, "revealing a widget must not jump to the top (was {after})");
+        assert!(
+            after.abs_diff(before) <= 1,
+            "revealing a widget must keep the scroll position: was item {before}, now {after}"
+        );
     }
 
     /// Widgets (table, image, diagrams) render through the projector
@@ -4660,6 +4676,12 @@ mod tests {
         // Offset 12 sits inside the link text.
         let handled = editor.update(cx, |ed, cx| ed.follow_link_at(12, cx));
         assert!(handled, "an https link must be handled, not passed to the index");
+        // *Which* url reached the platform matters as much as that one
+        // did: the destination, not the link text, and unmangled.
+        assert_eq!(
+            cx.opened_url().as_deref(), Some("https://apple.com"),
+            "the link's destination is what gets opened"
+        );
     }
 
     #[gpui::test]
