@@ -815,6 +815,10 @@ impl Workspace {
             self.record_visit(path);
         }
         if path.is_dir() {
+            // A new workspace: the old stack names files in a folder
+            // that is no longer open, and under the App Store sandbox
+            // they are outside the active security-scoped bookmark.
+            self.history.clear();
             record_recent(path);
             if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
                 state.0.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
@@ -883,7 +887,10 @@ impl Workspace {
     }
 
     fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(path) = self.history.back() {
+        // A path that is gone (deleted, or outside the sandbox's active
+        // bookmark) is stepped over rather than stepped onto: dead-
+        // stepping moved the cursor and then opened nothing.
+        if let Some(path) = self.history.back_matching(|p| p.exists()) {
             self.open_path_without_history(&path, window, cx);
         }
     }
@@ -894,7 +901,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(path) = self.history.forward() {
+        if let Some(path) = self.history.forward_matching(|p| p.exists()) {
             self.open_path_without_history(&path, window, cx);
         }
     }
@@ -2100,6 +2107,10 @@ impl Workspace {
                 }
             }
         }
+        // History is a list of paths like any other: it has to follow
+        // the move too, or Forward walks its cursor onto a name that is
+        // no longer on disk.
+        self.history.rewrite(|entry| crate::fileops::retarget(entry, old, new));
         self.rewrite_knowledge_links(old, new, cx);
         cx.notify();
     }
@@ -5707,6 +5718,96 @@ mod tests {
             active(cx), Some(a.clone()),
             "navigation must not stack new entries: the history is still just a, b"
         );
+    }
+
+    /// A rename moves a file; history still names where it was. Forward
+    /// then walks its cursor forward and opens nothing at all.
+    #[gpui::test]
+    fn history_follows_a_renamed_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        for path in [&a, &b] {
+            ws.update_in(cx, |ws, window, cx| ws.open_path(path, window, cx));
+        }
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        assert_eq!(active(cx), Some(a.clone()), "precondition: back reached a");
+
+        let renamed = root.path().join("b-renamed.md");
+        std::fs::rename(&b, &renamed).unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.after_path_change(&b, &renamed, cx));
+        cx.run_until_parked();
+
+        ws.update_in(cx, |ws, window, cx| ws.navigate_forward(&NavigateForward, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(renamed),
+            "forward must follow the file to its new name, not dead-step"
+        );
+    }
+
+    /// Opening another folder replaces the workspace. Its history is
+    /// about files that are no longer reachable — and under the App
+    /// Store sandbox they sit outside the active security-scoped
+    /// bookmark, so Back would fail silently.
+    #[gpui::test]
+    fn switching_workspaces_clears_history(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        for path in [&a, &b] {
+            ws.update_in(cx, |ws, window, cx| ws.open_path(path, window, cx));
+        }
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("x.md"), "# x\n").unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.open_path(other.path(), window, cx));
+        cx.run_until_parked();
+
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(b.clone()),
+            "back must not walk into the previous workspace"
+        );
+    }
+
+    /// A deleted entry is stepped over, not stepped onto: the old code
+    /// moved the cursor onto it and then opened nothing (or, worse,
+    /// re-activated the stale tab).
+    #[gpui::test]
+    fn navigation_skips_files_that_no_longer_exist(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let c = root.path().join("c.md");
+        std::fs::write(&c, "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        for path in [&a, &b, &c] {
+            ws.update_in(cx, |ws, window, cx| ws.open_path(path, window, cx));
+        }
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+
+        std::fs::remove_file(&b).unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(a.clone()),
+            "back skips the deleted entry and lands on the live one"
+        );
+        ws.update_in(cx, |ws, window, cx| ws.navigate_forward(&NavigateForward, window, cx));
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(c.clone()), "forward skips it too");
     }
 
     // ── finder and search overlay integration ───────────────────────────
