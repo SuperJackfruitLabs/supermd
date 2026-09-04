@@ -271,6 +271,11 @@ pub struct Workspace {
     _watcher: Option<notify::RecommendedWatcher>,
     /// Back/forward across followed links.
     history: crate::nav::History,
+    /// True while a back/forward move is in flight. A move *through*
+    /// history must never record a visit — every entry point that opens
+    /// a file records one now, so suppression is explicit rather than a
+    /// matter of which call happens to come first.
+    navigating: bool,
 }
 
 enum SidebarEditKind {
@@ -410,6 +415,7 @@ impl Workspace {
             git_modified: Default::default(),
             _watcher: None,
             history: crate::nav::History::default(),
+            navigating: false,
         };
         workspace.refresh_git_status();
 
@@ -623,8 +629,23 @@ impl Workspace {
             self.flush_tab(self.active, cx);
         }
         self.active = ix;
+        // Switching tabs is navigation: ⌘⇧[ / ⌘⇧] and a click on a tab
+        // move you between documents exactly as opening one does, and a
+        // history that cannot see them sends Back *forward*.
+        if let Some(path) = self.tabs[ix].path(cx) {
+            self.record_visit(&path);
+        }
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// Record the file the workspace just landed on, unless we got here
+    /// through Back or Forward — those are moves within the stack.
+    fn record_visit(&mut self, path: &Path) {
+        if self.navigating {
+            return;
+        }
+        self.history.visit(path.to_path_buf());
     }
 
     /// Open paths handed to us from outside (Finder open events, drops):
@@ -731,6 +752,7 @@ impl Workspace {
                 self.flush_tab(self.active, cx);
                 self.active = ix;
             }
+            self.record_visit(path);
             if focus {
                 self.focus_active(window, cx);
             }
@@ -778,6 +800,10 @@ impl Workspace {
         if let Some(tree) = &mut self.tree {
             tree.expand_to(path);
         }
+        // Sidebar single-click and keyboard browsing land here, not in
+        // `open_path`: this is the shared entry point, so this is where
+        // history is written.
+        self.record_visit(path);
         if focus {
             self.focus_active(window, cx);
         }
@@ -786,7 +812,7 @@ impl Workspace {
 
     pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if path.is_file() {
-            self.history.visit(path.to_path_buf());
+            self.record_visit(path);
         }
         if path.is_dir() {
             record_recent(path);
@@ -858,7 +884,6 @@ impl Workspace {
 
     fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = self.history.back() {
-            // open_path records a visit; going back must not.
             self.open_path_without_history(&path, window, cx);
         }
     }
@@ -875,14 +900,18 @@ impl Workspace {
     }
 
     /// Open a file without recording it — used by back and forward, which
-    /// are moves through history rather than new visits.
+    /// are moves through history rather than new visits. Every opening
+    /// path records a visit now, so the suppression is an explicit flag
+    /// rather than an assumption about which call comes first.
     fn open_path_without_history(
         &mut self,
         path: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.navigating = true;
         self.open_path_preview(path, true, window, cx);
+        self.navigating = false;
     }
 
     // ── actions ────────────────────────────────────────────────────────
@@ -5607,6 +5636,77 @@ mod tests {
                 "forward moves forward from the second back to the first back's target"
             );
         });
+    }
+
+    /// Switching tabs is navigation. When history does not see it, the
+    /// cursor stays where the last `open_path` left it, and Back moves
+    /// you *forward*: open a, b, c, walk back to a with ⌘⇧[, and the
+    /// stack still reads (a, b, c) at c.
+    #[gpui::test]
+    fn tab_switching_is_recorded_in_history(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let c = root.path().join("c.md");
+        std::fs::write(&c, "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        for path in [&a, &b, &c] {
+            ws.update_in(cx, |ws, window, cx| ws.open_path(path, window, cx));
+        }
+        cx.run_until_parked();
+        // ⌘⇧[ twice: c → b → a, without touching open_path.
+        cx.dispatch_action(PrevTab);
+        cx.dispatch_action(PrevTab);
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+        assert_eq!(active(cx), Some(a.clone()), "precondition: ⌘⇧[ reached a");
+
+        cx.dispatch_action(NavigateBack);
+        assert_eq!(active(cx), Some(b.clone()), "back returns to where we just were");
+        cx.dispatch_action(NavigateBack);
+        assert_eq!(
+            active(cx), Some(c.clone()),
+            "back keeps walking backwards through the tab switches"
+        );
+        cx.dispatch_action(NavigateForward);
+        assert_eq!(active(cx), Some(b.clone()), "forward retraces the same steps");
+    }
+
+    /// Sidebar single-click and keyboard browsing both go through
+    /// `open_path_preview`, which recorded nothing at all.
+    #[gpui::test]
+    fn sidebar_preview_opens_are_recorded_in_history(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&b, true, window, cx));
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+        assert_eq!(active(cx), Some(b.clone()), "precondition: previewing b");
+
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(a.clone()), "back returns to the previewed file");
+
+        // Back and forward are moves *through* history, not new visits:
+        // two backs in a row keep walking backwards rather than
+        // oscillating between the same two files.
+        ws.update_in(cx, |ws, window, cx| ws.navigate_forward(&NavigateForward, window, cx));
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(b.clone()), "forward returns to b");
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(a.clone()),
+            "navigation must not stack new entries: the history is still just a, b"
+        );
     }
 
     // ── finder and search overlay integration ───────────────────────────
