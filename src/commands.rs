@@ -555,6 +555,19 @@ mod tests {
     }
 
     #[test]
+    fn cmd_shift_g_is_shared_across_contexts_on_purpose() {
+        // ToggleGraph (global) and FindPrev (Editor) both bind ⌘⇧G; the
+        // editor handler propagates when the find bar is closed so the
+        // graph still opens. This records the exception.
+        let holders: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.keys.contains(&"cmd-shift-g"))
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(holders, vec!["graph", "find_prev"]);
+    }
+
+    #[test]
     fn items_for_a_menu_come_back_in_group_order() {
         let view = items_for(MenuId::View);
         assert!(!view.is_empty(), "the View menu has entries");

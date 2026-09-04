@@ -230,6 +230,13 @@ pub fn click_follows_link(has_modifier: bool, on_link: bool, revealed: bool) -> 
     on_link && (has_modifier || !revealed)
 }
 
+/// Whether ⌘⇧G belongs to the editor's find bar or should fall through
+/// to the global Graph View binding. Pure so the collision rule is
+/// recorded in a test rather than in a comment.
+pub fn find_prev_should_consume(find_open: bool) -> bool {
+    find_open
+}
+
 impl Editor {
     /// Read a file's text. Call `from_text` inside `cx.new` (which cannot
     /// be fallible) with the result.
@@ -1600,6 +1607,10 @@ impl Editor {
     }
 
     fn find_prev(&mut self, _: &FindPrev, _: &mut Window, cx: &mut Context<Self>) {
+        if !find_prev_should_consume(self.find.is_some()) {
+            cx.propagate(); // ⌘⇧G belongs to Graph View when find is closed
+            return;
+        }
         self.cycle_find(false, cx);
     }
 
@@ -3345,6 +3356,15 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn find_prev_only_consumes_the_key_when_the_find_bar_is_open() {
+        // Mirrors cmd_b_is_shared_across_contexts_on_purpose: a shared
+        // chord must fall through when this handler has nothing to do,
+        // or the global binding is unreachable.
+        assert!(!find_prev_should_consume(false), "closed find bar must propagate");
+        assert!(find_prev_should_consume(true), "open find bar consumes the key");
+    }
 
     /// Everything an editor test touches on disk, rooted in tempdirs:
     /// the edited file and the session backup registry. Nothing under
