@@ -378,11 +378,14 @@ Then in `on_line_mouse_down`, replace the ⌘-click block:
                 let on_link = crate::knowledge::Index::link_at(
                     &self.core.buffer.text(), offset,
                 ).is_some();
-                let revealed = self
-                    .core
-                    .buffer
-                    .line_of_byte(offset)
-                    == self.core.buffer.line_of_byte(self.core.selection.head);
+                // "Revealed" is span overlap, not a shared line — the
+                // same rule display::revealed uses. A link merely on the
+                // cursor's line is still rendered and must still follow.
+                let sel = self.core.selection.range();
+                let revealed = crate::knowledge::Index::link_at(
+                    &self.core.buffer.text(), offset,
+                )
+                .is_some_and(|l| l.range.start <= sel.end && sel.start <= l.range.end);
                 if click_follows_link(event.modifiers.platform, on_link, revealed)
                     && self.follow_link_at(offset, cx)
                 {
@@ -410,7 +413,19 @@ git commit -m "feat: a plain click follows a link"
 
 ---
 
-### Task 5: Broken links look broken
+### Task 5: Broken links look broken — DEFERRED, DO NOT IMPLEMENT
+
+> **Pre-flight ruling (2026-09-04): this task is deferred out of 0.0.15 and
+> must not be executed.** It defines `StyleKind::BrokenLink` and a colour,
+> but no step ever produces such a span: `spans.rs` is pure with no index
+> access, and `restyle` takes no `cx`, so resolution results cannot reach
+> the styling path. Its test asserts a tautology. Producing broken-link
+> spans needs either `cx` threaded into `restyle` or a post-pass re-marking
+> `Link` spans against the index — a design decision deserving its own
+> thought. Tasks 1-4 deliver the release's value without it. The original
+> text is kept below as the starting point for that later design.
+
+
 
 **Files:**
 - Modify: `src/editor/spans.rs` (add `StyleKind::BrokenLink`)
