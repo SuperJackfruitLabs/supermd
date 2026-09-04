@@ -484,6 +484,31 @@ impl Editor {
                 offset_in_item: anchor.offset_in_item,
             };
             self.list_state.scroll_to(clamped);
+            // Known limitation: reveal_cursor()'s downward case cannot
+            // actually scroll further right after this reset. Every item
+            // was just spliced back in as Unmeasured (height 0), and
+            // ListState::scroll_to_reveal_item's below-anchor branch derives
+            // goal_top from summed measured heights (vendor/gpui/src/
+            // elements/list.rs:360) — with all heights zero it always
+            // computes goal_top = 0, so start_ix comes back 0 and the
+            // `start_ix >= scroll_top.item_ix` guard fails for any nonzero
+            // anchor, silently no-opping. The above-or-at-anchor branch
+            // sets the index directly and needs no heights, so upward
+            // reveals still work. Net effect here: a cursor that lands
+            // below the just-restored anchor (e.g. a click deep inside a
+            // widget taller than the viewport) may not be scrolled into
+            // view by this call. This is strictly no worse than before —
+            // the call was equally unable to reveal pre-fix, it just
+            // happened to pin to the top — so it's left as a known gap
+            // rather than a regression. Closing it for real means either
+            // deferring this call until a paint has measured items near
+            // the target (window.on_next_frame, and even then only
+            // measures outward from the anchor incrementally, so it isn't
+            // guaranteed for far-off targets) or computing the restored
+            // anchor to include the cursor's item directly instead of
+            // going through gpui's height-based reveal — both are timing/
+            // behavior changes to render and measurement, out of scope
+            // for this bug fix.
             self.reveal_cursor();
         }
     }
