@@ -5511,6 +5511,62 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn navigate_back_and_forward_walk_open_tabs(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let c = root.path().join("c.md");
+        std::fs::write(&c, "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // Give history real depth, then revisit `a` so the visit order
+        // (a, b, c, a) diverges from tab order (a, b, c) — this rules out
+        // a handler that merely walks adjacent tab indices rather than
+        // real history.
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&b, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&c, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app), vec![Some(a.clone()), Some(b.clone()), Some(c.clone())]);
+            assert_eq!(w.tabs[w.active].path(app), Some(a.clone()), "revisit reuses a's tab");
+        });
+
+        // Actions dispatched at the focused editor bubble to the workspace,
+        // same as the NextTab/PrevTab wiring above.
+        cx.dispatch_action(NavigateBack);
+        let first_back = cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app));
+        assert_eq!(
+            first_back,
+            Some(c.clone()),
+            "first back lands on the previously visited file, not the tab to a's left"
+        );
+
+        cx.dispatch_action(NavigateBack);
+        let second_back = cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app));
+        assert_eq!(
+            second_back,
+            Some(b.clone()),
+            "second back keeps walking backwards through real history"
+        );
+        assert_ne!(
+            first_back, second_back,
+            "two consecutive backs must not oscillate between the same two files"
+        );
+
+        cx.dispatch_action(NavigateForward);
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(
+                w.tabs[w.active].path(app),
+                Some(c.clone()),
+                "forward moves forward from the second back to the first back's target"
+            );
+        });
+    }
+
     // ── finder and search overlay integration ───────────────────────────
 
     #[gpui::test]
