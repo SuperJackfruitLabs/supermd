@@ -800,11 +800,16 @@ impl Workspace {
         if let Some(tree) = &mut self.tree {
             tree.expand_to(path);
         }
-        // Sidebar single-click and keyboard browsing land here, not in
-        // `open_path`: this is the shared entry point, so this is where
-        // history is written.
-        self.record_visit(path);
+        // Sidebar single-click lands here, not in `open_path`: this is
+        // the shared entry point, so this is where history is written.
+        // Only a focused open counts as a navigation. Keyboard browsing
+        // (`sidebar_move`) previews every row the arrows pass over with
+        // `focus: false`; recording those would push an entry per
+        // keypress and, worse, truncate the forward branch, so holding
+        // the arrow key through a vault would destroy Forward and fill
+        // Back with files the user only glanced at.
         if focus {
+            self.record_visit(path);
             self.focus_active(window, cx);
         }
         cx.notify();
@@ -5717,6 +5722,57 @@ mod tests {
         assert_eq!(
             active(cx), Some(a.clone()),
             "navigation must not stack new entries: the history is still just a, b"
+        );
+    }
+
+    /// Keyboard browsing previews every row the arrows pass over. Those
+    /// are glances, not navigations: recording them would push an entry
+    /// per keypress and truncate the forward branch, so holding the arrow
+    /// key through a vault would destroy Forward and fill Back with files
+    /// the user never chose to open. Only a focused open is a visit.
+    ///
+    /// Needs a third file: with only the two the shared fixture makes,
+    /// every row the arrows reach is already the current history entry
+    /// and `History::visit`'s dedup hides the bug.
+    #[gpui::test]
+    fn keyboard_sidebar_browsing_is_not_recorded_in_history(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.md");
+        let b = root.path().join("b.md");
+        let c = root.path().join("c.md");
+        std::fs::write(&a, "# a\n").unwrap();
+        std::fs::write(&b, "# b\n").unwrap();
+        std::fs::write(&c, "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&b, true, window, cx));
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+
+        // Step back to a, leaving b on the forward branch.
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(a.clone()), "precondition: back on a");
+
+        // Scrub down to c with the keyboard, exactly as SidebarDown does:
+        // an unfocused preview of every row it lands on. c is not in
+        // history, so a recorded visit here truncates b off the forward
+        // branch.
+        for _ in 0..2 {
+            ws.update_in(cx, |ws, window, cx| ws.sidebar_move(1, window, cx));
+            cx.run_until_parked();
+        }
+        assert_eq!(active(cx), Some(c.clone()), "precondition: scrubbed onto c");
+
+        ws.update_in(cx, |ws, window, cx| ws.navigate_forward(&NavigateForward, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(b.clone()),
+            "arrow-key browsing must not truncate the forward branch"
         );
     }
 

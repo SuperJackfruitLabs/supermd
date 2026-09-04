@@ -1804,7 +1804,7 @@ impl Editor {
                 let revealed = link
                     .as_ref()
                     .is_some_and(|l| l.range.start <= sel.end && sel.start <= l.range.end);
-                if click_follows_link(event.modifiers.platform, on_link, revealed) {
+                if self.can_format() && click_follows_link(event.modifiers.platform, on_link, revealed) {
                     // The caret deliberately does not move yet: a click
                     // that navigates should not reveal the link's markers
                     // on its way out, and a drag sets its anchor from
