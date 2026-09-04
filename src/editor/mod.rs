@@ -1690,12 +1690,13 @@ impl Editor {
         if !event.modifiers.shift {
             if let Some(offset) = self.offset_at_point(event.position) {
                 let text = self.core.buffer.text();
-                let on_link = crate::knowledge::Index::link_at(&text, offset).is_some();
+                let link = crate::knowledge::Index::link_at(&text, offset);
+                let on_link = link.is_some();
                 // "Revealed" is span overlap, not a shared line — the
                 // same rule display::revealed uses. A link merely on the
                 // cursor's line is still rendered and must still follow.
                 let sel = self.core.selection.range();
-                let revealed = crate::knowledge::Index::link_at(&text, offset)
+                let revealed = link
                     .is_some_and(|l| l.range.start <= sel.end && sel.start <= l.range.end);
                 if click_follows_link(event.modifiers.platform, on_link, revealed)
                     && self.follow_link_at(offset, cx)
@@ -4288,6 +4289,58 @@ mod tests {
         cx.dispatch_action(FollowLink);
         cx.run_until_parked();
         assert_eq!(opened.borrow().len(), 2);
+    }
+
+    #[gpui::test]
+    fn plain_click_navigates_a_rendered_link_but_edits_a_revealed_one(cx: &mut TestAppContext) {
+        let _ws = knowledge_fixture(cx);
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "go [[Roadmap]] or [[Ghost]] now");
+        let opened: Rc<RefCell<Vec<PathBuf>>> = Rc::default();
+        cx.update(|_, app| {
+            let sink = opened.clone();
+            app.subscribe(&editor, move |_, event: &EditorEvent, _| {
+                if let EditorEvent::OpenPath(p) = event {
+                    sink.borrow_mut().push(p.clone());
+                }
+            })
+            .detach();
+        });
+
+        // The cursor starts at the very top of the document, well outside
+        // the link — its syntax is not revealed — so a plain click on the
+        // rendered link text navigates.
+        let inside = point_for_index(&editor, cx, 0, 7); // "a" of "Roadmap"
+        cx.simulate_mouse_down(inside, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            opened.borrow().last().is_some_and(|p| p.ends_with("Roadmap.md")),
+            "plain click on a rendered link must navigate: {opened:?}"
+        );
+
+        // Now put the caret inside that same link, so its syntax is
+        // revealed (the user is editing it), and click elsewhere within
+        // it. This must move the caret and must NOT navigate again —
+        // otherwise the link could never be corrected.
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(7); // inside [[Roadmap]]
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let elsewhere = point_for_index(&editor, cx, 0, 10); // still inside the link
+        cx.simulate_mouse_down(elsewhere, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().len(),
+            1,
+            "a plain click on a revealed link must not navigate"
+        );
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.selection.range(),
+                10..10,
+                "a plain click on a revealed link still places the caret"
+            );
+        });
     }
 
     #[test]
