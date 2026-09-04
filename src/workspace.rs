@@ -530,6 +530,18 @@ impl Workspace {
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
                     continue;
                 }
+                // Same rule as Index::scan: a symlink never enters the
+                // index, however it arrived. The watcher sees paths the
+                // initial scan never walked, and `read_to_string` would
+                // happily follow `<root>/leak.md -> ~/.ssh/id_rsa` into
+                // an in-root index entry that later resolves without an
+                // escape check. Drop any entry the path may already have.
+                if std::fs::symlink_metadata(path)
+                    .is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    index.remove_file(path);
+                    continue;
+                }
                 match std::fs::read_to_string(path) {
                     Ok(text) => index.update_file(path, &text),
                     Err(_) => index.remove_file(path),
@@ -4803,6 +4815,36 @@ mod tests {
             assert!(
                 back.iter().any(|(p, _)| p.ends_with("B.md")),
                 "index saw the save"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_watcher_never_indexes_a_symlinked_note(cx: &mut TestAppContext) {
+        use std::os::unix::fs::symlink;
+
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        let outside = outside_dir.path().join("outside.md");
+        std::fs::write(&outside, "secret links [[A]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // A symlink created *after* the scan reaches the index only
+        // through the watcher, so the scan-time filter cannot cover it.
+        let leak = root.path().join("leak.md");
+        symlink(&outside, &leak).unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&leak), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let state = app.global::<crate::knowledge::KnowledgeState>();
+            let index = state.0.lock().unwrap();
+            let back = index.backlinks(&root.path().join("A.md"));
+            assert!(
+                !back.iter().any(|(p, _)| p.ends_with("leak.md")),
+                "a symlinked note must never enter the index: {back:?}"
             );
         });
     }

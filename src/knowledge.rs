@@ -248,6 +248,18 @@ impl Index {
     pub fn scan(root: &Path) -> Self {
         let mut index = Index { root: root.to_path_buf(), notes: BTreeMap::new() };
         for item in crate::files::workspace_walk(root).flatten() {
+            // Only real files that live under `root` may be indexed. A
+            // symlink inside the workspace can point anywhere on disk and
+            // `read_to_string` would follow it, so `<root>/leak.md ->
+            // ~/.ssh/id_rsa` would otherwise be indexed under an in-root
+            // path — and every lookup answers from the index before any
+            // escape guard runs. The walker does not follow links
+            // (`follow_links(false)`), so a symlink arrives here as an
+            // entry of its own with `is_symlink()` set; dropping it is
+            // what makes the in-index short-circuit in `resolve` safe.
+            if !item.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
             let path = item.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Ok(text) = std::fs::read_to_string(path) {
@@ -294,12 +306,19 @@ impl Index {
         } else {
             let base = from.parent()?;
             let resolved = normalize(&base.join(&link.target));
-            // A known note answers straight from the index: it was
-            // only ever inserted from a file the workspace scan found
-            // inside `root`, so it needs no filesystem or escape check
-            // here — that matters during a rename, where the *old*
-            // path can still be indexed after the file has already
-            // moved off disk under it.
+            // A known note answers straight from the index without a
+            // filesystem check, which is what keeps a rename working:
+            // the *old* path can still be indexed after the file has
+            // already moved off disk under it, and a link written to it
+            // must still resolve until the watcher catches up.
+            //
+            // What makes that safe is `scan` (and `on_fs_events`)
+            // refusing to index anything that is not a real file
+            // beneath `root` — symlinks included. It is NOT true that a
+            // path merely reached via the workspace walk is inside
+            // `root`: without that filter a symlinked note would be
+            // indexed under an in-root path and this branch would hand
+            // it back before the escape guard below ever ran.
             if self.notes.contains_key(&resolved) {
                 return Some(resolved);
             }
@@ -729,6 +748,50 @@ mod tests {
         assert_eq!(
             index.resolve(&root.join("note.md"), &link), None,
             "a symlink inside the workspace must not be usable to escape it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_markdown_file_is_neither_indexed_nor_resolved() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&outside, "secret").unwrap();
+        // The dangerous shape the *directory* symlink test above never
+        // reaches: a symlinked `.md` FILE sitting directly in the
+        // workspace. The walker yields it (there is nothing to descend
+        // into), `scan` only checked the extension, and `read_to_string`
+        // follows the link — so its contents were indexed under an
+        // in-root path, and every later lookup answered from the index
+        // before any escape guard could run.
+        let leak = root.join("leak.md");
+        symlink(&outside, &leak).unwrap();
+        let index = Index::scan(&root);
+        assert!(
+            !index.notes.contains_key(&leak),
+            "a symlinked note must never enter the index"
+        );
+
+        let relative = RawLink {
+            target: "./leak.md".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(
+            index.resolve(&root.join("note.md"), &relative), None,
+            "a relative link through a symlinked note must not resolve"
+        );
+        let wiki = RawLink {
+            target: "leak".into(), wiki: true, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(
+            index.resolve(&root.join("note.md"), &wiki), None,
+            "a wiki link to a symlinked note must not resolve"
         );
     }
 
