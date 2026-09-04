@@ -45,6 +45,11 @@ jobs:
       - name: Build the App Store configuration
         if: runner.os == 'macOS'
         run: cargo build --no-default-features --features mas
+      - name: Refuse private Apple APIs
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --no-default-features --features mas
+          bash scripts/check_private_apis.sh target/release/supermd
       - name: Test the App Store configuration
         if: runner.os == 'macOS'
         run: cargo test --no-default-features --features mas
