@@ -274,7 +274,14 @@ impl Index {
         } else {
             let base = from.parent()?;
             let resolved = normalize(&base.join(&link.target));
-            self.notes.contains_key(&resolved).then_some(resolved)
+            // The index answers "what links to what" and holds only .md.
+            // Opening is a different question: any file inside the
+            // workspace that exists on disk is a valid target, which is
+            // what makes `[config](./config.toml)` work.
+            if !resolved.starts_with(&self.root) {
+                return None; // must not escape the opened folder
+            }
+            (self.notes.contains_key(&resolved) || resolved.is_file()).then_some(resolved)
         }
     }
 
@@ -602,6 +609,56 @@ mod tests {
         assert_eq!(index.resolve(&project, &ci), Some(dir.path().join("Roadmap.md")));
         let nope = RawLink { target: "Ghost".into(), wiki: true, range: 0..0, context: String::new() };
         assert_eq!(index.resolve(&project, &nope), None);
+    }
+
+    #[test]
+    fn relative_links_resolve_to_any_file_that_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("note.md"), "see [c](./config.toml)").unwrap();
+        std::fs::write(root.join("config.toml"), "x = 1").unwrap();
+        let index = Index::scan(root);
+
+        let link = RawLink {
+            target: "./config.toml".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(
+            index.resolve(&root.join("note.md"), &link),
+            Some(normalize(&root.join("config.toml"))),
+            "a non-Markdown file that exists should resolve"
+        );
+    }
+
+    #[test]
+    fn relative_links_to_missing_files_do_not_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let index = Index::scan(root);
+        let link = RawLink {
+            target: "./nope.png".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        // Unlike a wiki link, a relative link to a missing file is not
+        // created — inventing `nope.png` would be nonsense.
+        assert_eq!(index.resolve(&root.join("note.md"), &link), None);
+    }
+
+    #[test]
+    fn relative_links_cannot_escape_the_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "s").unwrap();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let index = Index::scan(&root);
+        let link = RawLink {
+            target: "../secret.txt".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(index.resolve(&root.join("note.md"), &link), None,
+                   "a link must not reach outside the opened folder");
     }
 
     #[test]
