@@ -20,6 +20,7 @@ mod knowledge;
 mod install;
 mod install_ui;
 mod markdown;
+mod nav;
 mod palette;
 mod platform;
 mod reader;

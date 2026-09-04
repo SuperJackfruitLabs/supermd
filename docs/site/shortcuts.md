@@ -37,6 +37,8 @@ The modifier says what a shortcut acts on. New bindings follow the tier that mat
 | ⌘ ⇧ F | Ctrl Shift F | Search in Workspace… |
 | ⌘ ⇧ ] | Ctrl Shift ] | Next Tab |
 | ⌘ ⇧ [ | Ctrl Shift [ | Previous Tab |
+| ⌘ [ | Ctrl [ | Back |
+| ⌘ ] | Ctrl ] | Forward |
 | ⌘ ⇧ G | Ctrl Shift G | Graph View |
 | ⌘ ⇧ P | Ctrl Shift P | Command Palette… |
 | ⌘ / | Ctrl / | Keyboard Shortcuts |

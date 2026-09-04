@@ -76,6 +76,8 @@ actions!(
         OpenRecent5,
         OpenRecent6,
         OpenRecent7,
+        NavigateBack,
+        NavigateForward,
     ]
 );
 
@@ -267,6 +269,8 @@ pub struct Workspace {
     /// "Move to…" folder picker (a Palette over workspace folders).
     move_picker: Option<(Entity<crate::palette::Palette>, gpui::Subscription)>,
     _watcher: Option<notify::RecommendedWatcher>,
+    /// Back/forward across followed links.
+    history: crate::nav::History,
 }
 
 enum SidebarEditKind {
@@ -405,6 +409,7 @@ impl Workspace {
             last_title: String::new(),
             git_modified: Default::default(),
             _watcher: None,
+            history: crate::nav::History::default(),
         };
         workspace.refresh_git_status();
 
@@ -768,6 +773,9 @@ impl Workspace {
     }
 
     pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if path.is_file() {
+            self.history.visit(path.to_path_buf());
+        }
         if path.is_dir() {
             record_recent(path);
             if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
@@ -834,6 +842,35 @@ impl Workspace {
             }
             Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
         }
+    }
+
+    fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = self.history.back() {
+            // open_path records a visit; going back must not.
+            self.open_path_without_history(&path, window, cx);
+        }
+    }
+
+    fn navigate_forward(
+        &mut self,
+        _: &NavigateForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = self.history.forward() {
+            self.open_path_without_history(&path, window, cx);
+        }
+    }
+
+    /// Open a file without recording it — used by back and forward, which
+    /// are moves through history rather than new visits.
+    fn open_path_without_history(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_path_preview(path, true, window, cx);
     }
 
     // ── actions ────────────────────────────────────────────────────────
@@ -4027,6 +4064,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::prev_tab))
+            .on_action(cx.listener(Self::navigate_back))
+            .on_action(cx.listener(Self::navigate_forward))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::toggle_knowledge))

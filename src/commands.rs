@@ -194,6 +194,10 @@ commands! {
     ed::FollowLink => { id: "follow_link", label: "Follow Link",
         keys: ["cmd-enter"], ctx: Some("Editor"), menu: Some((Go, 2)),
         help: Some(HEditor) },
+    ws::NavigateBack => { id: "nav_back", label: "Back", keys: ["cmd-["],
+        ctx: None, menu: Some((Go, 2)), help: Some(General) },
+    ws::NavigateForward => { id: "nav_forward", label: "Forward", keys: ["cmd-]"],
+        ctx: None, menu: Some((Go, 2)), help: Some(General) },
 
     // ── Tools ──────────────────────────────────────────────────────────
     ws::ToggleGraph => { id: "graph", label: "Graph View", keys: ["cmd-shift-g"],
