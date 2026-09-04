@@ -129,6 +129,11 @@ pub struct Editor {
     layout_cache: HashMap<usize, CachedLine>,
     marked_range: Option<Range<usize>>,
     dragging: bool,
+    /// A left press that landed on a followable link. Navigation waits
+    /// for the release, so a drag can still begin inside link text; the
+    /// link found at press time rides along rather than being extracted
+    /// a second time.
+    pending_link: Option<PendingLink>,
     preferred_x: Option<Pixels>,
     save_task: Option<gpui::Task<()>>,
     find: Option<FindState>,
@@ -155,6 +160,15 @@ struct PendingEnrich {
     range: Range<usize>,
     snapshot: String,
     pasted: String,
+}
+
+/// A left press on a link, waiting for its release to decide whether it
+/// was a click (navigate) or the start of a drag (select).
+struct PendingLink {
+    /// Buffer offset of the press — where the caret goes if the link
+    /// turns out not to be followable, and the anchor a drag starts from.
+    offset: usize,
+    link: crate::knowledge::RawLink,
 }
 
 pub enum EditorEvent {
@@ -280,6 +294,7 @@ impl Editor {
             layout_cache: HashMap::new(),
             marked_range: None,
             dragging: false,
+            pending_link: None,
             preferred_x: None,
             save_task: None,
             find: None,
@@ -718,15 +733,25 @@ impl Editor {
         let Some(link) = crate::knowledge::Index::link_at(&text, offset) else {
             return false;
         };
+        self.open_link(&link, cx)
+    }
+
+    /// Open an already-located link. Split out from `follow_link_at` so
+    /// a caller that has just found the link (the mouse handler) does not
+    /// pay for a second `link_at` over the whole document.
+    fn open_link(&mut self, link: &crate::knowledge::RawLink, cx: &mut Context<Self>) -> bool {
+        if !self.can_format() {
+            return false;
+        }
         // An external link never touches the index — classify first.
-        if let crate::knowledge::LinkTarget::External(url) = crate::knowledge::classify(&link) {
+        if let crate::knowledge::LinkTarget::External(url) = crate::knowledge::classify(link) {
             cx.open_url(&url);
             return true;
         }
         let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
             return false;
         };
-        let resolved = state.0.lock().unwrap().resolve(&self.path, &link);
+        let resolved = state.0.lock().unwrap().resolve(&self.path, link);
         let target = match resolved {
             Some(path) => path,
             None if link.wiki => {
@@ -1751,7 +1776,12 @@ impl Editor {
         self.toolbar_visible = false;
         self.toolbar_task = None;
         // A plain click follows a rendered link; ⌘-click always follows,
-        // even a revealed one being edited.
+        // even a revealed one being edited. The decision is made here,
+        // where the press happened, but it is *acted on* in
+        // on_root_mouse_up: navigating on mouse-down makes it impossible
+        // to start a drag-selection inside link text, which is why every
+        // browser (and Obsidian) navigates on release.
+        self.pending_link = None;
         if !event.modifiers.shift {
             if let Some(offset) = self.offset_at_point(event.position) {
                 let text = self.core.buffer.text();
@@ -1762,10 +1792,18 @@ impl Editor {
                 // cursor's line is still rendered and must still follow.
                 let sel = self.core.selection.range();
                 let revealed = link
+                    .as_ref()
                     .is_some_and(|l| l.range.start <= sel.end && sel.start <= l.range.end);
-                if click_follows_link(event.modifiers.platform, on_link, revealed)
-                    && self.follow_link_at(offset, cx)
-                {
+                if click_follows_link(event.modifiers.platform, on_link, revealed) {
+                    // The caret deliberately does not move yet: a click
+                    // that navigates should not reveal the link's markers
+                    // on its way out, and a drag sets its anchor from
+                    // `offset` when the first move arrives.
+                    self.pending_link =
+                        Some(PendingLink { offset, link: link.expect("on_link") });
+                    self.dragging = true;
+                    self.core.break_undo_group();
+                    window.focus(&self.focus_handle);
                     return;
                 }
             }
@@ -1837,6 +1875,18 @@ impl Editor {
         }
         if self.dragging {
             if let Some(offset) = self.offset_at_point(event.position) {
+                // A press on a link left the caret alone. The moment the
+                // pointer actually moves off that offset it is a drag,
+                // not a click: drop the navigation and plant the anchor
+                // where the press landed.
+                if let Some(pending) = &self.pending_link {
+                    if offset == pending.offset {
+                        return; // jitter within one offset is still a click
+                    }
+                    let anchor = pending.offset;
+                    self.pending_link = None;
+                    self.core.set_cursor(anchor);
+                }
                 self.core.select_to(offset);
                 cx.notify();
             }
@@ -1846,6 +1896,18 @@ impl Editor {
     fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let selection_drag_ended = self.dragging && !self.scrollbar_dragging;
         self.dragging = false;
+        // The press landed on a followable link and nothing dragged it
+        // away: this release is the click, so navigate now.
+        if let Some(pending) = self.pending_link.take() {
+            if !self.open_link(&pending.link, cx) {
+                // Refused (an escaping wiki target, say) — the click
+                // still belongs to the document, so place the caret.
+                self.core.set_cursor(pending.offset);
+                self.preferred_x = None;
+                cx.notify();
+            }
+            return;
+        }
         if self.scrollbar_dragging {
             self.scrollbar_dragging = false;
             self.list_state.scrollbar_drag_ended();
@@ -4462,6 +4524,37 @@ mod tests {
         );
     }
 
+    /// A press inside link text must still be able to start a
+    /// drag-selection: navigation belongs on mouse *up*, and only when
+    /// nothing was dragged in between — what every browser and Obsidian
+    /// do, and the reason selecting link text is possible at all.
+    #[gpui::test]
+    fn dragging_out_of_a_link_selects_instead_of_navigating(cx: &mut TestAppContext) {
+        let ws = knowledge_fixture(cx);
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "go [[Roadmap]] or here").unwrap();
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+
+        // Display text is "go Roadmap or here": press inside the link
+        // text, drag past its end, release.
+        let start = point_for_index(&editor, cx, 0, 4);
+        let end = point_for_index(&editor, cx, 0, 14);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            opened.borrow().is_empty(),
+            "a drag that began inside a link must not navigate: {opened:?}"
+        );
+        cx.update(|_, app| {
+            let sel = editor.read(app).core.selection.range();
+            assert!(!sel.is_empty(), "the drag must have selected text (got {sel:?})");
+        });
+    }
+
     #[gpui::test]
     fn follow_link_opens_resolved_and_creates_unresolved(cx: &mut TestAppContext) {
         // The note lives *inside* the indexed workspace, as it does in
@@ -4517,7 +4610,7 @@ mod tests {
         // the link — its syntax is not revealed — so a plain click on the
         // rendered link text navigates.
         let inside = point_for_index(&editor, cx, 0, 7); // "a" of "Roadmap"
-        cx.simulate_mouse_down(inside, MouseButton::Left, Modifiers::none());
+        cx.simulate_click(inside, Modifiers::none());
         cx.run_until_parked();
         assert!(
             opened.borrow().last().is_some_and(|p| p.ends_with("Roadmap.md")),
@@ -4534,7 +4627,7 @@ mod tests {
         });
         cx.run_until_parked();
         let elsewhere = point_for_index(&editor, cx, 0, 10); // still inside the link
-        cx.simulate_mouse_down(elsewhere, MouseButton::Left, Modifiers::none());
+        cx.simulate_click(elsewhere, Modifiers::none());
         cx.run_until_parked();
         assert_eq!(
             opened.borrow().len(),
