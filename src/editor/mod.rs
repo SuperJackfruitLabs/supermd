@@ -220,6 +220,16 @@ fn is_markdown(path: &Path) -> bool {
     )
 }
 
+/// Whether a click should navigate rather than place the caret.
+///
+/// A rendered link follows on a plain click, matching every note-focused
+/// editor. A link whose syntax is revealed is one the cursor is already
+/// inside, so a plain click there edits it — otherwise the link could
+/// never be corrected. ⌘-click always follows, as before.
+pub fn click_follows_link(has_modifier: bool, on_link: bool, revealed: bool) -> bool {
+    on_link && (has_modifier || !revealed)
+}
+
 impl Editor {
     /// Read a file's text. Call `from_text` inside `cx.new` (which cannot
     /// be fallible) with the result.
@@ -1675,10 +1685,21 @@ impl Editor {
         // any pending reveal.
         self.toolbar_visible = false;
         self.toolbar_task = None;
-        // ⌘-click follows the link under the pointer.
-        if event.modifiers.platform && !event.modifiers.shift {
+        // A plain click follows a rendered link; ⌘-click always follows,
+        // even a revealed one being edited.
+        if !event.modifiers.shift {
             if let Some(offset) = self.offset_at_point(event.position) {
-                if self.follow_link_at(offset, cx) {
+                let text = self.core.buffer.text();
+                let on_link = crate::knowledge::Index::link_at(&text, offset).is_some();
+                // "Revealed" is span overlap, not a shared line — the
+                // same rule display::revealed uses. A link merely on the
+                // cursor's line is still rendered and must still follow.
+                let sel = self.core.selection.range();
+                let revealed = crate::knowledge::Index::link_at(&text, offset)
+                    .is_some_and(|l| l.range.start <= sel.end && sel.start <= l.range.end);
+                if click_follows_link(event.modifiers.platform, on_link, revealed)
+                    && self.follow_link_at(offset, cx)
+                {
                     return;
                 }
             }
@@ -4267,6 +4288,17 @@ mod tests {
         cx.dispatch_action(FollowLink);
         cx.run_until_parked();
         assert_eq!(opened.borrow().len(), 2);
+    }
+
+    #[test]
+    fn plain_click_follows_a_rendered_link_but_not_a_revealed_one() {
+        // (modifier, on a link, link syntax revealed) -> follows?
+        assert!(click_follows_link(false, true, false), "plain click on rendered link");
+        assert!(click_follows_link(true, true, false), "cmd-click still follows");
+        // Revealed means the cursor is inside it and the user is editing.
+        assert!(!click_follows_link(false, true, true), "plain click edits a revealed link");
+        assert!(click_follows_link(true, true, true), "cmd-click follows even when revealed");
+        assert!(!click_follows_link(false, false, false), "not on a link");
     }
 
     #[gpui::test]
