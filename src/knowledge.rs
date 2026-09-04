@@ -239,6 +239,37 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Where `[[target]]`, written in a note living in `from_dir`, would be
+/// created — or `None` when that lands anywhere but inside `root`.
+///
+/// `target` is unsanitised document text. It may contain `..`, it may be
+/// absolute (`Path::join` with an absolute path DISCARDS the base, so
+/// `[[/tmp/x]]` escapes without a single `..`), and it may travel
+/// through a symlink that leaves the workspace.
+///
+/// Containment is decided the same way `Index::resolve` decides it — on
+/// canonicalised paths, the only form that sees where a path really
+/// lands — but a note that does not exist yet cannot be canonicalised,
+/// and neither can a parent directory we are about to create. So the
+/// deepest ancestor that *does* canonicalise is the one checked, self
+/// first: a path that already exists as a symlink out of the workspace
+/// is caught by its own entry. Everything below the anchor is a plain
+/// name (`normalize` has collapsed every `.` and `..`), so it cannot
+/// climb back out. Fails closed: anything uncanonicalisable is refused.
+///
+/// The path handed back is the lexical one, not the canonical one, so it
+/// keeps the identity the index and the open tabs already use; it names
+/// the same location the check approved.
+pub fn creatable_note_path(root: &Path, from_dir: &Path, target: &str) -> Option<PathBuf> {
+    if target.trim().is_empty() {
+        return None;
+    }
+    let path = normalize(&from_dir.join(format!("{target}.md")));
+    let canon_root = root.canonicalize().ok()?;
+    let anchor = path.ancestors().find_map(|a| a.canonicalize().ok())?;
+    anchor.starts_with(&canon_root).then_some(path)
+}
+
 fn stem_of(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -792,6 +823,77 @@ mod tests {
         assert_eq!(
             index.resolve(&root.join("note.md"), &wiki), None,
             "a wiki link to a symlinked note must not resolve"
+        );
+    }
+
+    #[test]
+    fn creatable_note_paths_stay_inside_the_workspace() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("ws");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let dir = root.join("sub");
+
+        assert_eq!(
+            creatable_note_path(&root, &dir, "Fresh"),
+            Some(dir.join("Fresh.md")),
+            "a plain target is created beside the note"
+        );
+        assert_eq!(
+            creatable_note_path(&root, &dir, "deep/nested/Fresh"),
+            Some(dir.join("deep").join("nested").join("Fresh.md")),
+            "directories that do not exist yet are still creatable"
+        );
+        assert_eq!(
+            creatable_note_path(&root, &dir, "../Sibling"),
+            Some(root.join("Sibling.md")),
+            "a `..` that stays inside the workspace is fine"
+        );
+
+        assert_eq!(
+            creatable_note_path(&root, &dir, "../../escape"), None,
+            "`..` must not climb out of the workspace"
+        );
+        let absolute = base.path().join("victim");
+        assert_eq!(
+            creatable_note_path(&root, &dir, &absolute.display().to_string()), None,
+            "an absolute target replaces the base entirely and must be refused"
+        );
+        assert_eq!(creatable_note_path(&root, &dir, ""), None, "empty target");
+        assert_eq!(creatable_note_path(&root, &dir, "  "), None, "blank target");
+        assert_eq!(
+            creatable_note_path(&base.path().join("gone"), &dir, "Fresh"), None,
+            "a root that cannot be canonicalised fails closed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_creatable_note_path_cannot_travel_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.md"), "precious").unwrap();
+        // A directory symlink leaving the workspace: `esc/victim` has no
+        // `..` for `normalize` to collapse, so only canonicalisation
+        // sees the escape.
+        symlink(&outside, root.join("esc")).unwrap();
+        assert_eq!(
+            creatable_note_path(&root, &root, "esc/victim"), None,
+            "a symlinked directory must not be a route out"
+        );
+        assert_eq!(
+            creatable_note_path(&root, &root, "esc/brand-new"), None,
+            "…including for a note that does not exist yet"
+        );
+        // A symlinked *file* is caught by its own entry, not its parent.
+        symlink(outside.join("victim.md"), root.join("leak.md")).unwrap();
+        assert_eq!(
+            creatable_note_path(&root, &root, "leak"), None,
+            "an in-root name that is a symlink out must be refused"
         );
     }
 

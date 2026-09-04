@@ -734,15 +734,33 @@ impl Editor {
                 let Some(dir) = self.path.parent() else {
                     return false;
                 };
-                let path = dir.join(format!("{}.md", link.target));
+                let root = state.0.lock().unwrap().root.clone();
+                // `link.target` is unsanitised text from between the
+                // brackets: contain it before anything touches the disk.
+                let Some(path) = crate::knowledge::creatable_note_path(&root, dir, &link.target)
+                else {
+                    eprintln!(
+                        "supermd: refusing [[{}]]: it resolves outside the workspace",
+                        link.target
+                    );
+                    return false;
+                };
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if let Err(err) = std::fs::write(&path, "") {
-                    eprintln!("supermd: cannot create {}: {err}", path.display());
-                    return false;
+                // `create_new`, never `write`: an existing file must be
+                // OPENED, and `fs::write(path, "")` silently zeroes it
+                // instead — with no undo, because it is not the open
+                // buffer. `AlreadyExists` (a file we did not see, or one
+                // that appeared in between) is the same answer: open it.
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                    Ok(_) => state.0.lock().unwrap().update_file(&path, ""),
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(err) => {
+                        eprintln!("supermd: cannot create {}: {err}", path.display());
+                        return false;
+                    }
                 }
-                state.0.lock().unwrap().update_file(&path, "");
                 path
             }
             None => return false,
@@ -4328,32 +4346,131 @@ mod tests {
         assert_eq!(buffer_text(&editor, cx), "text\t");
     }
 
+    /// Scan `root` and register it as the global knowledge index.
+    fn index_workspace(cx: &mut TestAppContext, root: &Path) {
+        let index = crate::knowledge::Index::scan(root);
+        cx.update(|cx| {
+            cx.set_global(crate::knowledge::KnowledgeState(Arc::new(Mutex::new(index))));
+        });
+    }
+
     /// A two-note knowledge workspace registered as the global index.
     fn knowledge_fixture(cx: &mut TestAppContext) -> tempfile::TempDir {
         let ws = tempfile::tempdir().unwrap();
         std::fs::write(ws.path().join("Roadmap.md"), "the plan\n").unwrap();
         std::fs::write(ws.path().join("Recipes.md"), "the food\n").unwrap();
-        let index = crate::knowledge::Index::scan(ws.path());
-        cx.update(|cx| {
-            cx.set_global(crate::knowledge::KnowledgeState(Arc::new(Mutex::new(index))));
-        });
+        index_workspace(cx, ws.path());
         ws
     }
 
-    #[gpui::test]
-    fn follow_link_opens_resolved_and_creates_unresolved(cx: &mut TestAppContext) {
-        let _ws = knowledge_fixture(cx);
-        let (fx, editor, cx) = open_editor(cx, "note.md", "go [[Roadmap]] or [[Ghost]] now");
+    /// Every path an editor emitted through `EditorEvent::OpenPath`.
+    fn open_path_sink(
+        cx: &mut VisualTestContext,
+        editor: &Entity<Editor>,
+    ) -> Rc<RefCell<Vec<PathBuf>>> {
         let opened: Rc<RefCell<Vec<PathBuf>>> = Rc::default();
+        let sink = opened.clone();
         cx.update(|_, app| {
-            let sink = opened.clone();
-            app.subscribe(&editor, move |_, event: &EditorEvent, _| {
+            app.subscribe(editor, move |_, event: &EditorEvent, _| {
                 if let EditorEvent::OpenPath(p) = event {
                     sink.borrow_mut().push(p.clone());
                 }
             })
             .detach();
         });
+        opened
+    }
+
+    /// Following `[[drafts/secret]]` must never zero the file it names.
+    /// `drafts/` is gitignored, so the scan never indexes it and the
+    /// wiki target resolves to `None` — straight into the create branch,
+    /// which used to `fs::write(path, "")` over the real file. Nothing
+    /// about this needs an attacker, and there is no undo: the truncated
+    /// file is not the open buffer.
+    #[gpui::test]
+    fn following_a_wiki_link_never_truncates_an_existing_file(cx: &mut TestAppContext) {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join(".gitignore"), "drafts/\n").unwrap();
+        std::fs::create_dir_all(ws.path().join("drafts")).unwrap();
+        let secret = ws.path().join("drafts").join("secret.md");
+        std::fs::write(&secret, "important\n").unwrap();
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "see [[drafts/secret]] here").unwrap();
+        index_workspace(cx, ws.path());
+
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(10); // inside [[drafts/secret]]
+            cx.notify();
+        });
+        cx.dispatch_action(FollowLink);
+        cx.run_until_parked();
+
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "important\n",
+            "an existing file must never be truncated by following a link"
+        );
+        assert!(
+            opened.borrow().last().is_some_and(|p| p.ends_with("secret.md")),
+            "an existing file is opened, not re-created: {opened:?}"
+        );
+    }
+
+    /// A wiki target is unsanitised text: `..` segments and absolute
+    /// paths must not reach outside the workspace root. `Path::join`
+    /// with an absolute path replaces the base entirely, so `[[/tmp/x]]`
+    /// escapes without a single `..`.
+    #[gpui::test]
+    fn a_wiki_link_cannot_create_a_note_outside_the_workspace(cx: &mut TestAppContext) {
+        let base = tempfile::tempdir().unwrap();
+        let victim = base.path().join("victim.md");
+        std::fs::write(&victim, "precious\n").unwrap();
+        let ws = base.path().join("ws");
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        let note = ws.join("sub").join("note.md");
+        // `..` out of the workspace, and the same file named absolutely.
+        let escape = format!(
+            "a [[../../victim]] b [[{}]]",
+            victim.with_extension("").display(),
+        );
+        std::fs::write(&note, &escape).unwrap();
+        index_workspace(cx, &ws);
+
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+        let relative_at = escape.find("[[").unwrap() + 3;
+        let absolute_at = escape.rfind("[[").unwrap() + 3;
+        for offset in [relative_at, absolute_at] {
+            editor.update_in(cx, |ed, _, cx| {
+                ed.core.set_cursor(offset);
+                cx.notify();
+            });
+            cx.dispatch_action(FollowLink);
+            cx.run_until_parked();
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "precious\n",
+            "a link must not touch a file outside the workspace"
+        );
+        assert!(
+            opened.borrow().is_empty(),
+            "an escaping link must not be followed at all: {opened:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn follow_link_opens_resolved_and_creates_unresolved(cx: &mut TestAppContext) {
+        // The note lives *inside* the indexed workspace, as it does in
+        // the app: creating a note is contained to the workspace root.
+        let ws = knowledge_fixture(cx);
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "go [[Roadmap]] or [[Ghost]] now").unwrap();
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
 
         editor.update_in(cx, |ed, _, cx| {
             ed.core.set_cursor(7); // inside [[Roadmap]]
@@ -4370,7 +4487,7 @@ mod tests {
         });
         cx.dispatch_action(FollowLink);
         cx.run_until_parked();
-        let ghost = fx.path.parent().unwrap().join("Ghost.md");
+        let ghost = ws.path().join("Ghost.md");
         assert!(ghost.exists(), "unresolved link created the note");
         assert!(opened.borrow()[1].ends_with("Ghost.md"));
 
