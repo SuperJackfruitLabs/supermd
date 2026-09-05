@@ -20,9 +20,11 @@ bold, italic, code, and friends, each a single click. **⌘B** and
 ## Link your notes
 
 Open a folder and type `[[` — every note in it is a completion away.
-**⌘-click** a link to follow it (linking to a note that doesn't exist
-yet creates it), and **⌘3** shows what links *back* to the note
-you're reading, its `#tags`, and a live graph of the neighborhood.
+**Click** a link to follow it — a `[[wiki link]]`, a path to any file
+in the folder, or an `https://` address. Linking to a note that
+doesn't exist yet creates it. **⌘[** and **⌘]** walk back and forward
+through where you've been, and **⌘3** shows what links *back* to the
+note you're reading, its `#tags`, and a live graph of the neighborhood.
 Rename a note and every link to it is rewritten. No database — just
 your Markdown files, indexed.
 

@@ -1,0 +1,35 @@
+# A configuration file in the viewer-plus editor: highlighted, with a
+# gutter and auto-indent, and deliberately no language server.
+
+[workspace]
+root = "~/notes"
+open_last = true
+
+[editor]
+font_family = "Berkeley Mono"
+font_size = 14
+wrap = true
+show_invisibles = false
+
+[theme]
+name = "Solarized Light"
+follow_system = true
+
+# Time-of-day adaptation warms the palette after sunset.
+[theme.flux]
+enabled = true
+warmest_kelvin = 2700
+neutral_kelvin = 6500
+
+[knowledge]
+index_on_open = true
+follow_symlinks = false   # a symlinked note can point outside the vault
+
+[[plugin]]
+name = "calc"
+enabled = true
+
+[[plugin]]
+name = "url-title"
+enabled = true
+allowed_domains = ["commonmark.org", "github.com"]

@@ -678,6 +678,58 @@ mod tests {
         (dir, index)
     }
 
+    /// The committed example vault is a demo people open first, so a
+    /// dangling link in it reads as the app being broken. Index it for
+    /// real and resolve every link with the same code the editor uses,
+    /// so the vault cannot rot silently as features change.
+    ///
+    /// The unresolved names below are deliberate: the vault teaches that
+    /// clicking a link to a note that does not exist creates it, which
+    /// needs links that genuinely do not resolve.
+    #[test]
+    fn the_example_vault_has_no_accidentally_broken_links() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vault");
+        assert!(root.is_dir(), "the example vault is committed at examples/vault");
+        let index = Index::scan(&root);
+
+        const DELIBERATELY_MISSING: &[&str] = &[
+            "Ghost note",
+            "Another missing page",
+            "A note nobody has written",
+            "Rope internals",
+            // Images.md shows what a broken image looks like in place.
+            "../assets/nothing-here.png",
+        ];
+
+        let mut broken = Vec::new();
+        for entry in ignore::Walk::new(&root).flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(path).unwrap();
+            // `extract_all_links` is what the click path asks, and it
+            // already skips fenced and inline code — so prose *about*
+            // link syntax does not count as a link.
+            for link in extract_all_links(&text) {
+                if matches!(classify(&link), LinkTarget::External(_)) {
+                    continue;
+                }
+                if DELIBERATELY_MISSING.contains(&link.target.as_str()) {
+                    continue;
+                }
+                if index.resolve(path, &link).is_none() {
+                    broken.push(format!(
+                        "{}: [[{}]]",
+                        path.strip_prefix(&root).unwrap().display(),
+                        link.target
+                    ));
+                }
+            }
+        }
+        assert!(broken.is_empty(), "unresolved links in the example vault: {broken:#?}");
+    }
+
     #[test]
     fn scan_indexes_markdown_only_and_resolves_wiki_stems() {
         let (dir, index) = fixture();

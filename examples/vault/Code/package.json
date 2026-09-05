@@ -1,0 +1,18 @@
+{
+  "name": "supermd-example-vault",
+  "version": "0.0.15",
+  "private": true,
+  "description": "Nothing installs this. It exists so the JSON viewer has something real to render.",
+  "scripts": {
+    "build": "cargo build --release",
+    "test": "cargo test && cargo test --no-default-features --features mas",
+    "coverage": "bash scripts/build_plugins.sh --fixtures && cargo llvm-cov --summary-only"
+  },
+  "keywords": ["markdown", "editor", "rust", "gpui"],
+  "nested": {
+    "arrays": [1, 2, 3],
+    "objects": { "deep": { "deeper": true } },
+    "nulls": null,
+    "unicode": "café · 日本語 · 🌍"
+  }
+}
