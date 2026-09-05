@@ -107,6 +107,20 @@ pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
         }
     }
 
+    // CommonMark has no `[[wiki]]` syntax, so the parser above hands
+    // those back as ordinary text and they drew like ordinary text.
+    // Reuse the extractor the click path asks (`Index::link_at` ->
+    // `extract_all_links`): "looks like a link" and "follows on click"
+    // become the same predicate and cannot drift into something that
+    // looks clickable and isn't. Fenced and inline code are already
+    // skipped there, so this inherits that rule rather than restating
+    // it. Pushed before the sort below, so the result stays ordered.
+    for link in crate::knowledge::extract_all_links(source) {
+        if link.wiki {
+            spans.push(StyleSpan { range: link.range, kind: StyleKind::Link });
+        }
+    }
+
     spans.sort_by_key(|s| (s.range.start, s.range.end));
     spans
 }
@@ -354,6 +368,47 @@ mod tests {
         assert_eq!(misses, vec![("emoji".into(), "e".into(), ":new:".into())]);
     }
 
+
+    /// A `[[wiki]]` link is a link. CommonMark has no such syntax, so
+    /// pulldown-cmark hands it back as plain text and it drew like plain
+    /// text — invisible, in a release whose whole theme is that links
+    /// work. Styling reuses `knowledge::extract_all_links`, the same
+    /// function the click path asks, so what looks like a link and what
+    /// follows on click cannot drift apart.
+    #[test]
+    fn a_wiki_link_is_styled_as_a_link() {
+        assert_eq!(
+            spans_of_kind("see [[Roadmap]] today", |k| *k == StyleKind::Link),
+            vec![4..15],
+            "the span covers the whole [[...]], brackets included"
+        );
+    }
+
+    /// The markdown link keeps its own span from the parser: the wiki
+    /// pass must add to it, not double it up or replace it.
+    #[test]
+    fn wiki_and_markdown_links_are_both_styled_exactly_once() {
+        assert_eq!(
+            spans_of_kind("[[A]] and [b](c.md)", |k| *k == StyleKind::Link),
+            vec![0..5, 10..19]
+        );
+    }
+
+    /// Code is not prose. `extract_all_links` already skips fenced and
+    /// inline code, and inheriting that is the point of reusing it.
+    #[test]
+    fn a_wiki_link_inside_code_is_not_styled() {
+        assert_eq!(
+            spans_of_kind("`[[Roadmap]]`", |k| *k == StyleKind::Link),
+            Vec::<Range<usize>>::new(),
+            "inline code"
+        );
+        assert_eq!(
+            spans_of_kind("```\n[[Roadmap]]\n```\n", |k| *k == StyleKind::Link),
+            Vec::<Range<usize>>::new(),
+            "fenced block"
+        );
+    }
 
     fn spans_of_kind(source: &str, kind_match: fn(&StyleKind) -> bool) -> Vec<Range<usize>> {
         markdown_spans(source)

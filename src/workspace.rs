@@ -7533,6 +7533,30 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|_, app| assert!(ws.read(app).install_overlay.is_some(), "overlay open"));
+
+        // The App Store build deliberately offers no browsable catalog:
+        // `install_ui::catalog_browsable()` is false under `mas`, so the
+        // overlay opens with no entries (a downloadable-plugin list reads
+        // as a storefront under DPLA 3.3.2(b)). There is nothing to
+        // confirm, so the rest of this flow does not exist there — assert
+        // that deliberate absence rather than a broken install.
+        //
+        // This branch was missing and nobody saw it: CI builds the
+        // fixtures on Linux only, and runs the `mas` suite on macOS only,
+        // so this test has never once executed under `mas` — it takes the
+        // "fixtures not built" skip above every time.
+        if !crate::install_ui::catalog_browsable() {
+            cx.update(|_, app| {
+                let overlay = ws.read(app).install_overlay.as_ref().expect("overlay open");
+                assert_eq!(
+                    overlay.0.read(app).entry_count(),
+                    0,
+                    "the App Store build lists no installable plugins"
+                );
+            });
+            return;
+        }
+
         cx.dispatch_action(crate::install_ui::InstallConfirm);
         cx.run_until_parked();
         let installed = crate::settings::config_dir().join("plugins/demo/plugin.toml");
