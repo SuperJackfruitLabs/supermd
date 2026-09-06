@@ -32,8 +32,14 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig1-dev \
             libfreetype6-dev
-      - name: Build plugin fixtures (Linux exercises host tests)
-        if: runner.os == 'Linux'
+      # Both Linux and macOS need these. Linux runs the host tests for
+      # the default build; macOS runs them again for the App Store
+      # configuration below, which swaps wasmtime's JIT for the Pulley
+      # interpreter. Gating this to Linux meant every extension-host
+      # test took its "fixtures not built" skip on macOS, so the backend
+      # that actually ships to App Store users was never exercised.
+      - name: Build plugin fixtures (the host tests need them)
+        if: runner.os != 'Windows'
         run: bash scripts/build_plugins.sh --fixtures
       - name: Run tests
         run: cargo test

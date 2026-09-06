@@ -753,10 +753,28 @@ impl Editor {
         if !self.can_format() {
             return false;
         }
-        // An external link never touches the index — classify first.
-        if let crate::knowledge::LinkTarget::External(url) = crate::knowledge::classify(link) {
-            cx.open_url(&url);
-            return true;
+        // Neither an external link nor an anchor touches the index —
+        // classify first.
+        match crate::knowledge::classify(link) {
+            crate::knowledge::LinkTarget::External(url) => {
+                cx.open_url(&url);
+                return true;
+            }
+            // `#heading` is a position in the document already open, not
+            // a path. The `toc` plugin writes a page of these, and until
+            // now every one of them was joined onto a directory, failed
+            // to resolve, and did nothing when clicked.
+            crate::knowledge::LinkTarget::Anchor(anchor) => {
+                let text = self.core.buffer.text();
+                let Some(offset) = crate::knowledge::heading_offset(&text, &anchor) else {
+                    return false;
+                };
+                self.core.selection = crate::editor::core::Selection::cursor(offset);
+                self.reveal_cursor();
+                cx.notify();
+                return true;
+            }
+            _ => {}
         }
         let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
             return false;
@@ -4691,6 +4709,35 @@ mod tests {
             cx.opened_url().as_deref(), Some("https://apple.com"),
             "the link's destination is what gets opened"
         );
+    }
+
+    /// Clicking a table-of-contents entry moves the cursor to that
+    /// heading. Anchors used to be classified as relative paths, joined
+    /// onto a directory, resolved to nothing, and silently do nothing —
+    /// so every link the `toc` plugin generates was dead.
+    #[gpui::test]
+    fn an_anchor_link_moves_the_cursor_to_its_heading(cx: &mut TestAppContext) {
+        let doc = "# Top\n\n[jump](#the-target)\n\n## The target\n\ntail\n";
+        let (_fx, editor, cx) = open_editor(cx, "n.md", doc);
+        let target = doc.find("## The target").expect("heading present");
+
+        // Offset 10 sits inside the link text `jump`.
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(10, cx));
+        assert!(handled, "an anchor is handled, not passed to the index");
+        editor.update(cx, |ed, _| {
+            assert_eq!(
+                ed.core.selection.head, target,
+                "the cursor lands on the heading the anchor names"
+            );
+        });
+        assert!(cx.opened_url().is_none(), "an anchor never leaves the app");
+    }
+
+    #[gpui::test]
+    fn an_anchor_naming_no_heading_is_not_handled(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "# Top\n\n[x](#nowhere)\n");
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(10, cx));
+        assert!(!handled, "a dangling anchor does nothing rather than guessing");
     }
 
     #[gpui::test]

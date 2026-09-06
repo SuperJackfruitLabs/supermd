@@ -31,6 +31,9 @@ pub enum LinkTarget {
     Wiki(String),
     /// A path relative to the containing file.
     Relative(String),
+    /// `#heading` — a position inside the document already open, not a
+    /// path. The `toc` plugin writes a page of these.
+    Anchor(String),
 }
 
 /// Sort a link into one of the three kinds.
@@ -42,6 +45,9 @@ pub enum LinkTarget {
 pub fn classify(link: &RawLink) -> LinkTarget {
     if link.wiki {
         return LinkTarget::Wiki(link.target.clone());
+    }
+    if let Some(anchor) = link.target.strip_prefix('#') {
+        return LinkTarget::Anchor(anchor.to_string());
     }
     let lower = link.target.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") {
@@ -67,6 +73,52 @@ pub struct Index {
 /// The workspace's shared index. Absent until a folder is open.
 #[derive(Clone)]
 pub struct KnowledgeState(pub std::sync::Arc<std::sync::Mutex<Index>>);
+/// GitHub's heading slug: alphanumerics lowercased, spaces and hyphens
+/// become hyphens, everything else is dropped. Must match the `toc`
+/// plugin's `slug`, since that is what writes the anchors people click.
+pub fn heading_slug(heading: &str) -> String {
+    heading
+        .chars()
+        .filter_map(|c| {
+            if c.is_alphanumeric() {
+                Some(c.to_ascii_lowercase())
+            } else if c == ' ' || c == '-' {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Byte offset of the heading `anchor` names, or None. Fenced code is
+/// skipped, and an ATX heading needs whitespace after its `#` run —
+/// without that a tag line like `#guide` counts as a heading.
+pub fn heading_offset(text: &str, anchor: &str) -> Option<usize> {
+    let wanted = anchor.to_ascii_lowercase();
+    let mut in_fence = false;
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            offset += line.len();
+            continue;
+        }
+        if !in_fence {
+            let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+            if (1..=6).contains(&hashes)
+                && matches!(trimmed[hashes..].chars().next(), Some(' ' | '\t'))
+                && heading_slug(trimmed[hashes..].trim()) == wanted
+            {
+                return Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    None
+}
+
 impl gpui::Global for KnowledgeState {}
 
 /// Extract wiki + markdown links. Fenced code blocks and inline code
@@ -718,10 +770,18 @@ mod tests {
                 if DELIBERATELY_MISSING.contains(&link.target.as_str()) {
                     continue;
                 }
-                // An in-document anchor (`#heading`) is not a path and
-                // never resolves to a file. The `toc` plugin writes a
-                // page full of them into Plugins.md.
-                if link.target.starts_with('#') {
+                // An in-document anchor is not a path — it must name a
+                // heading in this same file. The `toc` plugin writes a
+                // page of them into Plugins.md, so this checks the
+                // generated table of contents actually points at
+                // something.
+                if let LinkTarget::Anchor(a) = classify(&link) {
+                    if heading_offset(&text, &a).is_none() {
+                        broken.push(format!(
+                            "{}: anchor #{a} names no heading",
+                            path.strip_prefix(&root).unwrap().display()
+                        ));
+                    }
                     continue;
                 }
                 if index.resolve(path, &link).is_none() {
@@ -1029,6 +1089,38 @@ mod tests {
         // The index itself now answers for the new path.
         assert!(index.note_names().iter().any(|(n, _)| n == "Vision"));
         assert!(!index.note_names().iter().any(|(n, _)| n == "Roadmap"));
+    }
+
+    /// The `toc` plugin writes `[Heading](#heading)` links. They were
+    /// classified as relative paths, joined onto a directory, resolved
+    /// to nothing, and did nothing when clicked — a plugin we ship
+    /// generating links the editor could not follow.
+    #[test]
+    fn an_anchor_is_its_own_kind_not_a_relative_path() {
+        let link = RawLink {
+            target: "#calc--arithmetic".into(),
+            wiki: false,
+            range: 0..0,
+            context: String::new(),
+        };
+        assert_eq!(classify(&link), LinkTarget::Anchor("calc--arithmetic".into()));
+    }
+
+    #[test]
+    fn heading_offset_finds_the_heading_an_anchor_names() {
+        let doc = "# Top\n\nbody\n\n## calc — arithmetic in prose\n\nmore\n";
+        let at = heading_offset(doc, "calc--arithmetic-in-prose").expect("found");
+        assert_eq!(&doc[at..at + 6], "## cal");
+        assert_eq!(heading_offset(doc, "top"), Some(0));
+        assert_eq!(heading_offset(doc, "nothing-like-this"), None);
+    }
+
+    /// Same two traps the `toc` plugin had: a fenced `# heading` is not
+    /// a heading, and `#guide` is a tag, not a level-1 heading.
+    #[test]
+    fn heading_offset_ignores_fenced_code_and_tag_lines() {
+        assert_eq!(heading_offset("```\n# Fenced\n```\n", "fenced"), None);
+        assert_eq!(heading_offset("#guide #plugins\n", "guide-plugins"), None);
     }
 
     #[test]
