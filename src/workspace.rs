@@ -2844,16 +2844,16 @@ impl Workspace {
                             .when(is_dir, |d| d.child(if expanded { "▼" } else { "▶" })),
                     )
                     .child({
-                        let (icon, tint) = if is_dir {
-                            ("folder", t.fg_muted)
+                        let (icon_path, tint) = if is_dir {
+                            (crate::ui_icons::path("folder"), t.fg_muted)
                         } else {
                             let (icon, color) = seti::icon_for(&entry.name);
-                            (icon, seti_tint(color, &t))
+                            (format!("icons/seti/{icon}.svg"), seti_tint(color, &t))
                         };
                         // Seti glyphs carry ~30% internal padding, so the box
                         // runs larger than the text for a matched visual size.
                         gpui::svg()
-                            .path(SharedString::from(format!("icons/seti/{icon}.svg")))
+                            .path(SharedString::from(icon_path))
                             .size(px(20.))
                             .flex_none()
                             .text_color(tint)

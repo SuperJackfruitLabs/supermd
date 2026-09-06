@@ -140,6 +140,38 @@ pub fn is_separator_row(line: &str) -> bool {
         })
 }
 
+/// How a column's cells sit in their cell, from the colons in a
+/// table's delimiter row: `:---` left, `:--:` centre, `---:` right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// Per-column alignment from a delimiter row. GFM reads a leading
+/// colon as left, a trailing one as right, and both as centre; a bare
+/// `---` has no opinion and is left alone.
+///
+/// `render_table` skips the delimiter row when drawing, which is why
+/// this has to be read off it first — the colons are the only place
+/// the alignment exists, and pulldown-cmark's `Tag::Table(alignments)`
+/// is discarded by `blocks()` above.
+pub fn column_alignments(separator_row: &str) -> Vec<Option<ColumnAlign>> {
+    parse_row(separator_row)
+        .iter()
+        .map(|cell| {
+            let c = cell.trim();
+            match (c.starts_with(':'), c.ends_with(':')) {
+                (true, true) => Some(ColumnAlign::Center),
+                (true, false) => Some(ColumnAlign::Left),
+                (false, true) => Some(ColumnAlign::Right),
+                (false, false) => None,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +226,33 @@ mod tests {
             .unwrap();
         assert_eq!(fence.0, 0..7);
         assert_eq!(fence.1, Some(19..22));
+    }
+
+    /// The colons in a delimiter row are the only record of a table's
+    /// alignment, and `render_table` skips that row when drawing — so
+    /// this parse is the whole feature. Alignment used to be dropped
+    /// twice over: `blocks()` matches `Tag::Table(_)`, discarding
+    /// pulldown-cmark's alignment vector, and the delimiter row was
+    /// then skipped without being read.
+    #[test]
+    fn column_alignments_come_from_the_delimiter_colons() {
+        assert_eq!(
+            column_alignments("| :--- | :---: | ---: | --- |"),
+            vec![
+                Some(ColumnAlign::Left),
+                Some(ColumnAlign::Center),
+                Some(ColumnAlign::Right),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn column_alignments_tolerate_ragged_and_padded_rows() {
+        assert_eq!(
+            column_alignments("|:-:|   ---:   |"),
+            vec![Some(ColumnAlign::Center), Some(ColumnAlign::Right)]
+        );
     }
 
     #[test]

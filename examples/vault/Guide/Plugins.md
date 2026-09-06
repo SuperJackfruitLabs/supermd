@@ -10,6 +10,19 @@ That is the honest failure mode: plain text, never a crash.
 #guide #plugins
 
 <!-- toc -->
+- [Plugins](#plugins)
+  - [calc — arithmetic in prose](#calc--arithmetic-in-prose)
+  - [emoji — shortcodes](#emoji--shortcodes)
+  - [todo-marks — markers in prose](#todo-marks--markers-in-prose)
+  - [chart — charts from `label: value`](#chart--charts-from-label-value)
+  - [dot — Graphviz](#dot--graphviz)
+  - [graphql — highlighting for GraphQL](#graphql--highlighting-for-graphql)
+  - [csv-view and ipynb-view — non-Markdown documents](#csv-view-and-ipynb-view--non-markdown-documents)
+  - [word-count — the status strip](#word-count--the-status-strip)
+  - [tidy — punctuation and CSV paste](#tidy--punctuation-and-csv-paste)
+  - [url-title — pasted links gain their title](#url-title--pasted-links-gain-their-title)
+  - [daily-note — today's journal](#daily-note--todays-journal)
+  - [html-export — a self-contained page](#html-export--a-self-contained-page)
 <!-- /toc -->
 
 The two markers above are the `toc` plugin's. Run **Update table of

@@ -1,8 +1,12 @@
 # Code
 
 Fenced blocks are highlighted with tree-sitter, on open and on edit,
-never per frame. The fence delimiters stay visible and render faded —
-a code block is not something you want silently folded away.
+never per frame.
+
+A closed fence hides its ``` delimiter lines while the cursor is
+outside it, the same reveal rule tables and diagrams follow. That
+means the language tag is hidden too: put the cursor inside a block to
+see which language it is being highlighted as.
 
 #guide #code
 

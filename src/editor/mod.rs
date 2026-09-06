@@ -2783,11 +2783,15 @@ fn render_table(
     cx: &mut App,
 ) -> gpui::AnyElement {
     let mut rows: Vec<(usize, Vec<String>)> = Vec::new();
+    // The delimiter row is not drawn, but it is the only place a
+    // table's alignment is recorded — read it on the way past.
+    let mut aligns: Vec<Option<blocks::ColumnAlign>> = Vec::new();
     {
         let ed = editor.read(cx);
         for line in lines {
             let text = ed.core.buffer.line_text(line);
             if blocks::is_separator_row(&text) {
+                aligns = blocks::column_alignments(&text);
                 continue;
             }
             rows.push((line, blocks::parse_row(&text)));
@@ -2836,16 +2840,21 @@ fn render_table(
             });
         for c in 0..ncols {
             let cell = cells.get(c).cloned().unwrap_or_default();
-            row = row.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .px_3()
-                    .py_2()
-                    .text_size(px(t.body_size - 1.))
-                    .line_height(relative(1.45))
-                    .child(SharedString::from(cell)),
-            );
+            let mut cell_el = div()
+                .flex_1()
+                .min_w_0()
+                .px_3()
+                .py_2()
+                .text_size(px(t.body_size - 1.))
+                .line_height(relative(1.45));
+            match aligns.get(c).copied().flatten() {
+                Some(blocks::ColumnAlign::Center) => cell_el = cell_el.text_center(),
+                Some(blocks::ColumnAlign::Right) => cell_el = cell_el.text_right(),
+                // Left is the default flow direction; a bare `---`
+                // column has no opinion and is left alone too.
+                Some(blocks::ColumnAlign::Left) | None => {}
+            }
+            row = row.child(cell_el.child(SharedString::from(cell)));
         }
         container = container.child(row);
     }

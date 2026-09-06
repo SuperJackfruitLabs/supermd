@@ -718,6 +718,12 @@ mod tests {
                 if DELIBERATELY_MISSING.contains(&link.target.as_str()) {
                     continue;
                 }
+                // An in-document anchor (`#heading`) is not a path and
+                // never resolves to a file. The `toc` plugin writes a
+                // page full of them into Plugins.md.
+                if link.target.starts_with('#') {
+                    continue;
+                }
                 if index.resolve(path, &link).is_none() {
                     broken.push(format!(
                         "{}: [[{}]]",
