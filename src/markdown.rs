@@ -104,9 +104,99 @@ impl InlineBuilder {
         }
     }
 
-    fn finish(self) -> InlineText {
+    fn finish(mut self) -> InlineText {
+        resolve_wiki_links(&mut self.out);
         self.out
     }
+}
+
+/// Turn `[[Target]]` and `[[Target|label]]` into real links.
+///
+/// CommonMark has no wiki-link syntax, so pulldown-cmark hands these
+/// back as ordinary text and the rendered view drew them as literal
+/// `[[Editing]]` — unstyled, unclickable, brackets showing. The editor
+/// learned about wiki links through its own span pass; this is the
+/// same idea for the reading view, which is a separate pipeline.
+///
+/// The brackets (and any `Target|` prefix) are removed from the text,
+/// so every existing span offset after a match has to move with it.
+fn resolve_wiki_links(inline: &mut InlineText) {
+    if !inline.text.contains("[[") {
+        return;
+    }
+    // Code spans are literal: `[[not a link]]` stays as written.
+    let code: Vec<Range<usize>> = inline
+        .spans
+        .iter()
+        .filter(|(_, st)| st.code)
+        .map(|(r, _)| r.clone())
+        .collect();
+
+    let src = std::mem::take(&mut inline.text);
+    let mut out = String::with_capacity(src.len());
+    // old byte offset -> new byte offset, for remapping the spans.
+    let mut map = vec![0usize; src.len() + 1];
+    let mut links: Vec<(Range<usize>, String)> = Vec::new();
+    let mut link_spans: Vec<Range<usize>> = Vec::new();
+
+    let bytes = src.as_bytes();
+    let mut i = 0usize;
+    while i < src.len() {
+        map[i] = out.len();
+        let starts_wiki = bytes[i] == b'['
+            && bytes.get(i + 1) == Some(&b'[')
+            && !code.iter().any(|r| r.contains(&i));
+        let close = starts_wiki.then(|| src[i + 2..].find("]]")).flatten();
+        let Some(rel) = close else {
+            let ch_len = src[i..].chars().next().map_or(1, char::len_utf8);
+            out.push_str(&src[i..i + ch_len]);
+            for k in i..i + ch_len {
+                map[k] = map[i];
+            }
+            i += ch_len;
+            continue;
+        };
+        let inner = &src[i + 2..i + 2 + rel];
+        let (target, label) = match inner.split_once('|') {
+            Some((t, l)) => (t.trim(), l.trim()),
+            None => (inner.trim(), inner.trim()),
+        };
+        if target.is_empty() {
+            out.push_str("[[");
+            map[i + 1] = map[i];
+            i += 2;
+            continue;
+        }
+        let start = out.len();
+        out.push_str(label);
+        // Every byte of the source match maps to the start of the
+        // label: a style span that covered part of it now covers the
+        // label instead, which is the only sensible answer.
+        for k in i..(i + 2 + rel + 2).min(map.len()) {
+            map[k] = start;
+        }
+        link_spans.push(start..out.len());
+        links.push((start..out.len(), target.to_string()));
+        i += 2 + rel + 2;
+    }
+    map[src.len()] = out.len();
+
+    let remap = |o: usize| map.get(o).copied().unwrap_or(out.len());
+    inline.spans = inline
+        .spans
+        .iter()
+        .map(|(r, st)| (remap(r.start)..remap(r.end), *st))
+        .filter(|(r, _)| r.start < r.end)
+        .collect();
+    for r in link_spans {
+        inline.spans.push((r, SpanStyle { link: true, ..Default::default() }));
+    }
+    inline.spans.sort_by_key(|(r, _)| (r.start, r.end));
+    // Wiki targets are appended after any markdown links already found,
+    // then sorted so the ranges stay in document order.
+    inline.links.extend(links);
+    inline.links.sort_by_key(|(r, _)| r.start);
+    inline.text = out;
 }
 
 /// Nesting depth counters for the inline styles currently open.
@@ -401,6 +491,89 @@ mod tests {
         let bold = SpanStyle { bold: true, ..Default::default() };
         let bold_italic = SpanStyle { bold: true, italic: true, ..Default::default() };
         assert_eq!(inline.spans, vec![(2..4, bold), (4..5, bold_italic)]);
+    }
+
+    /// The reading view drew `[[Editing]]` as literal grey text with
+    /// its brackets showing: unstyled, unclickable, and the default
+    /// view once a single click started opening previews. CommonMark
+    /// has no wiki syntax, so the reader's parser has to add it.
+    #[test]
+    fn wiki_links_become_links_in_the_rendered_view() {
+        let doc = parse("see [[Editing]] and [[Links and notes]] here\n");
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(
+            inline.text, "see Editing and Links and notes here",
+            "the brackets are gone from the rendered text"
+        );
+        let targets: Vec<(&str, &str)> = inline
+            .links
+            .iter()
+            .map(|(r, d)| (&inline.text[r.clone()], d.as_str()))
+            .collect();
+        assert_eq!(
+            targets,
+            vec![("Editing", "Editing"), ("Links and notes", "Links and notes")]
+        );
+        assert!(
+            inline.spans.iter().any(|(r, st)| st.link && &inline.text[r.clone()] == "Editing"),
+            "and they are styled as links: {:?}",
+            inline.spans
+        );
+    }
+
+    /// `[[Target|label]]` shows the label and points at the target.
+    #[test]
+    fn a_labelled_wiki_link_shows_its_label() {
+        let doc = parse("[[Tables|the table guide]] follows\n");
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(inline.text, "the table guide follows");
+        assert_eq!(inline.links[0].1, "Tables");
+        assert_eq!(&inline.text[inline.links[0].0.clone()], "the table guide");
+    }
+
+    /// Code is literal: a wiki link inside backticks stays as written.
+    #[test]
+    fn a_wiki_link_inside_code_is_left_alone() {
+        let doc = parse("`[[not a link]]` but [[Real]] is\n");
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
+        assert!(inline.text.contains("[[not a link]]"), "code kept: {}", inline.text);
+        assert_eq!(inline.links.len(), 1, "only the real one is a link");
+        assert_eq!(inline.links[0].1, "Real");
+    }
+
+    /// Styling around a rewritten link must not end up pointing at the
+    /// wrong bytes — every offset after a match moves when the brackets
+    /// are removed.
+    #[test]
+    fn spans_after_a_wiki_link_still_line_up() {
+        let doc = parse("[[A]] then **bold** after\n");
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(inline.text, "A then bold after");
+        let bold = inline
+            .spans
+            .iter()
+            .find(|(_, st)| st.bold)
+            .map(|(r, _)| inline.text[r.clone()].to_string());
+        assert_eq!(bold.as_deref(), Some("bold"), "spans: {:?}", inline.spans);
+    }
+
+    /// Malformed shapes must not panic or eat the rest of the line.
+    #[test]
+    fn unterminated_and_empty_wiki_links_are_left_as_text() {
+        assert_eq!(
+            match &parse("an [[unterminated link\n").blocks[0] {
+                Block::Paragraph(i) => i.text.clone(),
+                _ => panic!(),
+            },
+            "an [[unterminated link"
+        );
+        assert_eq!(
+            match &parse("empty [[]] here\n").blocks[0] {
+                Block::Paragraph(i) => i.text.clone(),
+                _ => panic!(),
+            },
+            "empty [[]] here"
+        );
     }
 
     /// A rendered link must know where it points. The destination used
