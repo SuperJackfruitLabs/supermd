@@ -509,6 +509,46 @@ pub fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge], iterations: usize) {
     }
 }
 
+/// The bounding box of a layout, as (min_x, min_y, max_x, max_y).
+/// Empty layouts give the unit square, so callers need no special case.
+pub fn bounds(nodes: &[GraphNode]) -> (f32, f32, f32, f32) {
+    if nodes.is_empty() {
+        return (0.0, 0.0, 1.0, 1.0);
+    }
+    let mut b = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for n in nodes {
+        b.0 = b.0.min(n.x);
+        b.1 = b.1.min(n.y);
+        b.2 = b.2.max(n.x);
+        b.3 = b.3.max(n.y);
+    }
+    b
+}
+
+/// Zoom and pan that fit `nodes` into a `viewport` of pixels, with a
+/// margin. Returns (zoom, pan_x, pan_y) for the same transform
+/// `render_graph` uses: `screen = pan + unit * 900 * zoom + 60`.
+///
+/// Without this there was no way back once you panned away from the
+/// graph — the only recovery was closing and reopening it.
+pub fn fit_to(
+    nodes: &[GraphNode],
+    viewport: (f32, f32),
+    margin: f32,
+) -> (f32, f32, f32) {
+    let (x0, y0, x1, y1) = bounds(nodes);
+    let (w, h) = ((x1 - x0).max(1e-3), (y1 - y0).max(1e-3));
+    let avail_w = (viewport.0 - margin * 2.0).max(1.0);
+    let avail_h = (viewport.1 - margin * 2.0).max(1.0);
+    // `base` is 900 * zoom, and the layout spans `w` of unit space.
+    let zoom = ((avail_w / (w * 900.0)).min(avail_h / (h * 900.0))).clamp(0.1, 3.0);
+    let base = 900.0 * zoom;
+    // Centre what is drawn, then undo the fixed 60px board offset.
+    let pan_x = (viewport.0 - w * base) / 2.0 - x0 * base - 60.0;
+    let pan_y = (viewport.1 - h * base) / 2.0 - y0 * base - 60.0;
+    (zoom, pan_x, pan_y)
+}
+
 /// A thin filled quad along a→b — `paint_path` fills, so an edge line
 /// is a two-pixel-wide rectangle.
 pub fn line_path(
@@ -670,6 +710,54 @@ mod tests {
             "no node escaped to infinity"
         );
         assert!(sim.alpha() < 1.0, "it is cooling");
+    }
+
+    #[test]
+    fn bounds_cover_every_node() {
+        let (_d, index) = fixture();
+        let (nodes, _) = build(&index);
+        let (x0, y0, x1, y1) = bounds(&nodes);
+        assert!(nodes.iter().all(|n| n.x >= x0 && n.x <= x1 && n.y >= y0 && n.y <= y1));
+        assert_eq!(bounds(&[]), (0.0, 0.0, 1.0, 1.0), "empty is the unit square");
+    }
+
+    /// Fitting puts every node on screen with room to spare. There was
+    /// no way back from a pan before this: you closed the graph and
+    /// reopened it.
+    #[test]
+    fn fitting_brings_every_node_on_screen() {
+        let (_d, index) = fixture();
+        let (mut nodes, edges) = build(&index);
+        let mut sim = Simulation::new(std::mem::take(&mut nodes), edges);
+        sim.run(300);
+        let viewport = (1200.0, 800.0);
+        let margin = 60.0;
+        let (zoom, pan_x, pan_y) = fit_to(&sim.nodes, viewport, margin);
+        for n in &sim.nodes {
+            let sx = pan_x + n.x * 900.0 * zoom + 60.0;
+            let sy = pan_y + n.y * 900.0 * zoom + 60.0;
+            assert!(
+                (0.0..=viewport.0).contains(&sx) && (0.0..=viewport.1).contains(&sy),
+                "node at ({sx}, {sy}) is off a {viewport:?} screen"
+            );
+        }
+    }
+
+    /// A single node must not divide by a zero-sized layout.
+    #[test]
+    fn fitting_a_degenerate_layout_is_finite() {
+        let one = vec![GraphNode {
+            path: PathBuf::from("a.md"),
+            x: 0.5,
+            y: 0.5,
+            vx: 0.0,
+            vy: 0.0,
+            pinned: false,
+            degree: 0,
+        }];
+        let (zoom, px_, py) = fit_to(&one, (800.0, 600.0), 40.0);
+        assert!(zoom.is_finite() && px_.is_finite() && py.is_finite());
+        assert!(zoom > 0.0);
     }
 
     /// The simulation cools to rest on its own, so the shell knows

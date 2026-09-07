@@ -40,6 +40,7 @@ The modifier says what a shortcut acts on. New bindings follow the tier that mat
 | ⌘ [ | Ctrl [ | Back |
 | ⌘ ] | Ctrl ] | Forward |
 | ⌘ ⇧ G | Ctrl Shift G | Graph View |
+| ⌘ 0 | Ctrl 0 | Fit Graph to Window |
 | ⌘ ⇧ P | Ctrl Shift P | Command Palette… |
 | ⌘ / | Ctrl / | Keyboard Shortcuts |
 

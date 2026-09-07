@@ -45,6 +45,7 @@ actions!(
         ToggleFlux,
         InstallPlugins,
         GraphDismiss,
+        GraphFit,
         SidebarUp,
         SidebarDown,
         SidebarRename,
@@ -3720,6 +3721,21 @@ impl Workspace {
         }));
     }
 
+    /// Frame the whole graph in the window. There was no way back from
+    /// a pan before this short of closing and reopening the view.
+    fn graph_fit(&mut self, _: &GraphFit, window: &mut Window, cx: &mut Context<Self>) {
+        let viewport = window.viewport_size();
+        let Some(graph) = self.graph.as_mut() else { return };
+        let (zoom, pan_x, pan_y) = crate::graph::fit_to(
+            graph.sim.nodes.as_slice(),
+            (f32::from(viewport.width), f32::from(viewport.height)),
+            80.0,
+        );
+        graph.zoom = zoom;
+        graph.pan = (pan_x, pan_y);
+        cx.notify();
+    }
+
     fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
         self.graph = None;
         self.focus_active(window, cx);
@@ -3873,6 +3889,7 @@ impl Workspace {
                 .key_context("GraphView")
                 .track_focus(&self.graph_focus)
                 .on_action(cx.listener(Self::graph_dismiss))
+                .on_action(cx.listener(Self::graph_fit))
                 .overflow_hidden()
                 .on_mouse_down(
                     gpui::MouseButton::Left,
