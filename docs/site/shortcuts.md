@@ -37,7 +37,18 @@ The modifier says what a shortcut acts on. New bindings follow the tier that mat
 | ⌘ ⇧ F | Ctrl Shift F | Search in Workspace… |
 | ⌘ ⇧ ] | Ctrl Shift ] | Next Tab |
 | ⌘ ⇧ [ | Ctrl Shift [ | Previous Tab |
+| ⌘ [ | Ctrl [ | Back |
+| ⌘ ] | Ctrl ] | Forward |
 | ⌘ ⇧ G | Ctrl Shift G | Graph View |
+| ⌘ 0 | Ctrl 0 | Fit Graph to Window |
+| ⌘ G | Ctrl G | Graph Colour: Folder / Tag / None |
+| ⌘ F | Ctrl F | Search the Graph |
+| ⌘ ⇧ O | Ctrl Shift O | Graph: Orphans Only |
+| ⌘ L | Ctrl L | Graph: Local / Whole Vault |
+| ⌘ = | Ctrl = | Graph: One Hop Further |
+| ⌘ − | Ctrl − | Graph: One Hop Nearer |
+| ⌘ . | Ctrl . | Graph: Freeze / Run |
+| ⌘ E | Ctrl E | Graph Spread: Tight / Normal / Loose |
 | ⌘ ⇧ P | Ctrl Shift P | Command Palette… |
 | ⌘ / | Ctrl / | Keyboard Shortcuts |
 

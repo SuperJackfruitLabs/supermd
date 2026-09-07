@@ -45,6 +45,15 @@ actions!(
         ToggleFlux,
         InstallPlugins,
         GraphDismiss,
+        GraphFit,
+        GraphColorBy,
+        GraphSearch,
+        GraphOrphans,
+        GraphLocal,
+        GraphDepthIn,
+        GraphDepthOut,
+        GraphFreeze,
+        GraphSpread,
         SidebarUp,
         SidebarDown,
         SidebarRename,
@@ -76,6 +85,8 @@ actions!(
         OpenRecent5,
         OpenRecent6,
         OpenRecent7,
+        NavigateBack,
+        NavigateForward,
     ]
 );
 
@@ -267,6 +278,13 @@ pub struct Workspace {
     /// "Move to…" folder picker (a Palette over workspace folders).
     move_picker: Option<(Entity<crate::palette::Palette>, gpui::Subscription)>,
     _watcher: Option<notify::RecommendedWatcher>,
+    /// Back/forward across followed links.
+    history: crate::nav::History,
+    /// True while a back/forward move is in flight. A move *through*
+    /// history must never record a visit — every entry point that opens
+    /// a file records one now, so suppression is explicit rather than a
+    /// matter of which call happens to come first.
+    navigating: bool,
 }
 
 enum SidebarEditKind {
@@ -284,12 +302,57 @@ struct SidebarEdit {
 
 /// The full-workspace graph: laid-out nodes plus view transform.
 struct GraphViewState {
-    nodes: Vec<crate::graph::GraphNode>,
-    edges: Vec<crate::graph::GraphEdge>,
+    sim: crate::graph::Simulation,
     pan: (f32, f32),
     zoom: f32,
     /// Last mouse position while panning.
     drag: Option<(f32, f32)>,
+    /// The node being dragged, and the pointer offset within it.
+    node_drag: Option<usize>,
+    /// The pointer actually moved while a node was held. gpui only
+    /// suppresses a click past its drag threshold when a drag listener
+    /// is registered, and this drag is hand-rolled — so without this,
+    /// releasing after moving a node fired `on_click` and opened the
+    /// note, which made dragging impossible.
+    node_dragged: bool,
+    /// The node under the pointer: it and its neighbours stay lit while
+    /// everything else dims.
+    hovered: Option<usize>,
+    /// Ticks the layout while it still has motion in it.
+    ticker: Option<gpui::Task<()>>,
+    /// What node colour means right now.
+    color_by: crate::graph::ColorBy,
+    /// How spread out the layout sits.
+    spread: crate::graph::Spread,
+    /// What the view is narrowed to. Non-matching nodes fade rather
+    /// than vanish, so the layout does not jump as you type.
+    filter: crate::graph::Filter,
+    /// True while the query box is taking keystrokes.
+    searching: bool,
+}
+
+impl GraphViewState {
+    fn nodes(&self) -> &[crate::graph::GraphNode] {
+        &self.sim.nodes
+    }
+
+    fn edges(&self) -> &[crate::graph::Edge] {
+        &self.sim.edges
+    }
+
+    /// Nodes one hop from `ix`, plus itself.
+    fn neighbourhood(&self, ix: usize) -> std::collections::BTreeSet<usize> {
+        let mut set = std::collections::BTreeSet::new();
+        set.insert(ix);
+        for e in self.edges() {
+            if e.from == ix {
+                set.insert(e.to);
+            } else if e.to == ix {
+                set.insert(e.from);
+            }
+        }
+        set
+    }
 }
 
 /// Create an editor and subscribe the workspace to its events
@@ -316,7 +379,66 @@ fn make_editor(
     editor
 }
 
+/// Build a preview Reader and listen for link clicks in it.
+///
+/// The reader does not know which file it is showing, so it emits the
+/// destination as written and the workspace resolves it against the
+/// active tab — the reader always *is* the active tab's view.
+fn make_reader(
+    path: Option<PathBuf>,
+    title: SharedString,
+    source: &str,
+    langs: &crate::highlight::Languages,
+    cx: &mut Context<Workspace>,
+) -> Entity<Reader> {
+    let reader = cx.new(|cx| Reader::from_source_at(path, title, source, langs, cx));
+    cx.subscribe(&reader, |this, _reader, event, cx| {
+        let crate::reader::ReaderEvent::Follow(dest) = event;
+        this.follow_from_reader(dest, cx);
+    })
+    .detach();
+    reader
+}
+
 impl Workspace {
+    /// A link was clicked in a rendered preview. Same rules as the
+    /// editor: only http(s) leaves the app, an anchor stays put, and a
+    /// path is resolved inside the workspace or ignored.
+    fn follow_from_reader(&mut self, dest: &str, cx: &mut Context<Self>) {
+        // `markdown.rs` marks a wiki destination with a `[[` prefix,
+        // because a wiki target is a stem to resolve against the index,
+        // not a path to join onto a directory. Without the distinction
+        // every `[[Wiki]]` in the reading view resolved to nothing.
+        let (wiki, target) = match dest.strip_prefix("[[") {
+            Some(stem) => (true, stem.to_string()),
+            None => (false, dest.to_string()),
+        };
+        let link = crate::knowledge::RawLink {
+            target,
+            wiki,
+            range: 0..0,
+            context: String::new(),
+        };
+        match crate::knowledge::classify(&link) {
+            crate::knowledge::LinkTarget::External(url) => cx.open_url(&url),
+            // An anchor inside a rendered document has nowhere to go
+            // yet: the reader scrolls by block, not by byte offset.
+            crate::knowledge::LinkTarget::Anchor(_) => {}
+            _ => {
+                let Some(base) = self.tabs.get(self.active).and_then(|t| t.path(cx)) else {
+                    return;
+                };
+                let resolved = cx
+                    .try_global::<crate::knowledge::KnowledgeState>()
+                    .and_then(|s| s.0.lock().unwrap().resolve(&base, &link));
+                if let Some(path) = resolved {
+                    self.pending_link_opens.push(path);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
     pub fn new(arg: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut tree = None;
         let mut tabs = Vec::new();
@@ -405,6 +527,8 @@ impl Workspace {
             last_title: String::new(),
             git_modified: Default::default(),
             _watcher: None,
+            history: crate::nav::History::default(),
+            navigating: false,
         };
         workspace.refresh_git_status();
 
@@ -525,6 +649,18 @@ impl Workspace {
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
                     continue;
                 }
+                // Same rule as Index::scan: a symlink never enters the
+                // index, however it arrived. The watcher sees paths the
+                // initial scan never walked, and `read_to_string` would
+                // happily follow `<root>/leak.md -> ~/.ssh/id_rsa` into
+                // an in-root index entry that later resolves without an
+                // escape check. Drop any entry the path may already have.
+                if std::fs::symlink_metadata(path)
+                    .is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    index.remove_file(path);
+                    continue;
+                }
                 match std::fs::read_to_string(path) {
                     Ok(text) => index.update_file(path, &text),
                     Err(_) => index.remove_file(path),
@@ -606,8 +742,23 @@ impl Workspace {
             self.flush_tab(self.active, cx);
         }
         self.active = ix;
+        // Switching tabs is navigation: ⌘⇧[ / ⌘⇧] and a click on a tab
+        // move you between documents exactly as opening one does, and a
+        // history that cannot see them sends Back *forward*.
+        if let Some(path) = self.tabs[ix].path(cx) {
+            self.record_visit(&path);
+        }
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// Record the file the workspace just landed on, unless we got here
+    /// through Back or Forward — those are moves within the stack.
+    fn record_visit(&mut self, path: &Path) {
+        if self.navigating {
+            return;
+        }
+        self.history.visit(path.to_path_buf());
     }
 
     /// Open paths handed to us from outside (Finder open events, drops):
@@ -714,6 +865,7 @@ impl Workspace {
                 self.flush_tab(self.active, cx);
                 self.active = ix;
             }
+            self.record_visit(path);
             if focus {
                 self.focus_active(window, cx);
             }
@@ -758,17 +910,40 @@ impl Workspace {
             }
             PreviewPlan::ActivateExisting(_) => unreachable!(),
         }
+        // A single click is a look, not an edit: the tab opens read-only
+        // and rendered, whatever the file is. A double click goes
+        // through `open_path` and lands in Edit view. An image tab has
+        // no editable view to preview.
+        if matches!(self.tabs.get(self.active), Some(Tab::Editor { .. })) {
+            self.show_as_preview(self.active, window, cx);
+        }
         if let Some(tree) = &mut self.tree {
             tree.expand_to(path);
         }
+        // Sidebar single-click lands here, not in `open_path`: this is
+        // the shared entry point, so this is where history is written.
+        // Only a focused open counts as a navigation. Keyboard browsing
+        // (`sidebar_move`) previews every row the arrows pass over with
+        // `focus: false`; recording those would push an entry per
+        // keypress and, worse, truncate the forward branch, so holding
+        // the arrow key through a vault would destroy Forward and fill
+        // Back with files the user only glanced at.
         if focus {
+            self.record_visit(path);
             self.focus_active(window, cx);
         }
         cx.notify();
     }
 
     pub fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if path.is_file() {
+            self.record_visit(path);
+        }
         if path.is_dir() {
+            // A new workspace: the old stack names files in a folder
+            // that is no longer open, and under the App Store sandbox
+            // they are outside the active security-scoped bookmark.
+            self.history.clear();
             record_recent(path);
             if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
                 state.0.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
@@ -788,9 +963,14 @@ impl Workspace {
             .iter()
             .position(|tab| tab.path(cx).as_deref() == Some(path))
         {
-            // A deliberate open pins the tab it lands on.
+            // A deliberate open pins the tab it lands on, and puts it
+            // in Edit view: a single click left it read-only, and the
+            // double click is the user asking to edit.
             if self.preview_tab == Some(ix) {
                 self.preview_tab = None;
+            }
+            if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(ix) {
+                *view = EditorView::Edit;
             }
             self.set_active(ix, window, cx);
             return;
@@ -834,6 +1014,41 @@ impl Workspace {
             }
             Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
         }
+    }
+
+    fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
+        // A path that is gone (deleted, or outside the sandbox's active
+        // bookmark) is stepped over rather than stepped onto: dead-
+        // stepping moved the cursor and then opened nothing.
+        if let Some(path) = self.history.back_matching(|p| p.exists()) {
+            self.open_path_without_history(&path, window, cx);
+        }
+    }
+
+    fn navigate_forward(
+        &mut self,
+        _: &NavigateForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = self.history.forward_matching(|p| p.exists()) {
+            self.open_path_without_history(&path, window, cx);
+        }
+    }
+
+    /// Open a file without recording it — used by back and forward, which
+    /// are moves through history rather than new visits. Every opening
+    /// path records a visit now, so the suppression is an explicit flag
+    /// rather than an assumption about which call comes first.
+    fn open_path_without_history(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigating = true;
+        self.open_path_preview(path, true, window, cx);
+        self.navigating = false;
     }
 
     // ── actions ────────────────────────────────────────────────────────
@@ -927,7 +1142,7 @@ impl Workspace {
                 this.update_in(cx, |this, window, cx| {
                     let langs = languages(cx);
                     let title = editor.read(cx).title();
-                    let reader = cx.new(|cx| Reader::from_source(title, &markdown, &langs, cx));
+                    let reader = make_reader(Some(editor.read(cx).path().to_path_buf()), title, &markdown, &langs, cx);
                     // Only swap if that tab still shows this editor in
                     // Edit view (the user may have toggled or closed).
                     if let Some(Tab::Editor { editor: e, view }) = this.tabs.get_mut(tab_ix) {
@@ -950,17 +1165,40 @@ impl Workspace {
     }
 
     fn toggle_preview(&mut self, _: &TogglePreview, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Tab::Editor { editor, view }) = self.tabs.get(self.active) else {
+        let Some(Tab::Editor { view, .. }) = self.tabs.get(self.active) else {
             return;
         };
-        let editor = editor.clone();
-        let showing = matches!(view, EditorView::Preview(_));
-        if showing {
+        if matches!(view, EditorView::Preview(_)) {
             if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
                 *view = EditorView::Edit;
             }
+            self.focus_active(window, cx);
+            cx.notify();
         } else {
-            editor.update(cx, |editor, cx| editor.flush(cx));
+            self.show_as_preview(self.active, window, cx);
+            self.focus_active(window, cx);
+        }
+    }
+
+    /// Render `tab_ix` as a read-only preview. A viewer-claimed file
+    /// re-renders through its plugin; a Markdown file is parsed as
+    /// Markdown; anything else is wrapped as code, because handing
+    /// source to the CommonMark parser reflows it into prose.
+    fn show_as_preview(&mut self, tab_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Tab::Editor { editor, .. }) = self.tabs.get(tab_ix) else {
+            return;
+        };
+        let editor = editor.clone();
+        {
+            // Only flush a buffer the user actually changed. `flush`
+            // runs the save hooks *before* its dirty check, and a hook
+            // that rewrites the document (the `toc` plugin does) marks
+            // it dirty and causes a write. Calling it for every tab a
+            // single click opens meant browsing the sidebar silently
+            // rewrote and saved files nobody had edited.
+            if editor.read(cx).save.is_dirty() {
+                editor.update(cx, |editor, cx| editor.flush(cx));
+            }
             // Viewer-claimed files re-render through the plugin so
             // edits show; everything else previews its own markdown.
             let viewer = editor
@@ -970,18 +1208,36 @@ impl Workspace {
                 .and_then(|e| e.to_str())
                 .and_then(crate::extensions::viewer_for_extension);
             if let Some(plugin) = viewer {
-                self.spawn_viewer_render(plugin, self.active, window, cx);
+                self.spawn_viewer_render(plugin, tab_ix, window, cx);
             } else {
                 let title = editor.read(cx).title();
                 let text = editor.read(cx).text();
+                let path = editor.read(cx).path().to_path_buf();
                 let langs = languages(cx);
-                let reader = cx.new(|cx| Reader::from_source(title, &text, &langs, cx));
-                if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
+                // Only a Markdown file is parsed as Markdown. Anything
+                // else is wrapped in a fence and rendered as the code it
+                // is: feeding Rust source to the CommonMark parser turned
+                // doc comments into paragraphs, reflowed the source, and
+                // made every 4-space-indented block an indented code
+                // block.
+                let source = if matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("md" | "markdown" | "mdown" | "mdx")
+                ) {
+                    text
+                } else {
+                    let lang = crate::reader::language_for_path(&path);
+                    crate::reader::source_as_document(&text, lang.as_deref())
+                };
+                let reader = make_reader(Some(path.clone()), title, &source, &langs, cx);
+                if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(tab_ix) {
                     *view = EditorView::Preview(reader);
                 }
             }
         }
-        self.focus_active(window, cx);
+        // Focus is the caller's decision, not this method's: keyboard
+        // browsing previews each row it lands on while focus stays in
+        // the sidebar, so the arrows keep working.
         cx.notify();
     }
 
@@ -2022,6 +2278,10 @@ impl Workspace {
                 }
             }
         }
+        // History is a list of paths like any other: it has to follow
+        // the move too, or Forward walks its cursor onto a name that is
+        // no longer on disk.
+        self.history.rewrite(|entry| crate::fileops::retarget(entry, old, new));
         self.rewrite_knowledge_links(old, new, cx);
         cx.notify();
     }
@@ -2750,16 +3010,16 @@ impl Workspace {
                             .when(is_dir, |d| d.child(if expanded { "▼" } else { "▶" })),
                     )
                     .child({
-                        let (icon, tint) = if is_dir {
-                            ("folder", t.fg_muted)
+                        let (icon_path, tint) = if is_dir {
+                            (crate::ui_icons::path("folder"), t.fg_muted)
                         } else {
                             let (icon, color) = seti::icon_for(&entry.name);
-                            (icon, seti_tint(color, &t))
+                            (format!("icons/seti/{icon}.svg"), seti_tint(color, &t))
                         };
                         // Seti glyphs carry ~30% internal padding, so the box
                         // runs larger than the text for a matched visual size.
                         gpui::svg()
-                            .path(SharedString::from(format!("icons/seti/{icon}.svg")))
+                            .path(SharedString::from(icon_path))
                             .size(px(20.))
                             .flex_none()
                             .text_color(tint)
@@ -3451,33 +3711,263 @@ impl Workspace {
             self.show_command_error("Open a folder to see its graph".to_string(), cx);
             return;
         };
-        let (mut nodes, edges) = {
+        let (mut nodes, mut edges) = {
             let index = state.0.lock().unwrap();
-            crate::graph::build(&index)
+            let (mut n, mut e) = crate::graph::build(&index);
+            // Notes the vault refers to but does not have. They are the
+            // to-write list, and the graph is where they are visible.
+            crate::graph::with_ghosts(&index, &mut n, &mut e);
+            (n, e)
         };
-        crate::graph::layout(&mut nodes, &edges, 150);
-        self.graph = Some(GraphViewState { nodes, edges, pan: (0.0, 0.0), zoom: 1.0, drag: None });
+        let _ = &mut edges;
+        // Seed with a short run so the first frame is already sensible,
+        // then let the ticker carry it the rest of the way on screen —
+        // the graph settles in front of you instead of appearing done.
+        let mut sim = crate::graph::Simulation::new(nodes, edges);
+        sim.run(40);
+        self.graph = Some(GraphViewState {
+            sim,
+            pan: (0.0, 0.0),
+            zoom: 1.0,
+            drag: None,
+            node_drag: None,
+            node_dragged: false,
+            hovered: None,
+            ticker: None,
+            color_by: crate::graph::ColorBy::Folder,
+            spread: crate::graph::Spread::Normal,
+            filter: crate::graph::Filter::default(),
+            searching: false,
+        });
         window.focus(&self.graph_focus);
+        // The layout is unbounded, so frame it before the first paint —
+        // otherwise a large vault opens somewhere off screen.
+        self.graph_fit(&GraphFit, window, cx);
+        self.graph_tick(cx);
+        cx.notify();
+    }
+
+    /// Step the layout on the next frame while it still has motion.
+    ///
+    /// Stops itself once the simulation settles, so an idle graph costs
+    /// nothing — and any interaction reheats it, which starts this
+    /// again.
+    fn graph_tick(&mut self, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        if graph.sim.settled() {
+            graph.ticker = None;
+            return;
+        }
+        graph.ticker = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(16))
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(graph) = this.graph.as_mut() {
+                    graph.sim.step();
+                    cx.notify();
+                }
+                this.graph_tick(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Frame the whole graph in the window. There was no way back from
+    /// a pan before this short of closing and reopening the view.
+    fn graph_fit(&mut self, _: &GraphFit, window: &mut Window, cx: &mut Context<Self>) {
+        let viewport = window.viewport_size();
+        let Some(graph) = self.graph.as_mut() else { return };
+        let (zoom, pan_x, pan_y) = crate::graph::fit_to(
+            graph.sim.nodes.as_slice(),
+            (f32::from(viewport.width), f32::from(viewport.height)),
+            80.0,
+        );
+        graph.zoom = zoom;
+        graph.pan = (pan_x, pan_y);
+        cx.notify();
+    }
+
+    /// Cycle what a node's colour means: folder, tag, or nothing.
+    fn graph_color_by(&mut self, _: &GraphColorBy, _: &mut Window, cx: &mut Context<Self>) {
+        use crate::graph::ColorBy;
+        let Some(graph) = self.graph.as_mut() else { return };
+        graph.color_by = match graph.color_by {
+            ColorBy::Folder => ColorBy::Tag,
+            ColorBy::Tag => ColorBy::None,
+            ColorBy::None => ColorBy::Folder,
+        };
+        let what = match graph.color_by {
+            ColorBy::Folder => "folder",
+            ColorBy::Tag => "tag",
+            ColorBy::None => "nothing",
+        };
+        self.show_command_error(format!("Graph colour: {what}"), cx);
+        cx.notify();
+    }
+
+    /// Start typing a query. Escape while searching clears it rather
+    /// than closing the graph, so a mistyped filter is one key away
+    /// from undone.
+    fn graph_search(&mut self, _: &GraphSearch, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(graph) = self.graph.as_mut() {
+            graph.searching = true;
+            cx.notify();
+        }
+    }
+
+    /// Show only notes nothing links to, and that link nowhere.
+    fn graph_orphans(&mut self, _: &GraphOrphans, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        graph.filter.orphans_only = !graph.filter.orphans_only;
+        let on = graph.filter.orphans_only;
+        self.show_command_error(
+            if on { "Graph: orphans only".into() } else { "Graph: all notes".to_string() },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Narrow the graph to what is near the note you have open, or
+    /// widen it back to the whole vault.
+    fn graph_local(&mut self, _: &GraphLocal, _: &mut Window, cx: &mut Context<Self>) {
+        let open = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
+        let Some(graph) = self.graph.as_mut() else { return };
+        if graph.filter.local.is_some() {
+            graph.filter.local = None;
+            graph.filter.in_scope = None;
+            self.show_command_error("Graph: whole vault".into(), cx);
+            cx.notify();
+            return;
+        }
+        let Some(open) = open else {
+            self.show_command_error("Open a note to centre the graph on it".into(), cx);
+            return;
+        };
+        let Some(center) = graph.sim.nodes.iter().position(|n| n.path == open) else {
+            self.show_command_error("That note is not in the graph".into(), cx);
+            return;
+        };
+        graph.filter.local = Some((center, 1));
+        let edges = graph.sim.edges.clone();
+        graph.filter.resolve_scope(&edges);
+        self.show_command_error("Graph: 1 hop from this note".into(), cx);
+        cx.notify();
+    }
+
+    fn graph_depth(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        let Some((center, depth)) = graph.filter.local else {
+            self.show_command_error("Turn on local mode first".into(), cx);
+            return;
+        };
+        let depth = (depth as isize + delta).clamp(1, 6) as usize;
+        graph.filter.local = Some((center, depth));
+        let edges = graph.sim.edges.clone();
+        graph.filter.resolve_scope(&edges);
+        let n = graph.filter.in_scope.as_ref().map_or(0, |s| s.len());
+        self.show_command_error(format!("Graph: {depth} hops · {n} notes"), cx);
+        cx.notify();
+    }
+
+    fn graph_depth_out(&mut self, _: &GraphDepthOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.graph_depth(1, cx);
+    }
+
+    fn graph_depth_in(&mut self, _: &GraphDepthIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.graph_depth(-1, cx);
+    }
+
+    /// Hold the layout still, or let it settle again.
+    fn graph_freeze(&mut self, _: &GraphFreeze, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        let frozen = !graph.sim.frozen();
+        graph.sim.freeze(frozen);
+        self.show_command_error(
+            if frozen { "Graph: frozen".into() } else { "Graph: running".to_string() },
+            cx,
+        );
+        self.graph_tick(cx);
+        cx.notify();
+    }
+
+    /// Cycle how spread out the layout sits.
+    fn graph_spread(&mut self, _: &GraphSpread, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        graph.spread = graph.spread.next();
+        graph.sim.forces = graph.spread.forces();
+        graph.sim.reheat(0.7);
+        let label = graph.spread.label();
+        self.show_command_error(format!("Graph spread: {label}"), cx);
+        self.graph_tick(cx);
         cx.notify();
     }
 
     fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
+        // A live filter is what Escape clears first.
+        if let Some(graph) = self.graph.as_mut() {
+            if graph.searching || !graph.filter.is_empty() {
+                graph.searching = false;
+                graph.filter = crate::graph::Filter::default();
+                cx.notify();
+                return;
+            }
+        }
         self.graph = None;
         self.focus_active(window, cx);
         cx.notify();
     }
 
     /// Open the note behind a graph node and close the overlay.
+    ///
+    /// A ghost has no file: its path is the bare name the link asked
+    /// for. Clicking one creates the note beside the note that
+    /// referenced it, which is what following that link would have
+    /// done — previously it closed the overlay, failed to read a
+    /// relative path against the process working directory, and
+    /// printed to stderr.
     fn open_graph_node(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.graph.as_ref().and_then(|g| g.nodes.get(ix)).map(|n| n.path.clone())
-        else {
+        let Some(node) = self.graph.as_ref().and_then(|g| g.nodes().get(ix)).cloned() else {
             return;
         };
         self.graph = None;
-        self.open_path(&path, window, cx);
+        if node.ghost {
+            let Some(source) = node.ghost_source else { return };
+            let Some(dir) = source.parent() else { return };
+            let name = node
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let root = cx
+                .try_global::<crate::knowledge::KnowledgeState>()
+                .map(|s| s.0.lock().unwrap().root.clone());
+            let Some(root) = root else { return };
+            // The same containment the editor applies before creating a
+            // note from a link.
+            let Some(path) = crate::knowledge::creatable_note_path(&root, dir, &name) else {
+                self.show_command_error(format!("Cannot create {name} here"), cx);
+                return;
+            };
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) | Err(_) => {}
+            }
+            self.open_path(&path, window, cx);
+            return;
+        }
+        self.open_path(&node.path, window, cx);
     }
 
     fn render_graph(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        /// Width of a node's label box. Fixed, and centred on the node,
+        /// so label length never displaces the dot.
+        const LABEL_W: f32 = 160.0;
+        // Which note is open, so its node can be marked. Read before
+        // borrowing the graph state.
+        let open_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
         let state = self.graph.as_ref()?;
         let t = theme(cx);
         // World transform: unit square → an 900px board, panned/zoomed.
@@ -3485,19 +3975,81 @@ impl Workspace {
         let (pan_x, pan_y) = state.pan;
         let at = |n: &crate::graph::GraphNode| (pan_x + n.x * base + 60.0, pan_y + n.y * base + 60.0);
 
-        let edge_px: Vec<((f32, f32), (f32, f32))> = state
-            .edges
+        let lit = state.hovered.map(|ix| state.neighbourhood(ix));
+
+        // Colour groups. The palette comes from the theme's syntax
+        // colours: they are already chosen to be distinct from each
+        // other and to sit correctly on this background, so a graph
+        // stays coherent when the theme changes.
+        let palette: Vec<Hsla> = vec![
+            t.syntax.function,
+            t.syntax.string,
+            t.syntax.keyword,
+            t.syntax.constant,
+            t.syntax.tag,
+            t.syntax.property,
+        ];
+        // Sorted and deduplicated, so a group's colour is the same on
+        // every open rather than depending on node order.
+        let group_keys: Vec<String> = {
+            let mut keys: Vec<String> = state
+                .nodes()
+                .iter()
+                .filter_map(|n| match state.color_by {
+                    crate::graph::ColorBy::None => None,
+                    crate::graph::ColorBy::Folder => n.folder.clone(),
+                    crate::graph::ColorBy::Tag => n.tag.clone(),
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            keys
+        };
+        let label_alpha = crate::graph::label_opacity(state.zoom);
+        // (from, to, lit, reciprocated, radius at each end) — the radii
+        // let the arrowhead stop short of the node it points at.
+        let node_r = |n: &crate::graph::GraphNode| {
+            (5.0 + (n.degree as f32).sqrt() * 3.0) * state.zoom.sqrt()
+        };
+        let edge_px: Vec<((f32, f32), (f32, f32), bool, bool, f32, f32)> = state
+            .edges()
             .iter()
-            .map(|&(a, b)| (at(&state.nodes[a]), at(&state.nodes[b])))
+            .map(|e| {
+                let (a, b) = (&state.nodes()[e.from], &state.nodes()[e.to]);
+                let on = lit
+                    .as_ref()
+                    .is_none_or(|l| l.contains(&e.from) && l.contains(&e.to))
+                    && state.filter.matches_at(e.from, a)
+                    && state.filter.matches_at(e.to, b);
+                (at(a), at(b), on, e.both, node_r(a), node_r(b))
+            })
             .collect();
         let edge_color = Hsla { a: 0.35, ..t.fg_muted };
+        let dim_edge = Hsla { a: 0.08, ..t.fg_muted };
         let edges_canvas = gpui::canvas(
             move |bounds, _, _| bounds,
             move |bounds, _, window, _| {
-                for (a, b) in &edge_px {
+                for (a, b, on, both, ra, rb) in &edge_px {
                     let pa = point(bounds.origin.x + px(a.0), bounds.origin.y + px(a.1));
                     let pb = point(bounds.origin.x + px(b.0), bounds.origin.y + px(b.1));
-                    window.paint_path(crate::graph::line_path(pa, pb, 1.5), edge_color);
+                    // Edges outside the hovered neighbourhood fade back
+                    // rather than disappear, so the shape of the graph
+                    // is still readable while one part is emphasised.
+                    let color = if *on { edge_color } else { dim_edge };
+                    window.paint_path(crate::graph::line_path(pa, pb, 1.5), color);
+                    // Which way the link points. A pair that links both
+                    // ways gets an arrowhead at each end rather than two
+                    // lines drawn over each other.
+                    window.paint_path(
+                        crate::graph::arrow_path(pa, pb, rb + 2.0, 7.0),
+                        color,
+                    );
+                    if *both {
+                        window.paint_path(
+                            crate::graph::arrow_path(pb, pa, ra + 2.0, 7.0),
+                            color,
+                        );
+                    }
                 }
             },
         )
@@ -3505,7 +4057,7 @@ impl Workspace {
         .size_full();
 
         let mut board = div().absolute().inset_0().child(edges_canvas);
-        for (ix, node) in state.nodes.iter().enumerate() {
+        for (ix, node) in state.nodes().iter().enumerate() {
             let (x, y) = at(node);
             let r = (5.0 + (node.degree as f32).sqrt() * 3.0) * state.zoom.sqrt();
             let name = node
@@ -3513,36 +4065,146 @@ impl Workspace {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            // Hovering one node lights it and everything it links to,
+            // and fades the rest back — the shape stays legible while
+            // one neighbourhood is picked out.
+            // Lit means: inside the hovered neighbourhood, and matching
+            // whatever the view is narrowed to.
+            let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
+                && state.filter.matches_at(ix, node);
+            let is_open = open_path.as_deref() == Some(node.path.as_path());
+            let group = match state.color_by {
+                crate::graph::ColorBy::None => None,
+                crate::graph::ColorBy::Folder => node.folder.as_deref(),
+                crate::graph::ColorBy::Tag => node.tag.as_deref(),
+            };
+            let grouped = crate::graph::color_slot(group, &group_keys, palette.len())
+                .map(|slot| palette[slot]);
+            let base_color = if is_open {
+                t.link
+            } else if node.ghost {
+                // Hollow: it is a name, not a note. Clicking it creates
+                // the file, the same as following the link would.
+                Hsla { a: 0.30, ..t.fg_muted }
+            } else if let Some(c) = grouped {
+                c
+            } else if node.degree > 0 {
+                t.accent
+            } else {
+                t.fg_muted
+            };
+            let node_color = if on { base_color } else { Hsla { a: 0.25, ..base_color } };
+            let label_color = Hsla {
+                a: if on { label_alpha } else { label_alpha * 0.25 },
+                ..t.fg
+            };
             board = board.child(
                 div()
                     .id(("graph-node", ix))
                     .absolute()
                     .left(px(x - r))
                     .top(px(y - r))
-                    .flex()
-                    .flex_col()
-                    .items_center()
+                    // Exactly the dot's size. A flex column sized by its
+                    // widest child let a long label stretch the box, and
+                    // `items_center` then centred the dot inside *that*
+                    // — so nodes with long names sat right of where
+                    // their edges met. The label is positioned below
+                    // without contributing to this box.
+                    .w(px(r * 2.0))
+                    .h(px(r * 2.0))
                     .cursor_pointer()
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if let Some(graph) = &mut this.graph {
+                            graph.hovered = hovered.then_some(ix);
+                            cx.notify();
+                        }
+                    }))
+                    // Press on a node grabs it rather than panning the
+                    // board, and holds the layout warm so the graph
+                    // keeps reacting while it is dragged around.
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(graph) = &mut this.graph {
+                                graph.node_drag = Some(ix);
+                                graph.node_dragged = false;
+                                graph.sim.hold_warm(true);
+                            }
+                            this.graph_tick(cx);
+                        }),
+                    )
                     .child(
                         div()
                             .size(px(r * 2.0))
                             .rounded_full()
-                            .bg(if node.degree > 0 { t.accent } else { t.fg_muted })
+                            .bg(node_color)
                             .hover(|s| s.bg(t.link)),
                     )
                     .child(
+                        // A fixed-width box centred on the node, so the
+                        // label grows sideways from the dot rather than
+                        // moving it.
                         div()
-                            .mt(px(2.))
+                            .absolute()
+                            .top(px(r * 2.0 + 2.0))
+                            .left(px(r - LABEL_W / 2.0))
+                            .w(px(LABEL_W))
+                            .text_center()
                             .text_size(px(11.))
-                            .text_color(t.fg)
+                            .text_color(label_color)
                             .child(SharedString::from(name)),
                     )
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
+                        // A release that ends a drag is not a click.
+                        if this.graph.as_ref().is_some_and(|g| g.node_dragged) {
+                            return;
+                        }
                         this.open_graph_node(ix, window, cx);
                     })),
             );
         }
+
+        // A status strip: what the view is narrowed to, and what colour
+        // means. Only drawn when it has something to say, so an
+        // untouched graph stays clean.
+        let matches = state
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(ix, n)| state.filter.matches_at(*ix, n))
+            .count();
+        let showing_strip = state.searching || !state.filter.is_empty();
+        let strip = showing_strip.then(|| {
+            let mut parts: Vec<String> = Vec::new();
+            if state.searching || !state.filter.query.is_empty() {
+                parts.push(format!("search: {}▏", state.filter.query));
+            }
+            if state.filter.orphans_only {
+                parts.push("orphans only".into());
+            }
+            if let Some(tag) = &state.filter.tag {
+                parts.push(format!("#{tag}"));
+            }
+            if let Some(folder) = &state.filter.folder {
+                parts.push(folder.clone());
+            }
+            parts.push(format!("{matches} of {}", state.nodes().len()));
+            div()
+                .absolute()
+                .top(px(16.))
+                .left(px(16.))
+                .px_3()
+                .py_1p5()
+                .rounded_lg()
+                .bg(t.panel_bg)
+                .border_1()
+                .border_color(t.border)
+                .text_size(px(t.ui_size))
+                .text_color(t.fg)
+                .child(SharedString::from(parts.join("  ·  ")))
+        });
 
         Some(
             div()
@@ -3552,7 +4214,52 @@ impl Workspace {
                 .bg(t.bg)
                 .key_context("GraphView")
                 .track_focus(&self.graph_focus)
+                // Typing narrows the view. Only while searching, so the
+                // other single-key shortcuts keep working otherwise.
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    let Some(graph) = this.graph.as_mut() else { return };
+                    if !graph.searching {
+                        return;
+                    }
+                    let key = event.keystroke.key.as_str();
+                    match key {
+                        "backspace" => {
+                            graph.filter.query.pop();
+                        }
+                        "enter" => graph.searching = false,
+                        _ => {
+                            // A printable character, and no modifier
+                            // that would make it a command.
+                            if event.keystroke.modifiers.platform
+                                || event.keystroke.modifiers.control
+                            {
+                                return;
+                            }
+                            let text = event
+                                .keystroke
+                                .key_char
+                                .as_deref()
+                                .unwrap_or(key);
+                            if text.chars().count() == 1 {
+                                graph.filter.query.push_str(text);
+                            } else {
+                                return;
+                            }
+                        }
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
                 .on_action(cx.listener(Self::graph_dismiss))
+                .on_action(cx.listener(Self::graph_fit))
+                .on_action(cx.listener(Self::graph_color_by))
+                .on_action(cx.listener(Self::graph_search))
+                .on_action(cx.listener(Self::graph_orphans))
+                .on_action(cx.listener(Self::graph_local))
+                .on_action(cx.listener(Self::graph_depth_in))
+                .on_action(cx.listener(Self::graph_depth_out))
+                .on_action(cx.listener(Self::graph_freeze))
+                .on_action(cx.listener(Self::graph_spread))
                 .overflow_hidden()
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -3565,24 +4272,69 @@ impl Workspace {
                     }),
                 )
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    if let Some(graph) = &mut this.graph {
-                        if let Some((lx, ly)) = graph.drag {
-                            let (x, y) =
-                                (f32::from(event.position.x), f32::from(event.position.y));
-                            graph.pan.0 += x - lx;
-                            graph.pan.1 += y - ly;
-                            graph.drag = Some((x, y));
-                            cx.notify();
-                        }
+                    let Some(graph) = &mut this.graph else { return };
+                    let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                    // Dragging a node: convert the pointer back into
+                    // layout space and pin the node there. The rest of
+                    // the graph is pushed around by it, live.
+                    if let Some(ix) = graph.node_drag {
+                        graph.node_dragged = true;
+                        let base = 900.0 * graph.zoom;
+                        // Layout space is unbounded, so a dragged node
+                        // follows the pointer anywhere rather than
+                        // sticking at the edge of a box.
+                        let nx = (x - graph.pan.0 - 60.0) / base;
+                        let ny = (y - graph.pan.1 - 60.0) / base;
+                        graph.sim.pin(ix, nx, ny);
+                        graph.sim.reheat(0.3);
+                        cx.notify();
+                        return;
+                    }
+                    if let Some((lx, ly)) = graph.drag {
+                        graph.pan.0 += x - lx;
+                        graph.pan.1 += y - ly;
+                        graph.drag = Some((x, y));
+                        cx.notify();
                     }
                 }))
+                // A release outside the window still ends the drag.
+                // Without this the node stayed pinned, kept following
+                // the pointer with no button held, and `hold_warm` kept
+                // the frame ticker running for as long as the graph was
+                // open.
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                        if let Some(graph) = &mut this.graph {
+                            graph.drag = None;
+                            if let Some(ix) = graph.node_drag.take() {
+                                graph.sim.release(ix);
+                                graph.sim.hold_warm(false);
+                                graph.sim.reheat(0.6);
+                            }
+                            graph.node_dragged = false;
+                            cx.notify();
+                        }
+                        this.graph_tick(cx);
+                    }),
+                )
                 .on_mouse_up(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _: &MouseUpEvent, _, cx| {
                         if let Some(graph) = &mut this.graph {
                             graph.drag = None;
+                            // Letting go hands the node back to the
+                            // layout, which pulls it into place instead
+                            // of leaving it stranded where it was
+                            // dropped.
+                            if let Some(ix) = graph.node_drag.take() {
+                                graph.sim.release(ix);
+                                graph.sim.hold_warm(false);
+                                graph.sim.reheat(0.6);
+                            }
                             cx.notify();
                         }
+                        this.graph_tick(cx);
                     }),
                 )
                 .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
@@ -3596,6 +4348,7 @@ impl Workspace {
                     }
                 }))
                 .child(board)
+                .children(strip)
                 .child(
                     div()
                         .absolute()
@@ -3682,7 +4435,7 @@ impl Workspace {
             let at = |n: &crate::graph::GraphNode| (12.0 + n.x * w, n.y * h);
             let edge_px: Vec<((f32, f32), (f32, f32))> = edges
                 .iter()
-                .map(|&(a, b)| (at(&nodes[a]), at(&nodes[b])))
+                .map(|e| (at(&nodes[e.from]), at(&nodes[e.to])))
                 .collect();
             let edge_color = Hsla { a: 0.3, ..t.fg_muted };
             let canvas_el = gpui::canvas(
@@ -4027,6 +4780,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::prev_tab))
+            .on_action(cx.listener(Self::navigate_back))
+            .on_action(cx.listener(Self::navigate_forward))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_outline))
             .on_action(cx.listener(Self::toggle_knowledge))
@@ -4768,6 +5523,36 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_watcher_never_indexes_a_symlinked_note(cx: &mut TestAppContext) {
+        use std::os::unix::fs::symlink;
+
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        let outside = outside_dir.path().join("outside.md");
+        std::fs::write(&outside, "secret links [[A]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // A symlink created *after* the scan reaches the index only
+        // through the watcher, so the scan-time filter cannot cover it.
+        let leak = root.path().join("leak.md");
+        symlink(&outside, &leak).unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&leak), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let state = app.global::<crate::knowledge::KnowledgeState>();
+            let index = state.0.lock().unwrap();
+            let back = index.backlinks(&root.path().join("A.md"));
+            assert!(
+                !back.iter().any(|(p, _)| p.ends_with("leak.md")),
+                "a symlinked note must never enter the index: {back:?}"
+            );
+        });
+    }
+
     #[gpui::test]
     fn knowledge_panel_lists_backlinks_of_the_active_note(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -4839,8 +5624,8 @@ mod tests {
         cx.run_until_parked();
         cx.update(|_, app| {
             let state = ws.read(app).graph.as_ref().expect("graph open");
-            assert_eq!(state.nodes.len(), 3);
-            assert_eq!(state.edges.len(), 2);
+            assert_eq!(state.nodes().len(), 3);
+            assert_eq!(state.edges().len(), 2);
         });
 
         // Clicking a node opens its note and closes the graph.
@@ -5472,6 +6257,274 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn navigate_back_and_forward_walk_open_tabs(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let c = root.path().join("c.md");
+        std::fs::write(&c, "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // Give history real depth, then revisit `a` so the visit order
+        // (a, b, c, a) diverges from tab order (a, b, c) — this rules out
+        // a handler that merely walks adjacent tab indices rather than
+        // real history.
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&b, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&c, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(tab_paths(w, app), vec![Some(a.clone()), Some(b.clone()), Some(c.clone())]);
+            assert_eq!(w.tabs[w.active].path(app), Some(a.clone()), "revisit reuses a's tab");
+        });
+
+        // Actions dispatched at the focused editor bubble to the workspace,
+        // same as the NextTab/PrevTab wiring above.
+        cx.dispatch_action(NavigateBack);
+        let first_back = cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app));
+        assert_eq!(
+            first_back,
+            Some(c.clone()),
+            "first back lands on the previously visited file, not the tab to a's left"
+        );
+
+        cx.dispatch_action(NavigateBack);
+        let second_back = cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app));
+        assert_eq!(
+            second_back,
+            Some(b.clone()),
+            "second back keeps walking backwards through real history"
+        );
+        assert_ne!(
+            first_back, second_back,
+            "two consecutive backs must not oscillate between the same two files"
+        );
+
+        cx.dispatch_action(NavigateForward);
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(
+                w.tabs[w.active].path(app),
+                Some(c.clone()),
+                "forward moves forward from the second back to the first back's target"
+            );
+        });
+    }
+
+    /// Switching tabs is navigation. When history does not see it, the
+    /// cursor stays where the last `open_path` left it, and Back moves
+    /// you *forward*: open a, b, c, walk back to a with ⌘⇧[, and the
+    /// stack still reads (a, b, c) at c.
+    #[gpui::test]
+    fn tab_switching_is_recorded_in_history(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let c = root.path().join("c.md");
+        std::fs::write(&c, "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        for path in [&a, &b, &c] {
+            ws.update_in(cx, |ws, window, cx| ws.open_path(path, window, cx));
+        }
+        cx.run_until_parked();
+        // ⌘⇧[ twice: c → b → a, without touching open_path.
+        cx.dispatch_action(PrevTab);
+        cx.dispatch_action(PrevTab);
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+        assert_eq!(active(cx), Some(a.clone()), "precondition: ⌘⇧[ reached a");
+
+        cx.dispatch_action(NavigateBack);
+        assert_eq!(active(cx), Some(b.clone()), "back returns to where we just were");
+        cx.dispatch_action(NavigateBack);
+        assert_eq!(
+            active(cx), Some(c.clone()),
+            "back keeps walking backwards through the tab switches"
+        );
+        cx.dispatch_action(NavigateForward);
+        assert_eq!(active(cx), Some(b.clone()), "forward retraces the same steps");
+    }
+
+    /// Sidebar single-click and keyboard browsing both go through
+    /// `open_path_preview`, which recorded nothing at all.
+    #[gpui::test]
+    fn sidebar_preview_opens_are_recorded_in_history(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&b, true, window, cx));
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+        assert_eq!(active(cx), Some(b.clone()), "precondition: previewing b");
+
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(a.clone()), "back returns to the previewed file");
+
+        // Back and forward are moves *through* history, not new visits:
+        // two backs in a row keep walking backwards rather than
+        // oscillating between the same two files.
+        ws.update_in(cx, |ws, window, cx| ws.navigate_forward(&NavigateForward, window, cx));
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(b.clone()), "forward returns to b");
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(a.clone()),
+            "navigation must not stack new entries: the history is still just a, b"
+        );
+    }
+
+    /// Keyboard browsing previews every row the arrows pass over. Those
+    /// are glances, not navigations: recording them would push an entry
+    /// per keypress and truncate the forward branch, so holding the arrow
+    /// key through a vault would destroy Forward and fill Back with files
+    /// the user never chose to open. Only a focused open is a visit.
+    ///
+    /// Needs a third file: with only the two the shared fixture makes,
+    /// every row the arrows reach is already the current history entry
+    /// and `History::visit`'s dedup hides the bug.
+    #[gpui::test]
+    fn keyboard_sidebar_browsing_is_not_recorded_in_history(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.md");
+        let b = root.path().join("b.md");
+        let c = root.path().join("c.md");
+        std::fs::write(&a, "# a\n").unwrap();
+        std::fs::write(&b, "# b\n").unwrap();
+        std::fs::write(&c, "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&b, true, window, cx));
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+
+        // Step back to a, leaving b on the forward branch.
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(a.clone()), "precondition: back on a");
+
+        // Scrub down to c with the keyboard, exactly as SidebarDown does:
+        // an unfocused preview of every row it lands on. c is not in
+        // history, so a recorded visit here truncates b off the forward
+        // branch.
+        for _ in 0..2 {
+            ws.update_in(cx, |ws, window, cx| ws.sidebar_move(1, window, cx));
+            cx.run_until_parked();
+        }
+        assert_eq!(active(cx), Some(c.clone()), "precondition: scrubbed onto c");
+
+        ws.update_in(cx, |ws, window, cx| ws.navigate_forward(&NavigateForward, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(b.clone()),
+            "arrow-key browsing must not truncate the forward branch"
+        );
+    }
+
+    /// A rename moves a file; history still names where it was. Forward
+    /// then walks its cursor forward and opens nothing at all.
+    #[gpui::test]
+    fn history_follows_a_renamed_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        for path in [&a, &b] {
+            ws.update_in(cx, |ws, window, cx| ws.open_path(path, window, cx));
+        }
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        assert_eq!(active(cx), Some(a.clone()), "precondition: back reached a");
+
+        let renamed = root.path().join("b-renamed.md");
+        std::fs::rename(&b, &renamed).unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.after_path_change(&b, &renamed, cx));
+        cx.run_until_parked();
+
+        ws.update_in(cx, |ws, window, cx| ws.navigate_forward(&NavigateForward, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(renamed),
+            "forward must follow the file to its new name, not dead-step"
+        );
+    }
+
+    /// Opening another folder replaces the workspace. Its history is
+    /// about files that are no longer reachable — and under the App
+    /// Store sandbox they sit outside the active security-scoped
+    /// bookmark, so Back would fail silently.
+    #[gpui::test]
+    fn switching_workspaces_clears_history(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        for path in [&a, &b] {
+            ws.update_in(cx, |ws, window, cx| ws.open_path(path, window, cx));
+        }
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("x.md"), "# x\n").unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.open_path(other.path(), window, cx));
+        cx.run_until_parked();
+
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(b.clone()),
+            "back must not walk into the previous workspace"
+        );
+    }
+
+    /// A deleted entry is stepped over, not stepped onto: the old code
+    /// moved the cursor onto it and then opened nothing (or, worse,
+    /// re-activated the stale tab).
+    #[gpui::test]
+    fn navigation_skips_files_that_no_longer_exist(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let c = root.path().join("c.md");
+        std::fs::write(&c, "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        for path in [&a, &b, &c] {
+            ws.update_in(cx, |ws, window, cx| ws.open_path(path, window, cx));
+        }
+        cx.run_until_parked();
+        let active = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| ws.read(app).tabs[ws.read(app).active].path(app))
+        };
+
+        std::fs::remove_file(&b).unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.navigate_back(&NavigateBack, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            active(cx), Some(a.clone()),
+            "back skips the deleted entry and lands on the live one"
+        );
+        ws.update_in(cx, |ws, window, cx| ws.navigate_forward(&NavigateForward, window, cx));
+        cx.run_until_parked();
+        assert_eq!(active(cx), Some(c.clone()), "forward skips it too");
+    }
+
     // ── finder and search overlay integration ───────────────────────────
 
     #[gpui::test]
@@ -5648,6 +6701,219 @@ mod tests {
     }
 
     // ── edit/preview flip, new file ─────────────────────────────────────
+
+    /// Previewing a code file must render it as code. It used to hand
+    /// the source to the CommonMark parser: doc comments became
+    /// paragraphs, the source was reflowed, and any four-space-indented
+    /// block turned into an indented code block, so a Rust file read as
+    /// mangled prose.
+    /// A single click is a look; a double click is an edit. Both give
+    /// a tab, but only the double click gives an editable one — and
+    /// this holds for every file type, not just Markdown.
+    /// Looking at a file must not change it. Opening a preview used to
+    /// call `Editor::flush`, which runs the save hooks *before* its
+    /// dirty check -- a hook that rewrites the document marks it dirty
+    /// and the file is written. Browsing the sidebar therefore rewrote
+    /// and saved notes nobody had edited, and dirtied the git tree.
+    #[gpui::test]
+    fn browsing_a_file_does_not_write_it(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let before = std::fs::read_to_string(&a).unwrap();
+        let mtime = std::fs::metadata(&a).unwrap().modified().unwrap();
+
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.run_until_parked();
+        // And again, the way arrowing through a sidebar does.
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, false, window, cx));
+        cx.run_until_parked();
+
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), before, "contents untouched");
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().modified().unwrap(),
+            mtime,
+            "and the file was not rewritten at all"
+        );
+    }
+
+    #[gpui::test]
+    fn single_click_previews_and_double_click_edits(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let rs = root.path().join("code.rs");
+        std::fs::write(&rs, "fn main() {}\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // Single click: read-only, and non-sticky.
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&rs, true, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(
+                matches!(
+                    w.tabs.get(w.active),
+                    Some(Tab::Editor { view: EditorView::Preview(_), .. })
+                ),
+                "a single click opens read-only, code included"
+            );
+            assert_eq!(w.preview_tab, Some(w.active), "and the tab stays non-sticky");
+        });
+
+        // Double click goes through `open_path`: editable, and pinned.
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&rs, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(
+                matches!(w.tabs.get(w.active), Some(Tab::Editor { view: EditorView::Edit, .. })),
+                "a double click opens for editing"
+            );
+        });
+    }
+
+    /// A link clicked in the rendered preview must navigate. The
+    /// reading view had no link handling at all: `markdown.rs` recorded
+    /// only *that* a run was a link and dropped the destination, so a
+    /// preview could draw links it could never follow — which became
+    /// the common case when a single click started opening previews.
+    /// A preview reader must know which file it is showing, or a
+    /// relative link in it has no base to resolve against and its hover
+    /// preview silently shows nothing.
+    /// A wiki link clicked in the reading view must open its note. The
+    /// reader built every link as `wiki: false`, so `[[Editing]]` was
+    /// classified as a relative path, matched no file, and did nothing —
+    /// in the view a single click now opens, in the release named
+    /// "links that work".
+    #[gpui::test]
+    fn a_wiki_link_in_the_rendered_preview_opens_its_note(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let stem = b.file_stem().unwrap().to_string_lossy().into_owned();
+        std::fs::write(&a, format!("see [[{stem}]]\n")).unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.run_until_parked();
+
+        // The destination carries the wiki marker through parsing.
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("expected a preview tab")
+            };
+            let doc = &reader.read(app).document;
+            let crate::markdown::Block::Paragraph(inline) = &doc.blocks[0] else {
+                panic!("paragraph")
+            };
+            assert_eq!(inline.links[0].1, format!("[[{stem}"), "marked as a wiki target");
+        });
+
+        ws.update(cx, |ws, cx| ws.follow_from_reader(&format!("[[{stem}"), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(
+                w.tabs[w.active].path(app).as_deref(),
+                Some(b.as_path()),
+                "the wiki link opened its note"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_preview_reader_knows_its_own_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("expected a preview tab")
+            };
+            assert_eq!(
+                reader.read(app).path.as_deref(),
+                Some(a.as_path()),
+                "the reader carries the file it renders"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_a_link_in_the_rendered_preview_navigates(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        std::fs::write(&a, format!("see [b]({})\n", b.file_name().unwrap().to_string_lossy()))
+            .unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.run_until_parked();
+
+        // The destination survived parsing into the rendered document.
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("expected a preview tab")
+            };
+            let doc = &reader.read(app).document;
+            let crate::markdown::Block::Paragraph(inline) = &doc.blocks[0] else {
+                panic!("paragraph")
+            };
+            assert_eq!(inline.links.len(), 1, "the rendered view knows where the link goes");
+        });
+
+        // Following it opens the target.
+        ws.update(cx, |ws, cx| ws.follow_from_reader("b.md", cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(
+                w.tabs[w.active].path(app).as_deref(),
+                Some(b.as_path()),
+                "the click opened the linked note"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn previewing_a_code_file_renders_code_not_prose(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let rs = root.path().join("sample.rs");
+        // Every shape that the Markdown parser used to mangle.
+        std::fs::write(
+            &rs,
+            "//! Doc comment.\n\n#[derive(Debug)]\nstruct S;\n\n    fn indented() {}\n",
+        )
+        .unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&rs, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("expected a preview tab")
+            };
+            // One code block holding the whole file: nothing should
+            // have been parsed as a paragraph, a heading, or an
+            // indented code block.
+            let blocks = &reader.read(app).document.blocks;
+            assert_eq!(blocks.len(), 1, "the file renders as one block: {blocks:#?}");
+            let crate::markdown::Block::Code { lang, code, .. } = &blocks[0] else {
+                panic!("that block is code, not prose: {:?}", blocks[0])
+            };
+            assert_eq!(lang.as_deref(), Some("rust"), "highlighted as Rust");
+            assert!(code.contains("#[derive(Debug)]"), "the source survives verbatim");
+            assert!(code.contains("    fn indented() {}"), "indentation preserved");
+        });
+    }
 
     #[gpui::test]
     fn toggle_preview_flips_the_active_editor_tab(cx: &mut TestAppContext) {
@@ -6770,12 +8036,22 @@ mod tests {
 
         ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
         cx.run_until_parked();
-        cx.update(|_, app| assert_eq!(ws.read(app).preview_tab, Some(0)));
-
-        cx.simulate_input("edited ");
-        cx.run_until_parked(); // render notices the dirty preview and pins it
         cx.update(|_, app| {
-            assert_eq!(ws.read(app).preview_tab, None, "typing pins the preview tab")
+            let w = ws.read(app);
+            assert_eq!(w.preview_tab, Some(0));
+            assert!(
+                matches!(w.tabs.get(0), Some(Tab::Editor { view: EditorView::Preview(_), .. })),
+                "a single click opens read-only, so there is nothing to type into"
+            );
+        });
+
+        // Entering edit mode and typing is what pins it.
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        cx.simulate_input("edited ");
+        cx.run_until_parked(); // render notices the dirty buffer and pins it
+        cx.update(|_, app| {
+            assert_eq!(ws.read(app).preview_tab, None, "typing pins the tab")
         });
     }
 
@@ -7139,6 +8415,30 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|_, app| assert!(ws.read(app).install_overlay.is_some(), "overlay open"));
+
+        // The App Store build deliberately offers no browsable catalog:
+        // `install_ui::catalog_browsable()` is false under `mas`, so the
+        // overlay opens with no entries (a downloadable-plugin list reads
+        // as a storefront under DPLA 3.3.2(b)). There is nothing to
+        // confirm, so the rest of this flow does not exist there — assert
+        // that deliberate absence rather than a broken install.
+        //
+        // This branch was missing and nobody saw it: CI builds the
+        // fixtures on Linux only, and runs the `mas` suite on macOS only,
+        // so this test has never once executed under `mas` — it takes the
+        // "fixtures not built" skip above every time.
+        if !crate::install_ui::catalog_browsable() {
+            cx.update(|_, app| {
+                let overlay = ws.read(app).install_overlay.as_ref().expect("overlay open");
+                assert_eq!(
+                    overlay.0.read(app).entry_count(),
+                    0,
+                    "the App Store build lists no installable plugins"
+                );
+            });
+            return;
+        }
+
         cx.dispatch_action(crate::install_ui::InstallConfirm);
         cx.run_until_parked();
         let installed = crate::settings::config_dir().join("plugins/demo/plugin.toml");

@@ -177,6 +177,19 @@ fn collect_directives(
                             span.range.start + text_end..span.range.end,
                             Action::Hide(Bias::Left),
                         ));
+                    } else if let Some(visible) = scan_wiki(&line[l..e]) {
+                        // Hide "[[" (or "[[Target|") and the trailing
+                        // "]]". An empty leading range is dropped by the
+                        // clamp below, so this is safe when the visible
+                        // text starts at the span's own start.
+                        out.push((
+                            span.range.start..span.range.start + visible.start,
+                            Action::Hide(Bias::Right),
+                        ));
+                        out.push((
+                            span.range.start + visible.end..span.range.end,
+                            Action::Hide(Bias::Left),
+                        ));
                     }
                 }
             }
@@ -302,6 +315,32 @@ fn scan_link(s: &str) -> Option<usize> {
         return None;
     }
     Some(text_end)
+}
+
+/// If `s` is exactly `[[Target]]` or `[[Target|label]]`, return the
+/// byte range within `s` of the text to keep visible: the label when
+/// one is given, the target otherwise. None if it doesn't scan.
+///
+/// `scan_link` cannot serve here — it requires a `(` after the `]`, so
+/// it returns None for every wiki link, which is why nothing hid.
+fn scan_wiki(s: &str) -> Option<Range<usize>> {
+    let inner = s.strip_prefix("[[")?.strip_suffix("]]")?;
+    // A nested bracket pair means this is not one clean wiki link;
+    // leave it alone rather than hide bytes we cannot account for.
+    if inner.is_empty() || inner.contains("[[") || inner.contains("]]") {
+        return None;
+    }
+    Some(match inner.find('|') {
+        // `[[Target|label]]`: the left names the note, the right is
+        // what the reader meant to read. Hiding only the brackets
+        // would leak the pipe into prose as `Target|label`.
+        //
+        // An empty label shows the target instead — hiding everything
+        // rendered the whole link as zero characters.
+        Some(bar) if inner[bar + 1..].trim().is_empty() => 2..2 + bar,
+        Some(bar) => 2 + bar + 1..2 + inner.len(),
+        None => 2..2 + inner.len(),
+    })
 }
 
 pub fn display_line(
@@ -437,6 +476,51 @@ mod tests {
 
     fn span(range: Range<usize>, kind: StyleKind) -> StyleSpan {
         StyleSpan { range, kind }
+    }
+
+    /// The app's core rule is that syntax markers hide until the cursor
+    /// touches them. `**bold**` has always hidden its asterisks; a wiki
+    /// link showed raw `[[ ]]`, which contradicts the same rule the rest
+    /// of the editor lives by.
+    #[test]
+    fn wiki_brackets_hide_when_cursor_elsewhere() {
+        let dl = display_line("see [[Roadmap]] x", 0, &[span(4..15, StyleKind::Link)], 0..0);
+        assert_eq!(dl.text, "see Roadmap x");
+    }
+
+    #[test]
+    fn wiki_brackets_reveal_when_the_selection_touches() {
+        for sel in [4..4, 8..8, 15..15, 3..6] {
+            let dl =
+                display_line("see [[Roadmap]] x", 0, &[span(4..15, StyleKind::Link)], sel.clone());
+            assert_eq!(dl.text, "see [[Roadmap]] x", "selection {sel:?} must reveal");
+        }
+    }
+
+    /// `[[Target|label]]` names the note on the left and shows the label
+    /// on the right. Hiding only the brackets would leave `Target|label`
+    /// on screen, which is the pipe leaking into prose.
+    #[test]
+    fn a_labelled_wiki_link_displays_its_label() {
+        let dl = display_line("[[Roadmap|the plan]]", 0, &[span(0..20, StyleKind::Link)], 30..30);
+        assert_eq!(dl.text, "the plan");
+    }
+
+    /// `[[Target|]]` used to render as nothing at all: the label is
+    /// empty, so hiding the target *and* the brackets left zero
+    /// characters, with nothing to click and no sign the link existed.
+    #[test]
+    fn an_empty_label_falls_back_to_the_target() {
+        let dl = display_line("[[Roadmap|]]", 0, &[span(0..12, StyleKind::Link)], 30..30);
+        assert_eq!(dl.text, "Roadmap");
+    }
+
+    /// A markdown link must keep hiding `](dest)` exactly as before: the
+    /// wiki branch is additional, not a replacement.
+    #[test]
+    fn markdown_link_hiding_is_unchanged_by_the_wiki_branch() {
+        let dl = display_line("[text](d.md)", 0, &[span(0..12, StyleKind::Link)], 30..30);
+        assert_eq!(dl.text, "text");
     }
 
     #[test]

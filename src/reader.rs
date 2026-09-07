@@ -55,6 +55,31 @@ pub struct Reader {
 }
 
 /// Language token for a file. Delegates to the central mapping.
+/// Wrap a non-Markdown file so the pretty preview renders it as one
+/// fenced code block instead of parsing it as prose.
+///
+/// Without this, previewing `sample.rs` fed Rust source to the
+/// CommonMark parser: doc comments became paragraphs, the source was
+/// reflowed, and any 4-space-indented block turned into an indented
+/// code block. The file was legible only by accident.
+///
+/// The fence is made longer than the longest backtick run in the file,
+/// as CommonMark requires, so a file that itself contains ``` cannot
+/// close the fence early.
+pub fn source_as_document(text: &str, language: Option<&str>) -> String {
+    let longest = text
+        .as_bytes()
+        .split(|&b| b != b'`')
+        .map(<[u8]>::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest.saturating_add(1).max(3));
+    let info = language.unwrap_or("");
+    // A trailing newline before the closing fence keeps a file that
+    // does not end in one from gluing onto the delimiter.
+    format!("{fence}{info}\n{}\n{fence}\n", text.trim_end_matches('\n'))
+}
+
 pub fn language_for_path(path: &Path) -> Option<String> {
     crate::highlight::language_for_file(path)
 }
@@ -68,9 +93,21 @@ impl Reader {
         langs: &Languages,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::from_source_at(None, title, source, langs, cx)
+    }
+
+    /// As `from_source`, remembering which file the text came from so a
+    /// relative link in it can be resolved for its hover preview.
+    pub fn from_source_at(
+        path: Option<PathBuf>,
+        title: SharedString,
+        source: &str,
+        langs: &Languages,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut document = markdown::parse(source);
         langs.highlight_document(&mut document);
-        Self::from_document(None, title, document, cx)
+        Self::from_document(path, title, document, cx)
     }
 
     pub fn welcome(langs: &Languages, cx: &mut Context<Self>) -> Self {
@@ -213,6 +250,16 @@ impl gpui::Focusable for Reader {
     }
 }
 
+/// A link was clicked in the rendered view. Carries the destination
+/// exactly as written; the workspace classifies and resolves it,
+/// because only it knows which file this reader is showing.
+#[derive(Debug, Clone)]
+pub enum ReaderEvent {
+    Follow(String),
+}
+
+impl gpui::EventEmitter<ReaderEvent> for Reader {}
+
 impl Render for Reader {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.weak_entity();
@@ -235,7 +282,46 @@ impl Render for Reader {
                     };
                     let t = theme(cx);
                     let document = reader.read(cx).document.clone();
-                    view::list_item(&document, ix, &t, cx)
+                    // Clicking a link in the rendered view emits; the
+                    // workspace resolves it against the open file.
+                    let follow: view::Follow = {
+                        let reader = reader.clone();
+                        std::rc::Rc::new(move |dest: &str, _window: &mut Window, cx: &mut App| {
+                            let dest = dest.to_string();
+                            reader.update(cx, |_, cx| cx.emit(ReaderEvent::Follow(dest)));
+                        })
+                    };
+                    let base = reader.read(cx).path.clone();
+                    let describe: view::Describe = std::rc::Rc::new(
+                        move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
+                            let base = base.clone()?;
+                            // Same marker the click path reads: a wiki
+                            // destination resolves by stem, not as a
+                            // path, or every `[[Wiki]]` previewed as
+                            // "does not exist".
+                            let (wiki, target) = match dest.strip_prefix("[[") {
+                                Some(stem) => (true, stem.to_string()),
+                                None => (false, dest.to_string()),
+                            };
+                            let link = crate::knowledge::RawLink {
+                                target,
+                                wiki,
+                                range: 0..0,
+                                context: String::new(),
+                            };
+                            let grants = crate::preview::stored_grants();
+                            Some(crate::preview::preview_for_link(
+                                &link,
+                                dest,
+                                &grants,
+                                |l| {
+                                    cx.try_global::<crate::knowledge::KnowledgeState>()
+                                        .and_then(|s| s.0.lock().unwrap().resolve(&base, l))
+                                },
+                            ))
+                        },
+                    );
+                    view::list_item(&document, ix, &t, cx, Some(&follow), Some(&describe))
                 })
                 .size_full(),
             )
@@ -251,6 +337,38 @@ mod tests {
     const DOC: &str = "# Alpha\n\nintro\n\n## Beta\n\n```rust\nfn main() {}\n```\n\n### Gamma\n\ntail\n";
 
     // ── pure construction ──────────────────────────────────────────────
+
+    #[test]
+    fn source_becomes_one_fenced_block_not_prose() {
+        let doc = source_as_document("fn main() {}\n", Some("rust"));
+        assert_eq!(doc, "```rust\nfn main() {}\n```\n");
+        // No language is still a fence: monospace, never reflowed prose.
+        assert_eq!(source_as_document("plain", None), "```\nplain\n```\n");
+    }
+
+    /// A file containing a fence must not close the wrapper early, or
+    /// the tail of it renders as prose — the very bug being fixed.
+    #[test]
+    fn the_fence_outgrows_any_backtick_run_in_the_file() {
+        let doc = source_as_document("a\n```\nb\n", Some("md"));
+        assert!(doc.starts_with("````md\n"), "fence longer than the run: {doc}");
+        assert!(doc.ends_with("\n````\n"));
+        let doc = source_as_document("`````\n", Some("md"));
+        assert!(doc.starts_with("``````md\n"), "{doc}");
+    }
+
+    /// The rendered block must contain the source verbatim: a preview
+    /// that reflows or re-indents code is not a preview of that file.
+    #[test]
+    fn the_source_survives_verbatim() {
+        let src = "//! doc\n\n    indented\n\ttabbed\n#[derive(Debug)]\nstruct S;";
+        let doc = source_as_document(src, Some("rust"));
+        let body = doc
+            .trim_start_matches("```rust\n")
+            .trim_end_matches("```\n")
+            .trim_end_matches('\n');
+        assert_eq!(body, src);
+    }
 
     #[test]
     fn language_for_path_delegates_to_central_mapping() {

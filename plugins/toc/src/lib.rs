@@ -36,6 +36,17 @@ pub fn build_toc(document: &str) -> String {
         if hashes == 0 || hashes > 6 {
             continue;
         }
+        // CommonMark requires whitespace after the `#` run. Without
+        // this check a tag line — `#guide #plugins`, which SuperMD
+        // renders as two tags — reads as a level-1 heading and lands
+        // in the table of contents.
+        // CommonMark requires whitespace after the `#` run. Without
+        // this check a tag line — `#guide #plugins`, which SuperMD
+        // renders as two tags — reads as a level-1 heading and lands
+        // in the table of contents.
+        if !matches!(trimmed[hashes..].chars().next(), Some(' ' | '\t')) {
+            continue;
+        }
         let rest = trimmed[hashes..].trim();
         if rest.is_empty() {
             continue;
@@ -132,6 +143,18 @@ export!(Plugin);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tag_line_is_not_a_heading() {
+        // `#guide` has no space after the hash, so CommonMark makes it
+        // a paragraph and SuperMD renders it as a tag. It must not
+        // reach the table of contents.
+        let doc = "# Real Heading\n\n#guide #plugins\n\n## Another\n";
+        let toc = build_toc(doc);
+        assert!(toc.contains("Real Heading"), "real headings still listed");
+        assert!(toc.contains("Another"), "and later ones");
+        assert!(!toc.contains("guide"), "the tag line is not a heading:\n{toc}");
+    }
 
     #[test]
     fn toc_skips_fences_and_indents() {

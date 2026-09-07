@@ -14,6 +14,12 @@ pub const ICONS: &[(&str, &[u8])] = &[
     ("plus", include_bytes!("../assets/icons/ui/plus.svg")),
     ("sun", include_bytes!("../assets/icons/ui/sun.svg")),
     ("graph", include_bytes!("../assets/icons/ui/graph.svg")),
+    // The sidebar's directory marker. Seti ships a `folder` glyph, but
+    // it is a solid 32x32 shape with a baked-in `fill="#ABABAB"`, so it
+    // ignores `text_color` and stays the same grey in every theme while
+    // every other piece of sidebar chrome follows the palette. This one
+    // is stroke-and-currentColor like its neighbours.
+    ("folder", include_bytes!("../assets/icons/ui/folder.svg")),
 ];
 
 /// Asset path for an icon, as `gpui::svg().path(..)` wants it.

@@ -9,7 +9,7 @@ use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
 
-use super::blocks::{BlockInfo, BlockKind};
+use super::blocks::BlockInfo;
 use super::projector::Claim;
 
 #[derive(Debug, Clone)]
@@ -59,19 +59,16 @@ pub fn project(
     claims: &[(usize, Claim)],
     selection: Range<usize>,
 ) -> Vec<Item> {
-    // Fence-delimiter omission stays block-driven: only a closed,
-    // untouched fence hides its delimiter lines.
-    let mut skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for block in blocks {
-        if let BlockKind::Fence { open_line, close_line: Some(close) } = &block.kind {
-            let touched =
-                block.range.start <= selection.end && selection.start <= block.range.end;
-            if !touched {
-                skip.insert(line_of_byte(lines, open_line.start));
-                skip.insert(line_of_byte(lines, close.start));
-            }
-        }
-    }
+    // Nothing is omitted from the projection. A line is either emitted
+    // or consumed by a widget that stands in its place. Fence
+    // delimiters used to be the one exception — omitted for a closed,
+    // untouched fence — but the reveal rule does not reach them: a
+    // marker folds away when something *replaces* it (`**` because the
+    // text renders bold, a table's pipes because a widget takes their
+    // place), and a fence's content stays as text lines. Hiding
+    // ```rust deleted the language with nothing standing in for it.
+    // `spans.rs` styles fence delimiters faded and has always
+    // documented them as never hidden.
 
     // Widgets: untouched claims, sorted (start line, registry order),
     // first claim wins on overlap; losers are dropped entirely.
@@ -105,9 +102,7 @@ pub fn project(
             line = claim.lines.end;
             widget_ix += 1;
         } else {
-            if !skip.contains(&line) {
-                items.push(Item::Line(line));
-            }
+            items.push(Item::Line(line));
             line += 1;
         }
     }
@@ -138,6 +133,9 @@ pub fn item_of_line(items: &[Item], line: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests build fences now: the projection itself stopped
+    // needing to know about them when delimiter omission was removed.
+    use super::super::blocks::BlockKind;
     use crate::editor::projector::TablePayload;
 
     fn lines_of(src: &str) -> Vec<Range<usize>> {
@@ -197,18 +195,27 @@ mod tests {
         assert_eq!(items.len(), 2);
     }
 
+    /// A fence keeps its delimiter lines whether or not the cursor is
+    /// inside it. They used to be omitted for a closed, untouched
+    /// fence, which hid the language tag — the one piece of information
+    /// the opening line carries — and left no way to see it but to
+    /// click into the block.
     #[test]
-    fn untouched_fence_omits_delimiter_lines() {
+    fn a_fence_always_keeps_its_delimiter_lines() {
         let src = "```rust\nlet x = 1;\n```\ntail";
         let lines = lines_of(src);
         let blocks = [BlockInfo {
             range: 0..22,
             kind: BlockKind::Fence { open_line: 0..7, close_line: Some(19..22) },
         }];
-        let items = project(&lines, &blocks, &[], 100..100);
-        assert_eq!(items, vec![Item::Line(1), Item::Line(3)]);
-        let items = project(&lines, &blocks, &[], 10..10);
-        assert_eq!(items.len(), 4);
+        for selection in [100..100, 10..10] {
+            let items = project(&lines, &blocks, &[], selection.clone());
+            assert_eq!(
+                items,
+                vec![Item::Line(0), Item::Line(1), Item::Line(2), Item::Line(3)],
+                "selection {selection:?}: every line, delimiters included"
+            );
+        }
     }
 
     #[test]
@@ -245,7 +252,8 @@ mod tests {
         assert_eq!(item_of_line(&items, 0), 0);
         assert_eq!(item_of_line(&items, 3), 2); // inside widget -> widget item
         assert_eq!(item_of_line(&items, 6), 4);
-        // omitted fence delimiter maps to nearest emitted neighbor
+        // A fence keeps every line now, so nothing is omitted and each
+        // maps to its own item.
         let src2 = "```rust\nbody\n```";
         let lines2 = lines_of(src2);
         let blocks2 = [BlockInfo {
@@ -253,8 +261,8 @@ mod tests {
             kind: BlockKind::Fence { open_line: 0..7, close_line: Some(13..16) },
         }];
         let items2 = project(&lines2, &blocks2, &[], 100..100);
-        assert_eq!(items2, vec![Item::Line(1)]);
+        assert_eq!(items2, vec![Item::Line(0), Item::Line(1), Item::Line(2)]);
         assert_eq!(item_of_line(&items2, 0), 0);
-        assert_eq!(item_of_line(&items2, 2), 0);
+        assert_eq!(item_of_line(&items2, 2), 2);
     }
 }

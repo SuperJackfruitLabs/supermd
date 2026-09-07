@@ -194,10 +194,35 @@ commands! {
     ed::FollowLink => { id: "follow_link", label: "Follow Link",
         keys: ["cmd-enter"], ctx: Some("Editor"), menu: Some((Go, 2)),
         help: Some(HEditor) },
+    ws::NavigateBack => { id: "nav_back", label: "Back", keys: ["cmd-["],
+        ctx: None, menu: Some((Go, 2)), help: Some(General) },
+    ws::NavigateForward => { id: "nav_forward", label: "Forward", keys: ["cmd-]"],
+        ctx: None, menu: Some((Go, 2)), help: Some(General) },
 
     // ── Tools ──────────────────────────────────────────────────────────
     ws::ToggleGraph => { id: "graph", label: "Graph View", keys: ["cmd-shift-g"],
         ctx: None, menu: Some((Go, 0)), help: Some(General) },
+    ws::GraphFit => { id: "graph_fit", label: "Fit Graph to Window",
+        keys: ["cmd-0"], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    ws::GraphColorBy => { id: "graph_color_by", label: "Graph Colour: Folder / Tag / None",
+        keys: ["cmd-g"], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    ws::GraphSearch => { id: "graph_search", label: "Search the Graph",
+        keys: ["cmd-f"], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    ws::GraphOrphans => { id: "graph_orphans", label: "Graph: Orphans Only",
+        keys: ["cmd-shift-o"], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    ws::GraphLocal => { id: "graph_local", label: "Graph: Local / Whole Vault",
+        keys: ["cmd-l"], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    ws::GraphDepthOut => { id: "graph_depth_out", label: "Graph: One Hop Further",
+        keys: ["cmd-="], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    ws::GraphDepthIn => { id: "graph_depth_in", label: "Graph: One Hop Nearer",
+        keys: ["cmd--"], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    // Not `space`: gpui resolves keymap actions before an element's
+    // key handler, so a bare space could never reach the graph's search
+    // box — typing a two-word query froze the layout instead.
+    ws::GraphFreeze => { id: "graph_freeze", label: "Graph: Freeze / Run",
+        keys: ["cmd-."], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    ws::GraphSpread => { id: "graph_spread", label: "Graph Spread: Tight / Normal / Loose",
+        keys: ["cmd-e"], ctx: Some("GraphView"), menu: None, help: Some(General) },
     ws::TogglePalette => { id: "palette", label: "Command Palette…",
         keys: ["cmd-shift-p"], ctx: None, menu: Some((Tools, 0)), help: Some(General) },
     ws::InstallPlugins => { id: "install_plugins", label: "Install Plugins…",
@@ -548,6 +573,19 @@ mod tests {
             .map(|c| c.id)
             .collect();
         assert_eq!(holders, vec!["toggle_sidebar", "bold"]);
+    }
+
+    #[test]
+    fn cmd_shift_g_is_shared_across_contexts_on_purpose() {
+        // ToggleGraph (global) and FindPrev (Editor) both bind ⌘⇧G; the
+        // editor handler propagates when the find bar is closed so the
+        // graph still opens. This records the exception.
+        let holders: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.keys.contains(&"cmd-shift-g"))
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(holders, vec!["graph", "find_prev"]);
     }
 
     #[test]

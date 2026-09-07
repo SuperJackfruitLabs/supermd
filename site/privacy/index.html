@@ -66,7 +66,7 @@
 <header class="wrap">
   <h1>Privacy Policy</h1>
   <p class="lede">SuperMD collects nothing. There is no analytics, no telemetry, no crash reporting, and no account.</p>
-  <p class="updated">Last updated: 31 August 2026</p>
+  <p class="updated">Last updated: 7 September 2026</p>
 </header>
 
 <main class="wrap">
@@ -83,7 +83,11 @@
   <p>On the Mac App Store version, macOS additionally sandboxes the app: it can only reach folders you have explicitly opened through the system's open panel. Settings, themes and plugins live inside the app's own container.</p>
 
   <h2>When SuperMD uses the network</h2>
-  <p>Only when you ask it to. The Mac App Store version makes no network request at launch, in the background, or on any schedule. Every connection below is the direct result of an action you took:</p>
+  <p>The Mac App Store version makes no network request at launch, in the background, or on any schedule — every connection it makes is the direct result of an action you took.</p>
+
+  <p>The versions downloaded from this site and from GitHub (the Mac disk image, the Linux packages and the Windows installer) additionally check <code>api.github.com</code> once per launch to see whether a newer release exists, and tell you if there is. That check sends no information about you or your documents beyond what any HTTPS request reveals to the server it contacts. It is the only thing SuperMD does without being asked, and the App Store version does not do it at all.</p>
+
+  <p>Everything else, in every version, happens only because you asked:</p>
 
   <table>
     <tr><th>Connection</th><th>What triggers it</th></tr>
@@ -98,6 +102,10 @@
     <tr>
       <td>A plugin's own request</td>
       <td>Only if you install a plugin that declares network access, and only after you approve each website it asks for.</td>
+    </tr>
+    <tr>
+      <td>Link preview</td>
+      <td>Only for sites you have turned previews on for, one site at a time. Hovering a link never makes a request: an external preview shows only the address and its domain until you click <em>Enable previews for this site</em>. Grants are remembered and can be revoked.</td>
     </tr>
   </table>
 

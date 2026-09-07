@@ -117,6 +117,14 @@ pub struct Editor {
     spans: Vec<StyleSpan>,
     line_kinds: Vec<LineKind>,
     blocks: Vec<blocks::BlockInfo>,
+    /// Every followable link in the document, in document order.
+    ///
+    /// Recomputed in `restyle` — on open and on edit, never per frame —
+    /// because `extract_all_links` costs ~7.65 ms on a 1 MB document.
+    /// Hover hit-testing runs on every pointer move and could not
+    /// afford that; neither, really, could the click path, which paid
+    /// it once per press.
+    links: Vec<crate::knowledge::RawLink>,
     claims: Vec<(usize, projector::Claim)>,
     /// Inline-cache generation this editor last styled against.
     inline_gen: u64,
@@ -129,6 +137,11 @@ pub struct Editor {
     layout_cache: HashMap<usize, CachedLine>,
     marked_range: Option<Range<usize>>,
     dragging: bool,
+    /// A left press that landed on a followable link. Navigation waits
+    /// for the release, so a drag can still begin inside link text; the
+    /// link found at press time rides along rather than being extracted
+    /// a second time.
+    pending_link: Option<PendingLink>,
     preferred_x: Option<Pixels>,
     save_task: Option<gpui::Task<()>>,
     find: Option<FindState>,
@@ -147,6 +160,15 @@ pub struct Editor {
     toolbar_visible: bool,
     /// Settle timer; replacing it cancels the pending reveal.
     toolbar_task: Option<gpui::Task<()>>,
+    /// The link the pointer is resting on, the dwell task that will
+    /// open its popover, and what to draw once it does.
+    hover_link: Option<crate::knowledge::RawLink>,
+    hover_task: Option<gpui::Task<()>>,
+    hover_at: Option<gpui::Point<Pixels>>,
+    hover_preview: Option<crate::preview::Preview>,
+    /// The pointer is inside the popover itself, so it must not close.
+    hover_held: bool,
+    hover_close_task: Option<gpui::Task<()>>,
 }
 
 /// Snapshot taken right after a paste lands, so a background enricher
@@ -155,6 +177,15 @@ struct PendingEnrich {
     range: Range<usize>,
     snapshot: String,
     pasted: String,
+}
+
+/// A left press on a link, waiting for its release to decide whether it
+/// was a click (navigate) or the start of a drag (select).
+struct PendingLink {
+    /// Buffer offset of the press — where the caret goes if the link
+    /// turns out not to be followable, and the anchor a drag starts from.
+    offset: usize,
+    link: crate::knowledge::RawLink,
 }
 
 pub enum EditorEvent {
@@ -220,6 +251,23 @@ fn is_markdown(path: &Path) -> bool {
     )
 }
 
+/// Whether a click should navigate rather than place the caret.
+///
+/// A rendered link follows on a plain click, matching every note-focused
+/// editor. A link whose syntax is revealed is one the cursor is already
+/// inside, so a plain click there edits it — otherwise the link could
+/// never be corrected. ⌘-click always follows, as before.
+pub fn click_follows_link(has_modifier: bool, on_link: bool, revealed: bool) -> bool {
+    on_link && (has_modifier || !revealed)
+}
+
+/// Whether ⌘⇧G belongs to the editor's find bar or should fall through
+/// to the global Graph View binding. Pure so the collision rule is
+/// recorded in a test rather than in a comment.
+pub fn find_prev_should_consume(find_open: bool) -> bool {
+    find_open
+}
+
 impl Editor {
     /// Read a file's text. Call `from_text` inside `cx.new` (which cannot
     /// be fallible) with the result.
@@ -252,6 +300,7 @@ impl Editor {
             spans: Vec::new(),
             line_kinds: Vec::new(),
             blocks: Vec::new(),
+            links: Vec::new(),
             claims: Vec::new(),
             inline_gen: 0,
             projection: Vec::new(),
@@ -263,6 +312,7 @@ impl Editor {
             layout_cache: HashMap::new(),
             marked_range: None,
             dragging: false,
+            pending_link: None,
             preferred_x: None,
             save_task: None,
             find: None,
@@ -274,6 +324,12 @@ impl Editor {
             completion: None,
             toolbar_visible: false,
             toolbar_task: None,
+            hover_link: None,
+            hover_task: None,
+            hover_at: None,
+            hover_preview: None,
+            hover_held: false,
+            hover_close_task: None,
         };
         editor.restyle(langs);
         editor.schedule_status(cx);
@@ -305,8 +361,36 @@ impl Editor {
             .into()
     }
 
+    /// The followable link containing `offset`, from the cache.
+    ///
+    /// `extract_all_links` returns links in document order, so the
+    /// ranges are sorted and disjoint and a binary search answers in
+    /// log time — cheap enough for a pointer-move handler.
+    pub(crate) fn link_at_offset(&self, offset: usize) -> Option<&crate::knowledge::RawLink> {
+        let ix = self
+            .links
+            .binary_search_by(|l| {
+                if l.range.end <= offset {
+                    std::cmp::Ordering::Less
+                } else if offset < l.range.start {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok()?;
+        self.links.get(ix)
+    }
+
     fn restyle(&mut self, langs: &Languages) {
         let text = self.core.buffer.text();
+        // Links only mean anything in a Markdown document; a code file's
+        // click path is gated on `can_format()` and never follows one.
+        self.links = if matches!(self.provider, Provider::Markdown) {
+            crate::knowledge::extract_all_links(&text)
+        } else {
+            Vec::new()
+        };
         self.spans = match &self.provider {
             Provider::Markdown => spans::markdown_spans_highlighted(&text, langs),
             Provider::Code(lang) => spans::code_spans(&text, lang.as_str(), langs),
@@ -461,8 +545,54 @@ impl Editor {
         }
         let items = self.compute_projection();
         if items != self.projection {
+            // reset() clears logical_scroll_top AND discards every
+            // measured height, so a following scroll_to_reveal_item
+            // computes goal_top = 0 and pins to item 0. Capture the
+            // anchor first and restore it with scroll_to, which sets the
+            // anchor directly and needs no measurements.
+            let anchor = self.list_state.logical_scroll_top();
             self.projection = items;
             self.list_state.reset(self.projection.len());
+            // The anchor is a raw item index, not a document position:
+            // if the projection change happened *above* the viewport
+            // (a widget up there collapsed or expanded, changing how
+            // many items precede this one), the same index now names a
+            // different line and the view shifts by that difference.
+            // Only clamping is done here. Fixing it properly means
+            // anchoring on a buffer offset and mapping it back through
+            // the new projection; the drift is bounded by the size of
+            // one claim and is strictly better than the pin-to-item-0
+            // top-jump this replaced.
+            let clamped = ListOffset {
+                item_ix: anchor.item_ix.min(self.projection.len().saturating_sub(1)),
+                offset_in_item: anchor.offset_in_item,
+            };
+            self.list_state.scroll_to(clamped);
+            // Known limitation: reveal_cursor()'s downward case cannot
+            // actually scroll further right after this reset. Every item
+            // was just spliced back in as Unmeasured (height 0), and
+            // ListState::scroll_to_reveal_item's below-anchor branch derives
+            // goal_top from summed measured heights (vendor/gpui/src/
+            // elements/list.rs:360) — with all heights zero it always
+            // computes goal_top = 0, so start_ix comes back 0 and the
+            // `start_ix >= scroll_top.item_ix` guard fails for any nonzero
+            // anchor, silently no-opping. The above-or-at-anchor branch
+            // sets the index directly and needs no heights, so upward
+            // reveals still work. Net effect here: a cursor that lands
+            // below the just-restored anchor (e.g. a click deep inside a
+            // widget taller than the viewport) may not be scrolled into
+            // view by this call. This is strictly no worse than before —
+            // the call was equally unable to reveal pre-fix, it just
+            // happened to pin to the top — so it's left as a known gap
+            // rather than a regression. Closing it for real means either
+            // deferring this call until a paint has measured items near
+            // the target (window.on_next_frame, and even then only
+            // measures outward from the anchor incrementally, so it isn't
+            // guaranteed for far-off targets) or computing the restored
+            // anchor to include the cursor's item directly instead of
+            // going through gpui's height-based reveal — both are timing/
+            // behavior changes to render and measurement, out of scope
+            // for this bug fix.
             self.reveal_cursor();
         }
     }
@@ -665,10 +795,43 @@ impl Editor {
         let Some(link) = crate::knowledge::Index::link_at(&text, offset) else {
             return false;
         };
+        self.open_link(&link, cx)
+    }
+
+    /// Open an already-located link. Split out from `follow_link_at` so
+    /// a caller that has just found the link (the mouse handler) does not
+    /// pay for a second `link_at` over the whole document.
+    fn open_link(&mut self, link: &crate::knowledge::RawLink, cx: &mut Context<Self>) -> bool {
+        if !self.can_format() {
+            return false;
+        }
+        // Neither an external link nor an anchor touches the index —
+        // classify first.
+        match crate::knowledge::classify(link) {
+            crate::knowledge::LinkTarget::External(url) => {
+                cx.open_url(&url);
+                return true;
+            }
+            // `#heading` is a position in the document already open, not
+            // a path. The `toc` plugin writes a page of these, and until
+            // now every one of them was joined onto a directory, failed
+            // to resolve, and did nothing when clicked.
+            crate::knowledge::LinkTarget::Anchor(anchor) => {
+                let text = self.core.buffer.text();
+                let Some(offset) = crate::knowledge::heading_offset(&text, &anchor) else {
+                    return false;
+                };
+                self.core.selection = crate::editor::core::Selection::cursor(offset);
+                self.reveal_cursor();
+                cx.notify();
+                return true;
+            }
+            _ => {}
+        }
         let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
             return false;
         };
-        let resolved = state.0.lock().unwrap().resolve(&self.path, &link);
+        let resolved = state.0.lock().unwrap().resolve(&self.path, link);
         let target = match resolved {
             Some(path) => path,
             None if link.wiki => {
@@ -676,15 +839,52 @@ impl Editor {
                 let Some(dir) = self.path.parent() else {
                     return false;
                 };
-                let path = dir.join(format!("{}.md", link.target));
+                let root = state.0.lock().unwrap().root.clone();
+                // `link.target` is unsanitised text from between the
+                // brackets: contain it before anything touches the disk.
+                let Some(path) = crate::knowledge::creatable_note_path(&root, dir, &link.target)
+                else {
+                    eprintln!(
+                        "supermd: refusing [[{}]]: it resolves outside the workspace",
+                        link.target
+                    );
+                    return false;
+                };
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if let Err(err) = std::fs::write(&path, "") {
-                    eprintln!("supermd: cannot create {}: {err}", path.display());
-                    return false;
+                // `create_new`, never `write`: an existing file must be
+                // OPENED, and `fs::write(path, "")` silently zeroes it
+                // instead — with no undo, because it is not the open
+                // buffer. `AlreadyExists` (a file we did not see, or one
+                // that appeared in between) is the same answer: open it.
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                    Ok(_) => state.0.lock().unwrap().update_file(&path, ""),
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if std::fs::symlink_metadata(&path)
+                            .is_ok_and(|m| m.file_type().is_symlink())
+                        {
+                            eprintln!(
+                                "supermd: refusing [[{}]]: it is a symlink out of the workspace",
+                                link.target
+                            );
+                            return false;
+                        }
+                        // O_EXCL refuses a symlink, dangling ones
+                        // included — which is the only reason a target
+                        // pointing outside the workspace was not written
+                        // here. Opening it anyway would hand the editor
+                        // that escaping path, and the next save would
+                        // write through it. Containment cannot catch
+                        // this case: a dangling link has no canonical
+                        // leaf, so the check anchors at the parent and
+                        // approves it.
+                    }
+                    Err(err) => {
+                        eprintln!("supermd: cannot create {}: {err}", path.display());
+                        return false;
+                    }
                 }
-                state.0.lock().unwrap().update_file(&path, "");
                 path
             }
             None => return false,
@@ -1549,6 +1749,10 @@ impl Editor {
     }
 
     fn find_prev(&mut self, _: &FindPrev, _: &mut Window, cx: &mut Context<Self>) {
+        if !find_prev_should_consume(self.find.is_some()) {
+            cx.propagate(); // ⌘⇧G belongs to Graph View when find is closed
+            return;
+        }
         self.cycle_find(false, cx);
     }
 
@@ -1670,10 +1874,37 @@ impl Editor {
         // any pending reveal.
         self.toolbar_visible = false;
         self.toolbar_task = None;
-        // ⌘-click follows the link under the pointer.
-        if event.modifiers.platform && !event.modifiers.shift {
+        // A plain click follows a rendered link; ⌘-click always follows,
+        // even a revealed one being edited. The decision is made here,
+        // where the press happened, but it is *acted on* in
+        // on_root_mouse_up: navigating on mouse-down makes it impossible
+        // to start a drag-selection inside link text, which is why every
+        // browser (and Obsidian) navigates on release.
+        self.pending_link = None;
+        if !event.modifiers.shift {
             if let Some(offset) = self.offset_at_point(event.position) {
-                if self.follow_link_at(offset, cx) {
+                // From the cache built in `restyle`, not a fresh scan:
+                // this runs on every press, and extracting links costs
+                // ~7.65 ms on a 1 MB document.
+                let link = self.link_at_offset(offset).cloned();
+                let on_link = link.is_some();
+                // "Revealed" is span overlap, not a shared line — the
+                // same rule display::revealed uses. A link merely on the
+                // cursor's line is still rendered and must still follow.
+                let sel = self.core.selection.range();
+                let revealed = link
+                    .as_ref()
+                    .is_some_and(|l| l.range.start <= sel.end && sel.start <= l.range.end);
+                if self.can_format() && click_follows_link(event.modifiers.platform, on_link, revealed) {
+                    // The caret deliberately does not move yet: a click
+                    // that navigates should not reveal the link's markers
+                    // on its way out, and a drag sets its anchor from
+                    // `offset` when the first move arrives.
+                    self.pending_link =
+                        Some(PendingLink { offset, link: link.expect("on_link") });
+                    self.dragging = true;
+                    self.core.break_undo_group();
+                    window.focus(&self.focus_handle);
                     return;
                 }
             }
@@ -1736,15 +1967,28 @@ impl Editor {
     fn on_root_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.scrollbar_dragging {
             self.scrollbar_scrub(event.position, cx);
             return;
         }
+        self.hover_moved(event.position, window, cx);
         if self.dragging {
             if let Some(offset) = self.offset_at_point(event.position) {
+                // A press on a link left the caret alone. The moment the
+                // pointer actually moves off that offset it is a drag,
+                // not a click: drop the navigation and plant the anchor
+                // where the press landed.
+                if let Some(pending) = &self.pending_link {
+                    if offset == pending.offset {
+                        return; // jitter within one offset is still a click
+                    }
+                    let anchor = pending.offset;
+                    self.pending_link = None;
+                    self.core.set_cursor(anchor);
+                }
                 self.core.select_to(offset);
                 cx.notify();
             }
@@ -1754,6 +1998,18 @@ impl Editor {
     fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let selection_drag_ended = self.dragging && !self.scrollbar_dragging;
         self.dragging = false;
+        // The press landed on a followable link and nothing dragged it
+        // away: this release is the click, so navigate now.
+        if let Some(pending) = self.pending_link.take() {
+            if !self.open_link(&pending.link, cx) {
+                // Refused (an escaping wiki target, say) — the click
+                // still belongs to the document, so place the caret.
+                self.core.set_cursor(pending.offset);
+                self.preferred_x = None;
+                cx.notify();
+            }
+            return;
+        }
         if self.scrollbar_dragging {
             self.scrollbar_dragging = false;
             self.list_state.scrollbar_drag_ended();
@@ -1774,6 +2030,274 @@ impl Editor {
         }
     }
 
+    /// The pointer moved. Starts, keeps, or cancels a link's dwell.
+    ///
+    /// Cheap by construction: the hit test is a binary search over the
+    /// link cache, and the common case — moving over prose, or moving
+    /// within the same link — does no work beyond that and starts no
+    /// task.
+    fn hover_moved(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_format() || self.dragging {
+            self.hover_left(cx);
+            return;
+        }
+        // The pointer is over the document, so it is not inside the
+        // popover. Clearing here is what stops `hover_held` latching:
+        // if the popover disappears while hovered (a tab switch removes
+        // its hitbox, so no `on_hover(false)` ever arrives) the flag
+        // would otherwise stay set, and both opening a new preview and
+        // closing the stale one early-return on it forever.
+        self.hover_held = false;
+        let link = self
+            .offset_at_point(position)
+            .and_then(|offset| self.link_at_offset(offset))
+            .cloned();
+        let Some(link) = link else {
+            self.hover_left(cx);
+            return;
+        };
+        // Still the same link: keep its dwell running rather than
+        // restarting it on every pixel, so sliding within a link opens
+        // the popover on time.
+        if self.hover_link.as_ref().is_some_and(|l| l.range == link.range) {
+            // Back on the link it belongs to: call off any pending close.
+            self.hover_close_task = None;
+            return;
+        }
+        // Moving to a different link does NOT tear the popover down.
+        // Reaching a popover means crossing whatever lies between, and
+        // in a list of links that is another link — closing on the
+        // first one crossed made the popover unreachable. The showing
+        // preview stays until the new link's dwell elapses and replaces
+        // it, so travel is free but a genuine pause still swaps.
+        //
+        // `hover_preview` is what the popover renders from, so it must
+        // survive here; only `hover_at` moves with the new dwell.
+        self.hover_close_task = None;
+        self.hover_link = Some(link);
+        self.hover_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(crate::preview::DWELL).await;
+            this.update(cx, |editor, cx| {
+                editor.open_hover_preview(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// The pointer left the link. The popover does not close at once:
+    /// reaching its button means moving off the link, and closing on
+    /// that movement made the button unclickable. It survives a short
+    /// grace period, and indefinitely while the pointer is inside it.
+    fn hover_left(&mut self, cx: &mut Context<Self>) {
+        if self.hover_link.is_none() && self.hover_preview.is_none() {
+            return;
+        }
+        // Nothing shown yet — just a dwell in progress. Drop it now;
+        // there is nothing on screen to walk to.
+        if self.hover_preview.is_none() {
+            self.hover_link = None;
+            self.hover_task = None;
+            self.hover_at = None;
+            cx.notify();
+            return;
+        }
+        if self.hover_close_task.is_some() || self.hover_held {
+            return;
+        }
+        self.hover_close_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::preview::CLOSE_GRACE).await;
+            this.update(cx, |editor, cx| {
+                if !editor.hover_held {
+                    editor.close_hover(cx);
+                }
+                editor.hover_close_task = None;
+            })
+            .ok();
+        }));
+    }
+
+    /// Drop the popover and everything behind it.
+    fn close_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_link = None;
+        self.hover_task = None;
+        self.hover_at = None;
+        self.hover_preview = None;
+        self.hover_held = false;
+        cx.notify();
+    }
+
+    /// The dwell elapsed: work out what to show, and if the site is
+    /// one the user has enabled, go and read its title.
+    /// The dwell elapsed. Leaves a popover the pointer is inside alone.
+    fn open_hover_preview(&mut self, cx: &mut Context<Self>) {
+        self.open_hover_preview_inner(false, cx);
+    }
+
+    fn open_hover_preview_inner(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some(link) = self.hover_link.clone() else {
+            return;
+        };
+        // The pointer is inside the popover, not on the link any more:
+        // swapping its contents out from under the cursor would move
+        // the button the user is reaching for. `force` is set when the
+        // user has just acted on the popover (granting a site), where
+        // refreshing it is the whole point.
+        if self.hover_held && !force {
+            return;
+        }
+        self.hover_at = self.link_anchor(link.range.start).or(self.hover_at);
+        let preview = self.preview_for(&link, cx);
+        // A granted domain we have not read yet: fetch once, in the
+        // background. The task lives in `hover_task`, so moving the
+        // pointer away drops it and the answer is discarded.
+        if let crate::preview::Preview::External { url, consent, fetched: None, .. } = &preview {
+            if *consent == crate::preview::Consent::Granted {
+                let url = url.clone();
+                if let Some(state) = cx.try_global::<crate::preview::PreviewState>().cloned() {
+                    self.hover_task = Some(cx.spawn(async move |this, cx| {
+                        let fetched = cx
+                            .background_executor()
+                            .spawn({
+                                let url = url.clone();
+                                let state = state.clone();
+                                async move {
+                                    match state.cached(&url) {
+                                        Some(m) => Some(m),
+                                        None => (state.fetcher)(&url).ok().and_then(|bytes| {
+                                            let meta = crate::preview::parse_meta(
+                                                &String::from_utf8_lossy(&bytes),
+                                            )?;
+                                            state.remember(&url, meta.clone());
+                                            Some(meta)
+                                        }),
+                                    }
+                                }
+                            })
+                            .await;
+                        this.update(cx, |editor, cx| {
+                            // Only if the pointer is still on the link
+                            // this answer belongs to.
+                            let still_here = matches!(
+                                &editor.hover_preview,
+                                Some(crate::preview::Preview::External { url: u, .. }) if *u == url
+                            );
+                            if still_here {
+                                if let Some(crate::preview::Preview::External { fetched: f, .. }) =
+                                    editor.hover_preview.as_mut()
+                                {
+                                    *f = fetched;
+                                    cx.notify();
+                                }
+                            }
+                        })
+                        .ok();
+                    }));
+                }
+            }
+        }
+        self.hover_preview = Some(preview);
+        cx.notify();
+    }
+
+    /// Enable previews for the site the popover is showing, and read it
+    /// straight away so the click has a visible result.
+    fn enable_previews_for_hovered_site(&mut self, cx: &mut Context<Self>) {
+        let Some(crate::preview::Preview::External { domain, .. }) = self.hover_preview.clone()
+        else {
+            return;
+        };
+        if domain.is_empty() {
+            return;
+        }
+        let dir = crate::settings::config_dir();
+        let mut settings = crate::settings::load(&dir);
+        let grants = settings.plugin_grants.entry("supermd".to_string()).or_default();
+        *grants = crate::preview::grant_domain(&domain, grants);
+        if let Err(err) = crate::settings::save(&dir, &settings) {
+            eprintln!("supermd: cannot record the preview grant: {err}");
+            return;
+        }
+        // Forced: clicking the button requires the pointer inside the
+        // popover, which is exactly the state the dwell path refuses to
+        // touch. Without this the grant was written to settings and
+        // nothing happened on screen — no refresh, no fetch.
+        self.open_hover_preview_inner(true, cx);
+    }
+
+    /// What a link's popover should contain. Pure decisions live in
+    /// `crate::preview`; this supplies the filesystem and the index.
+    fn preview_for(
+        &self,
+        link: &crate::knowledge::RawLink,
+        cx: &App,
+    ) -> crate::preview::Preview {
+        use crate::knowledge::LinkTarget;
+        use crate::preview::{self as pv, Preview};
+
+        match crate::knowledge::classify(link) {
+            LinkTarget::External(url) => {
+                let grants = crate::settings::load(&crate::settings::config_dir())
+                    .plugin_grants
+                    .get("supermd")
+                    .cloned()
+                    .unwrap_or_default();
+                // The *visible* text, not `context` — that is the
+                // whole line, which never looks like a hostname and so
+                // would silently disable the mismatch warning.
+                let text = self.core.buffer.text();
+                let shown = pv::display_text(
+                    text.get(link.range.clone()).unwrap_or_default(),
+                );
+                pv::external_preview(&url, shown, &grants)
+            }
+            LinkTarget::Anchor(a) => {
+                let text = self.core.buffer.text();
+                match crate::knowledge::heading_offset(&text, &a) {
+                    Some(off) => Preview::Anchor {
+                        heading: text[off..].lines().next().unwrap_or("").trim_start_matches('#')
+                            .trim().to_string(),
+                        excerpt: pv::excerpt(&text[off..], 6),
+                    },
+                    None => Preview::Missing { name: format!("#{a}") },
+                }
+            }
+            LinkTarget::Wiki(name) | LinkTarget::Relative(name) => {
+                let resolved = cx
+                    .try_global::<crate::knowledge::KnowledgeState>()
+                    .and_then(|s| s.0.lock().unwrap().resolve(&self.path, link));
+                let Some(path) = resolved else {
+                    return Preview::Missing { name };
+                };
+                if crate::files::is_image_path(&path) {
+                    return Preview::Image { path };
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    return Preview::Missing { name };
+                };
+                let is_md = matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("md" | "markdown" | "mdown" | "mdx")
+                );
+                if is_md {
+                    Preview::Note {
+                        title: pv::title_of(&text, &path),
+                        excerpt: pv::excerpt(&text, 8),
+                    }
+                } else {
+                    Preview::Code {
+                        language: crate::reader::language_for_path(&path),
+                        excerpt: pv::excerpt(&text, 10),
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether the floating format toolbar should paint right now.
     fn toolbar_showing(&self) -> bool {
         self.toolbar_visible && self.can_format() && !self.core.selection.is_cursor()
@@ -1781,6 +2305,24 @@ impl Editor {
 
     /// Window point just above the selection start, if that line is
     /// currently laid out.
+    /// Where a link's popover should sit: just under the start of the
+    /// link itself, from the laid-out glyphs.
+    ///
+    /// Not the pointer position. Anchoring to the pointer put the
+    /// popover wherever the pointer happened to enter the link, which
+    /// in a tight list landed it below the *next* item — so reaching it
+    /// meant crossing another link.
+    fn link_anchor(&self, byte: usize) -> Option<Point<Pixels>> {
+        let line_ix = self.core.buffer.line_of_byte(byte);
+        let entry = self.layout_cache.get(&line_ix)?;
+        let disp = display::src_to_disp(&entry.display, byte);
+        let pos = entry.line.position_for_index(disp, entry.line_height)?;
+        Some(point(
+            entry.origin.x + pos.x,
+            entry.origin.y + pos.y + entry.line_height + px(4.),
+        ))
+    }
+
     fn toolbar_anchor(&self) -> Option<Point<Pixels>> {
         let start = self.core.selection.range().start;
         let line_ix = self.core.buffer.line_of_byte(start);
@@ -2619,11 +3161,15 @@ fn render_table(
     cx: &mut App,
 ) -> gpui::AnyElement {
     let mut rows: Vec<(usize, Vec<String>)> = Vec::new();
+    // The delimiter row is not drawn, but it is the only place a
+    // table's alignment is recorded — read it on the way past.
+    let mut aligns: Vec<Option<blocks::ColumnAlign>> = Vec::new();
     {
         let ed = editor.read(cx);
         for line in lines {
             let text = ed.core.buffer.line_text(line);
             if blocks::is_separator_row(&text) {
+                aligns = blocks::column_alignments(&text);
                 continue;
             }
             rows.push((line, blocks::parse_row(&text)));
@@ -2672,16 +3218,21 @@ fn render_table(
             });
         for c in 0..ncols {
             let cell = cells.get(c).cloned().unwrap_or_default();
-            row = row.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .px_3()
-                    .py_2()
-                    .text_size(px(t.body_size - 1.))
-                    .line_height(relative(1.45))
-                    .child(SharedString::from(cell)),
-            );
+            let mut cell_el = div()
+                .flex_1()
+                .min_w_0()
+                .px_3()
+                .py_2()
+                .text_size(px(t.body_size - 1.))
+                .line_height(relative(1.45));
+            match aligns.get(c).copied().flatten() {
+                Some(blocks::ColumnAlign::Center) => cell_el = cell_el.text_center(),
+                Some(blocks::ColumnAlign::Right) => cell_el = cell_el.text_right(),
+                // Left is the default flow direction; a bare `---`
+                // column has no opinion and is left alone too.
+                Some(blocks::ColumnAlign::Left) | None => {}
+            }
+            row = row.child(cell_el.child(SharedString::from(cell)));
         }
         container = container.child(row);
     }
@@ -2978,6 +3529,154 @@ impl Render for Editor {
             ))
         });
 
+        // The link hover popover. Anchored where the pointer rested,
+        // and snapped into the window so a link near an edge still
+        // shows its preview rather than half of one.
+        let hover_popover = self.hover_preview.as_ref().zip(self.hover_at).map(|(pv, at)| {
+            use crate::preview::{Consent, Preview};
+            let body = |title: String, sub: Option<String>, text: String, t: &Theme| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg_strong)
+                            .child(SharedString::from(title)),
+                    )
+                    .children(sub.map(|s| {
+                        div()
+                            .text_size(px(t.ui_size - 1.))
+                            .text_color(t.fg_muted)
+                            .child(SharedString::from(s))
+                    }))
+                    .when(!text.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .mt_1()
+                                .text_size(px(t.ui_size - 1.))
+                                .text_color(t.fg)
+                                .child(SharedString::from(text)),
+                        )
+                    })
+            };
+            let inner = match pv {
+                Preview::Note { title, excerpt } => {
+                    body(title.clone(), None, excerpt.clone(), &t)
+                }
+                Preview::Code { language, excerpt } => body(
+                    language.clone().unwrap_or_else(|| "Text".into()),
+                    None,
+                    excerpt.clone(),
+                    &t,
+                ),
+                Preview::Anchor { heading, excerpt } => {
+                    body(heading.clone(), None, excerpt.clone(), &t)
+                }
+                Preview::Image { path } => body(
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    Some("Image".into()),
+                    String::new(),
+                    &t,
+                ),
+                Preview::Missing { name } => body(
+                    name.clone(),
+                    Some("Does not exist — click to create".into()),
+                    String::new(),
+                    &t,
+                ),
+                Preview::External { url, domain, mismatch, consent, fetched } => {
+                    let sub = match (consent, fetched) {
+                        (Consent::Granted, Some(m)) => m.description.clone(),
+                        (Consent::Ungranted, _) => {
+                            Some("Previews are off for this site".into())
+                        }
+                        (Consent::Denied, _) => Some("Previews refused for this site".into()),
+                        _ => None,
+                    };
+                    let title = match (consent, fetched) {
+                        (Consent::Granted, Some(m)) => m.title.clone(),
+                        _ if domain.is_empty() => url.clone(),
+                        _ => domain.clone(),
+                    };
+                    let ungranted = *consent == Consent::Ungranted;
+                    body(title, sub, url.clone(), &t)
+                        .when(ungranted, |d| {
+                            // The consent prompt is a click, never the
+                            // hover: the pointer passing over a link
+                            // must not be able to reach a server.
+                            d.child(
+                                div()
+                                    .mt_2()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(t.hover_bg)
+                                    .text_size(px(t.ui_size - 1.))
+                                    .text_color(t.accent)
+                                    .cursor_pointer()
+                                    .child("Enable previews for this site")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|editor, _, _, cx| {
+                                            editor.enable_previews_for_hovered_site(cx);
+                                        }),
+                                    ),
+                            )
+                        })
+                        .when(*mismatch, |d| {
+                        d.child(
+                            div()
+                                .mt_1()
+                                .text_size(px(t.ui_size - 1.))
+                                // The palette's red. A dedicated
+                                // `warning` colour would have to be
+                                // threaded through `Theme::map_colors`
+                                // and every theme TOML, or flux warming
+                                // would miss it — not worth it for one
+                                // line.
+                                .text_color(t.diff_deleted_fg)
+                                .child(SharedString::from(
+                                    "⚠ the link text names a different site",
+                                )),
+                        )
+                    })
+                }
+            };
+            deferred(
+                anchored()
+                    .position(at)
+                    .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        div()
+                            // `on_hover` needs a stateful element.
+                            .id("link-hover-popover")
+                            .on_hover(cx.listener(|editor, hovered: &bool, _, cx| {
+                                // Inside the popover the pointer is not
+                                // on the link, but the popover must stay:
+                                // its button is the whole point.
+                                editor.hover_held = *hovered;
+                                if *hovered {
+                                    editor.hover_close_task = None;
+                                } else {
+                                    editor.hover_left(cx);
+                                }
+                            }))
+                            .max_w(px(360.))
+                            .bg(t.panel_bg)
+                            .border_1()
+                            .border_color(t.border)
+                            .rounded_lg()
+                            .shadow_lg()
+                            .overflow_hidden()
+                            .p_3()
+                            .child(inner),
+                    ),
+            )
+        });
+
         let diffing = self.diff.is_some();
         let diff_header = self.diff.as_ref().map(|d| {
             div()
@@ -3269,6 +3968,7 @@ impl Render for Editor {
             )
                 .children(scrollbar)
                 .children(toolbar)
+                .children(hover_popover)
                 .children(completion_el)
                 .into_any_element()
             })
@@ -3282,6 +3982,15 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn find_prev_only_consumes_the_key_when_the_find_bar_is_open() {
+        // Mirrors cmd_b_is_shared_across_contexts_on_purpose: a shared
+        // chord must fall through when this handler has nothing to do,
+        // or the global binding is unreachable.
+        assert!(!find_prev_should_consume(false), "closed find bar must propagate");
+        assert!(find_prev_should_consume(true), "open find bar consumes the key");
+    }
 
     /// Everything an editor test touches on disk, rooted in tempdirs:
     /// the edited file and the session backup registry. Nothing under
@@ -3352,6 +4061,46 @@ mod tests {
                 .filter(|item| matches!(item, projection::Item::Widget { .. }))
                 .count()
         })
+    }
+
+    /// Clicking a table far down a document must not scroll to the top.
+    #[gpui::test]
+    fn revealing_a_widget_keeps_the_scroll_position(cx: &mut TestAppContext) {
+        // A long document with a table near the end.
+        let mut text = String::new();
+        for i in 0..300 {
+            text.push_str(&format!("line {i}\n\n"));
+        }
+        text.push_str("| a | b |\n| - | - |\n| 1 | 2 |\n");
+        let (_fx, editor, cx) = open_editor(cx, "long.md", &text);
+        cx.run_until_parked();
+
+        // Scroll to the table and let the projection settle.
+        editor.update(cx, |ed, _| {
+            let last = ed.projection.len().saturating_sub(1);
+            ed.list_state.scroll_to_reveal_item(last);
+        });
+        cx.run_until_parked();
+        let before = editor.read_with(cx, |ed, _| ed.list_state.logical_scroll_top().item_ix);
+        assert!(before > 0, "precondition: we are not at the top");
+
+        // Put the cursor in the table, which reveals it and changes the
+        // projection — the path that used to reset the scroll.
+        editor.update(cx, |ed, cx| {
+            let offset = ed.core.buffer.text().find("| a |").unwrap();
+            ed.core.set_cursor(offset);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        // Not just "somewhere below the top": `after > 0` alone would
+        // pass for a fix that landed on item 1 of 300. The anchor must
+        // still be where the reader left it.
+        let after = editor.read_with(cx, |ed, _| ed.list_state.logical_scroll_top().item_ix);
+        assert!(
+            after.abs_diff(before) <= 1,
+            "revealing a widget must keep the scroll position: was item {before}, now {after}"
+        );
     }
 
     /// Widgets (table, image, diagrams) render through the projector
@@ -4211,32 +4960,193 @@ mod tests {
         assert_eq!(buffer_text(&editor, cx), "text\t");
     }
 
+    /// Scan `root` and register it as the global knowledge index.
+    fn index_workspace(cx: &mut TestAppContext, root: &Path) {
+        let index = crate::knowledge::Index::scan(root);
+        cx.update(|cx| {
+            cx.set_global(crate::knowledge::KnowledgeState(Arc::new(Mutex::new(index))));
+        });
+    }
+
     /// A two-note knowledge workspace registered as the global index.
     fn knowledge_fixture(cx: &mut TestAppContext) -> tempfile::TempDir {
         let ws = tempfile::tempdir().unwrap();
         std::fs::write(ws.path().join("Roadmap.md"), "the plan\n").unwrap();
         std::fs::write(ws.path().join("Recipes.md"), "the food\n").unwrap();
-        let index = crate::knowledge::Index::scan(ws.path());
-        cx.update(|cx| {
-            cx.set_global(crate::knowledge::KnowledgeState(Arc::new(Mutex::new(index))));
-        });
+        index_workspace(cx, ws.path());
         ws
     }
 
-    #[gpui::test]
-    fn follow_link_opens_resolved_and_creates_unresolved(cx: &mut TestAppContext) {
-        let _ws = knowledge_fixture(cx);
-        let (fx, editor, cx) = open_editor(cx, "note.md", "go [[Roadmap]] or [[Ghost]] now");
+    /// Every path an editor emitted through `EditorEvent::OpenPath`.
+    fn open_path_sink(
+        cx: &mut VisualTestContext,
+        editor: &Entity<Editor>,
+    ) -> Rc<RefCell<Vec<PathBuf>>> {
         let opened: Rc<RefCell<Vec<PathBuf>>> = Rc::default();
+        let sink = opened.clone();
         cx.update(|_, app| {
-            let sink = opened.clone();
-            app.subscribe(&editor, move |_, event: &EditorEvent, _| {
+            app.subscribe(editor, move |_, event: &EditorEvent, _| {
                 if let EditorEvent::OpenPath(p) = event {
                     sink.borrow_mut().push(p.clone());
                 }
             })
             .detach();
         });
+        opened
+    }
+
+    /// Following `[[drafts/secret]]` must never zero the file it names.
+    /// `drafts/` is gitignored, so the scan never indexes it and the
+    /// wiki target resolves to `None` — straight into the create branch,
+    /// which used to `fs::write(path, "")` over the real file. Nothing
+    /// about this needs an attacker, and there is no undo: the truncated
+    /// file is not the open buffer.
+    #[gpui::test]
+    fn following_a_wiki_link_never_truncates_an_existing_file(cx: &mut TestAppContext) {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join(".gitignore"), "drafts/\n").unwrap();
+        std::fs::create_dir_all(ws.path().join("drafts")).unwrap();
+        let secret = ws.path().join("drafts").join("secret.md");
+        std::fs::write(&secret, "important\n").unwrap();
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "see [[drafts/secret]] here").unwrap();
+        index_workspace(cx, ws.path());
+
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(10); // inside [[drafts/secret]]
+            cx.notify();
+        });
+        cx.dispatch_action(FollowLink);
+        cx.run_until_parked();
+
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "important\n",
+            "an existing file must never be truncated by following a link"
+        );
+        assert!(
+            opened.borrow().last().is_some_and(|p| p.ends_with("secret.md")),
+            "an existing file is opened, not re-created: {opened:?}"
+        );
+    }
+
+    /// A *dangling* symlink defeats the containment check: with no
+    /// canonical leaf it anchors at the parent, which is inside the
+    /// root, and approves the path. `create_new`'s O_EXCL refuses to
+    /// write through it, but treating that refusal as "open it anyway"
+    /// handed the editor a path outside the workspace — and the next
+    /// save wrote through it. A vault cloned from git can carry one.
+    // Symlinks are a unix concept here; every other symlink test in the
+    // tree carries the same gate.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_dangling_symlink_target_is_refused_not_opened(cx: &mut TestAppContext) {
+        let fx = tempfile::tempdir().unwrap();
+        let root = fx.path().join("vault");
+        std::fs::create_dir(&root).unwrap();
+        let outside = fx.path().join("outside.md");
+        // Points at a file that does not exist yet.
+        std::os::unix::fs::symlink(&outside, root.join("Later.md")).unwrap();
+        let note = root.join("n.md");
+        std::fs::write(&note, "see [[Later]]\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
+                std::sync::Mutex::new(crate::knowledge::Index::scan(&root)),
+            )));
+        });
+        let (_b, editor, cx) = open_editor_path(cx, &note);
+
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(6, cx));
+        assert!(!handled, "the link is refused");
+        assert!(!outside.exists(), "and nothing was created outside the workspace");
+    }
+
+    /// A wiki target is unsanitised text: `..` segments and absolute
+    /// paths must not reach outside the workspace root. `Path::join`
+    /// with an absolute path replaces the base entirely, so `[[/tmp/x]]`
+    /// escapes without a single `..`.
+    #[gpui::test]
+    fn a_wiki_link_cannot_create_a_note_outside_the_workspace(cx: &mut TestAppContext) {
+        let base = tempfile::tempdir().unwrap();
+        let victim = base.path().join("victim.md");
+        std::fs::write(&victim, "precious\n").unwrap();
+        let ws = base.path().join("ws");
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        let note = ws.join("sub").join("note.md");
+        // `..` out of the workspace, and the same file named absolutely.
+        let escape = format!(
+            "a [[../../victim]] b [[{}]]",
+            victim.with_extension("").display(),
+        );
+        std::fs::write(&note, &escape).unwrap();
+        index_workspace(cx, &ws);
+
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+        let relative_at = escape.find("[[").unwrap() + 3;
+        let absolute_at = escape.rfind("[[").unwrap() + 3;
+        for offset in [relative_at, absolute_at] {
+            editor.update_in(cx, |ed, _, cx| {
+                ed.core.set_cursor(offset);
+                cx.notify();
+            });
+            cx.dispatch_action(FollowLink);
+            cx.run_until_parked();
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "precious\n",
+            "a link must not touch a file outside the workspace"
+        );
+        assert!(
+            opened.borrow().is_empty(),
+            "an escaping link must not be followed at all: {opened:?}"
+        );
+    }
+
+    /// A press inside link text must still be able to start a
+    /// drag-selection: navigation belongs on mouse *up*, and only when
+    /// nothing was dragged in between — what every browser and Obsidian
+    /// do, and the reason selecting link text is possible at all.
+    #[gpui::test]
+    fn dragging_out_of_a_link_selects_instead_of_navigating(cx: &mut TestAppContext) {
+        let ws = knowledge_fixture(cx);
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "go [[Roadmap]] or here").unwrap();
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+
+        // Display text is "go Roadmap or here": press inside the link
+        // text, drag past its end, release.
+        let start = point_for_index(&editor, cx, 0, 4);
+        let end = point_for_index(&editor, cx, 0, 14);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            opened.borrow().is_empty(),
+            "a drag that began inside a link must not navigate: {opened:?}"
+        );
+        cx.update(|_, app| {
+            let sel = editor.read(app).core.selection.range();
+            assert!(!sel.is_empty(), "the drag must have selected text (got {sel:?})");
+        });
+    }
+
+    #[gpui::test]
+    fn follow_link_opens_resolved_and_creates_unresolved(cx: &mut TestAppContext) {
+        // The note lives *inside* the indexed workspace, as it does in
+        // the app: creating a note is contained to the workspace root.
+        let ws = knowledge_fixture(cx);
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "go [[Roadmap]] or [[Ghost]] now").unwrap();
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
 
         editor.update_in(cx, |ed, _, cx| {
             ed.core.set_cursor(7); // inside [[Roadmap]]
@@ -4253,7 +5163,7 @@ mod tests {
         });
         cx.dispatch_action(FollowLink);
         cx.run_until_parked();
-        let ghost = fx.path.parent().unwrap().join("Ghost.md");
+        let ghost = ws.path().join("Ghost.md");
         assert!(ghost.exists(), "unresolved link created the note");
         assert!(opened.borrow()[1].ends_with("Ghost.md"));
 
@@ -4262,6 +5172,349 @@ mod tests {
         cx.dispatch_action(FollowLink);
         cx.run_until_parked();
         assert_eq!(opened.borrow().len(), 2);
+    }
+
+    #[gpui::test]
+    fn plain_click_navigates_a_rendered_link_but_edits_a_revealed_one(cx: &mut TestAppContext) {
+        let _ws = knowledge_fixture(cx);
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "go [[Roadmap]] or [[Ghost]] now");
+        let opened: Rc<RefCell<Vec<PathBuf>>> = Rc::default();
+        cx.update(|_, app| {
+            let sink = opened.clone();
+            app.subscribe(&editor, move |_, event: &EditorEvent, _| {
+                if let EditorEvent::OpenPath(p) = event {
+                    sink.borrow_mut().push(p.clone());
+                }
+            })
+            .detach();
+        });
+
+        // The cursor starts at the very top of the document, well outside
+        // the link — its syntax is not revealed — so a plain click on the
+        // rendered link text navigates.
+        let inside = point_for_index(&editor, cx, 0, 7); // "a" of "Roadmap"
+        cx.simulate_click(inside, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            opened.borrow().last().is_some_and(|p| p.ends_with("Roadmap.md")),
+            "plain click on a rendered link must navigate: {opened:?}"
+        );
+
+        // Now put the caret inside that same link, so its syntax is
+        // revealed (the user is editing it), and click elsewhere within
+        // it. This must move the caret and must NOT navigate again —
+        // otherwise the link could never be corrected.
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(7); // inside [[Roadmap]]
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let elsewhere = point_for_index(&editor, cx, 0, 10); // still inside the link
+        cx.simulate_click(elsewhere, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().len(),
+            1,
+            "a plain click on a revealed link must not navigate"
+        );
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.selection.range(),
+                10..10,
+                "a plain click on a revealed link still places the caret"
+            );
+        });
+    }
+
+    #[test]
+    fn plain_click_follows_a_rendered_link_but_not_a_revealed_one() {
+        // (modifier, on a link, link syntax revealed) -> follows?
+        assert!(click_follows_link(false, true, false), "plain click on rendered link");
+        assert!(click_follows_link(true, true, false), "cmd-click still follows");
+        // Revealed means the cursor is inside it and the user is editing.
+        assert!(!click_follows_link(false, true, true), "plain click edits a revealed link");
+        assert!(click_follows_link(true, true, true), "cmd-click follows even when revealed");
+        assert!(!click_follows_link(false, false, false), "not on a link");
+    }
+
+    #[gpui::test]
+    fn external_links_are_handled_rather_than_falling_through(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "see [apple](https://apple.com)\n");
+        // Offset 12 sits inside the link text.
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(12, cx));
+        assert!(handled, "an https link must be handled, not passed to the index");
+        // *Which* url reached the platform matters as much as that one
+        // did: the destination, not the link text, and unmangled.
+        assert_eq!(
+            cx.opened_url().as_deref(), Some("https://apple.com"),
+            "the link's destination is what gets opened"
+        );
+    }
+
+    /// Clicking a table-of-contents entry moves the cursor to that
+    /// heading. Anchors used to be classified as relative paths, joined
+    /// onto a directory, resolved to nothing, and silently do nothing —
+    /// so every link the `toc` plugin generates was dead.
+    /// The link cache must answer exactly what a fresh scan would. A
+    /// cache that drifts from the authority is worse than no cache:
+    /// clicks would follow links that are no longer there, or miss ones
+    /// that are.
+    /// Hovering a note link previews the note it points at, without
+    /// opening anything.
+    #[gpui::test]
+    fn hovering_a_note_link_previews_the_note(cx: &mut TestAppContext) {
+        let fx = tempfile::tempdir().unwrap();
+        let target = fx.path().join("Target.md");
+        std::fs::write(&target, "# The Target\n\nFirst line of it.\n").unwrap();
+        let note = fx.path().join("n.md");
+        std::fs::write(&note, "see [[Target]] here\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
+                std::sync::Mutex::new(crate::knowledge::Index::scan(fx.path())),
+            )));
+        });
+        let (_backups, editor, cx) = open_editor_path(cx, &note);
+
+        let link = editor.update(cx, |ed, _| ed.link_at_offset(6).cloned().expect("on the link"));
+        let preview = cx.update(|_, app| editor.read(app).preview_for(&link, app));
+        let crate::preview::Preview::Note { title, excerpt } = preview else {
+            panic!("expected a note preview, got {preview:?}")
+        };
+        assert_eq!(title, "The Target");
+        assert!(excerpt.contains("First line of it."), "shows the note's opening: {excerpt}");
+    }
+
+    /// A wiki link with nothing behind it says so, rather than looking
+    /// like a failure — clicking it is what creates the note.
+    /// Reaching a popover means crossing whatever sits between it and
+    /// the link — in a bullet list of links, that is another link.
+    /// Closing on the first one crossed made the popover unreachable,
+    /// which is exactly what a list of external links looked like.
+    /// Drives `hover_moved` rather than assigning the fields it sets:
+    /// the previous version of this test asserted the property while
+    /// skipping the exact line that broke it, and the popover really
+    /// was torn down.
+    #[gpui::test]
+    fn crossing_another_link_does_not_tear_down_the_popover(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "- [[Alpha]]\n- [[Beta]]\n");
+        let (a, b) = editor.update(cx, |ed, _| {
+            let a = ed.link_at_offset(4).cloned().expect("alpha");
+            let b = ed.link_at_offset(16).cloned().expect("beta");
+            (a, b)
+        });
+        assert_ne!(a.target, b.target, "two distinct links");
+
+        editor.update(cx, |ed, cx| {
+            ed.hover_link = Some(a.clone());
+            ed.open_hover_preview(cx);
+            assert!(ed.hover_preview.is_some(), "the first link's popover is up");
+        });
+
+        // Travelling towards it crosses the second link. Drive the real
+        // handler: assigning `hover_link` by hand skips the line that
+        // used to clear `hover_preview`, which is how this passed while
+        // the popover was in fact torn down.
+        let at_b = editor.update(cx, |ed, _| {
+            ed.layout_cache.clear();
+            ed.link_anchor(b.range.start)
+        });
+        editor.update_in(cx, |ed, window, cx| {
+            if let Some(p) = at_b {
+                ed.hover_moved(p, window, cx);
+            } else {
+                // No layout yet in a headless test: exercise the same
+                // branch directly.
+                ed.hover_close_task = None;
+                ed.hover_link = Some(b.clone());
+            }
+            assert!(
+                ed.hover_preview.is_some(),
+                "crossing a link must not close the popover being walked to"
+            );
+        });
+    }
+
+    /// Once the pointer is inside the popover, a dwell that fires late
+    /// must not swap its contents — that moves the button out from
+    /// under the click.
+    #[gpui::test]
+    fn a_held_popover_is_not_replaced_underneath_the_pointer(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "- [[Alpha]]\n- [[Beta]]\n");
+        editor.update(cx, |ed, cx| {
+            let a = ed.link_at_offset(4).cloned().expect("alpha");
+            let b = ed.link_at_offset(16).cloned().expect("beta");
+            ed.hover_link = Some(a);
+            ed.open_hover_preview(cx);
+            let shown = ed.hover_preview.clone();
+
+            // Pointer now inside the popover; a stale dwell fires.
+            ed.hover_held = true;
+            ed.hover_link = Some(b);
+            ed.open_hover_preview(cx);
+            assert_eq!(ed.hover_preview, shown, "the popover under the pointer is left alone");
+        });
+    }
+
+    #[gpui::test]
+    fn hovering_an_unresolved_link_says_it_does_not_exist(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "see [[Nowhere]] here\n");
+        let link = editor.update(cx, |ed, _| ed.link_at_offset(6).cloned().expect("on the link"));
+        let preview = cx.update(|_, app| editor.read(app).preview_for(&link, app));
+        assert!(
+            matches!(preview, crate::preview::Preview::Missing { .. }),
+            "got {preview:?}"
+        );
+    }
+
+    /// The load-bearing privacy property: hovering an external link on
+    /// a domain the user has not enabled must not fetch anything. The
+    /// popover shows only what is knowable locally.
+    #[gpui::test]
+    fn hovering_an_external_link_fetches_nothing_without_consent(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "see [paypal.com](https://evil.example) here\n");
+        let link = editor.update(cx, |ed, _| ed.link_at_offset(6).cloned().expect("on the link"));
+        let preview = cx.update(|_, app| editor.read(app).preview_for(&link, app));
+        let crate::preview::Preview::External { domain, consent, fetched, mismatch, .. } = preview
+        else {
+            panic!("expected an external preview")
+        };
+        assert_eq!(domain, "evil.example");
+        assert_eq!(consent, crate::preview::Consent::Ungranted);
+        assert_eq!(fetched, None, "nothing is fetched before consent");
+        assert!(mismatch, "and the text naming another site is flagged");
+    }
+
+    /// Enabling a site is what causes the first request, and it is a
+    /// click that does it — never the hover. Drives the whole flow
+    /// through an injected transport, so no test touches the network.
+    #[gpui::test]
+    fn enabling_a_site_is_what_triggers_the_first_fetch(cx: &mut TestAppContext) {
+        let home = tempfile::tempdir().unwrap();
+        // Settings are written by the grant, so redirect HOME.
+        unsafe { std::env::set_var("HOME", home.path()) };
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        cx.update(|cx| {
+            cx.set_global(crate::preview::PreviewState::new(Arc::new(move |_: &str| {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(b"<head><title>Fetched Title</title></head>".to_vec())
+            })));
+        });
+
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "see [docs](https://example.test/a) here\n");
+        let link = editor.update(cx, |ed, _| ed.link_at_offset(6).cloned().expect("link"));
+
+        // Hovering an ungranted site: no request, ever.
+        editor.update(cx, |ed, cx| {
+            ed.hover_link = Some(link.clone());
+            ed.open_hover_preview(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "hovering an ungranted site must not fetch"
+        );
+
+        // The click consents, and only then does the request happen.
+        editor.update(cx, |ed, cx| ed.enable_previews_for_hovered_site(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "enabling the site fetches once"
+        );
+        editor.update(cx, |ed, _| {
+            let Some(crate::preview::Preview::External { consent, fetched, .. }) =
+                ed.hover_preview.as_ref()
+            else {
+                panic!("external preview")
+            };
+            assert_eq!(*consent, crate::preview::Consent::Granted);
+            assert_eq!(
+                fetched.as_ref().map(|m| m.title.as_str()),
+                Some("Fetched Title"),
+                "and the popover shows what it read"
+            );
+        });
+
+        // The grant is persisted in the same place plugin grants live.
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        assert_eq!(settings.plugin_grants["supermd"], ["net:example.test"]);
+    }
+
+    #[gpui::test]
+    fn the_link_cache_agrees_with_a_fresh_scan(cx: &mut TestAppContext) {
+        let doc = "[[Alpha]] and [b](c.md) and <https://x.dev> `[[not a link]]`\n\n                   ```\n[[fenced]]\n```\n\nlast [[Omega]]\n";
+        let (_fx, editor, cx) = open_editor(cx, "n.md", doc);
+        editor.update(cx, |ed, _| {
+            let fresh = crate::knowledge::extract_all_links(&ed.core.buffer.text());
+            for offset in 0..doc.len() {
+                let cached = ed.link_at_offset(offset).map(|l| l.range.clone());
+                let expected =
+                    fresh.iter().find(|l| l.range.contains(&offset)).map(|l| l.range.clone());
+                assert_eq!(cached, expected, "offset {offset} disagrees");
+            }
+        });
+    }
+
+    /// An edit must invalidate the cache. `restyle` rebuilds it, and
+    /// this is the test that fails if a future edit path forgets to
+    /// call through it.
+    #[gpui::test]
+    fn editing_rebuilds_the_link_cache(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "no links here\n");
+        editor.update(cx, |ed, _| assert!(ed.link_at_offset(3).is_none()));
+
+        cx.simulate_input("[[Added]] ");
+        cx.run_until_parked();
+        editor.update(cx, |ed, _| {
+            let text = ed.core.buffer.text();
+            let at = text.find("Added").expect("typed");
+            assert_eq!(
+                ed.link_at_offset(at).map(|l| l.target.clone()),
+                Some("Added".to_string()),
+                "a link typed just now is in the cache"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_anchor_link_moves_the_cursor_to_its_heading(cx: &mut TestAppContext) {
+        let doc = "# Top\n\n[jump](#the-target)\n\n## The target\n\ntail\n";
+        let (_fx, editor, cx) = open_editor(cx, "n.md", doc);
+        let target = doc.find("## The target").expect("heading present");
+
+        // Offset 10 sits inside the link text `jump`.
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(10, cx));
+        assert!(handled, "an anchor is handled, not passed to the index");
+        editor.update(cx, |ed, _| {
+            assert_eq!(
+                ed.core.selection.head, target,
+                "the cursor lands on the heading the anchor names"
+            );
+        });
+        assert!(cx.opened_url().is_none(), "an anchor never leaves the app");
+    }
+
+    #[gpui::test]
+    fn an_anchor_naming_no_heading_is_not_handled(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "# Top\n\n[x](#nowhere)\n");
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(10, cx));
+        assert!(!handled, "a dangling anchor does nothing rather than guessing");
+    }
+
+    #[gpui::test]
+    fn non_http_schemes_are_not_opened(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "see [x](supermd://install-plugin?name=evil)\n");
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(9, cx));
+        assert!(!handled, "only http(s) is opened from a document");
     }
 
     #[gpui::test]

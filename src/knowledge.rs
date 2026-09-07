@@ -19,6 +19,44 @@ pub struct RawLink {
     pub context: String,
 }
 
+/// What a link points at. Classification happens before resolution
+/// because the index can only answer for workspace files — a URL has no
+/// path to look up, and joining it onto the workspace root produces
+/// nonsense like `<root>/https:/apple.com`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// An http(s) URL, opened by the platform.
+    External(String),
+    /// `[[Note]]` — resolved by stem against the index.
+    Wiki(String),
+    /// A path relative to the containing file.
+    Relative(String),
+    /// `#heading` — a position inside the document already open, not a
+    /// path. The `toc` plugin writes a page of these.
+    Anchor(String),
+}
+
+/// Sort a link into one of the three kinds.
+///
+/// Only http and https are treated as external. Other schemes stay
+/// relative and therefore fail to resolve, which is deliberate: a
+/// document is untrusted content, and `file://` or `supermd://` must not
+/// become a one-click action.
+pub fn classify(link: &RawLink) -> LinkTarget {
+    if link.wiki {
+        return LinkTarget::Wiki(link.target.clone());
+    }
+    if let Some(anchor) = link.target.strip_prefix('#') {
+        return LinkTarget::Anchor(anchor.to_string());
+    }
+    let lower = link.target.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        LinkTarget::External(link.target.clone())
+    } else {
+        LinkTarget::Relative(link.target.clone())
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct NoteData {
     pub links: Vec<RawLink>,
@@ -35,12 +73,75 @@ pub struct Index {
 /// The workspace's shared index. Absent until a folder is open.
 #[derive(Clone)]
 pub struct KnowledgeState(pub std::sync::Arc<std::sync::Mutex<Index>>);
+/// GitHub's heading slug: alphanumerics lowercased, spaces and hyphens
+/// become hyphens, everything else is dropped. Must match the `toc`
+/// plugin's `slug`, since that is what writes the anchors people click.
+pub fn heading_slug(heading: &str) -> String {
+    heading
+        .chars()
+        .filter_map(|c| {
+            if c.is_alphanumeric() {
+                Some(c.to_ascii_lowercase())
+            } else if c == ' ' || c == '-' {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Byte offset of the heading `anchor` names, or None. Fenced code is
+/// skipped, and an ATX heading needs whitespace after its `#` run —
+/// without that a tag line like `#guide` counts as a heading.
+pub fn heading_offset(text: &str, anchor: &str) -> Option<usize> {
+    let wanted = anchor.to_ascii_lowercase();
+    let mut in_fence = false;
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            offset += line.len();
+            continue;
+        }
+        if !in_fence {
+            let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+            if (1..=6).contains(&hashes)
+                && matches!(trimmed[hashes..].chars().next(), Some(' ' | '\t'))
+                && heading_slug(trimmed[hashes..].trim()) == wanted
+            {
+                return Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    None
+}
+
 impl gpui::Global for KnowledgeState {}
 
 /// Extract wiki + markdown links. Fenced code blocks and inline code
 /// are skipped; `[[Target|label]]` yields `Target`; only relative
 /// `.md` targets count for standard links.
+///
+/// This feeds the note index (backlinks, rename rewriting), which only
+/// tracks note-to-note links — an external URL or a non-Markdown file
+/// is not a note relationship. To find *any* link under the cursor
+/// (for follow-link), use [`extract_all_links`] instead.
 pub fn extract_links(text: &str) -> Vec<RawLink> {
+    scan(text, true)
+}
+
+/// Extract every `[[wiki]]` and `[text](target)` link, whatever the
+/// target — external URLs and non-Markdown relative paths included.
+/// Used to find the link under the cursor; the note index itself
+/// wants the narrower [`extract_links`].
+pub fn extract_all_links(text: &str) -> Vec<RawLink> {
+    scan(text, false)
+}
+
+fn scan(text: &str, notes_only: bool) -> Vec<RawLink> {
     let mut out = Vec::new();
     let mut in_fence = false;
     let mut line_start = 0usize;
@@ -52,15 +153,17 @@ pub fn extract_links(text: &str) -> Vec<RawLink> {
             continue;
         }
         if !in_fence {
-            scan_line(trimmed, line_start, &mut out);
+            scan_line(trimmed, line_start, notes_only, &mut out);
         }
         line_start += line.len();
     }
     out
 }
 
-/// Links on one line, honoring inline-code spans.
-fn scan_line(line: &str, line_start: usize, out: &mut Vec<RawLink>) {
+/// Links on one line, honoring inline-code spans. `notes_only` gates
+/// standard `[text](target)` links to relative `.md` targets — the
+/// shape the note index cares about; wiki links are always captured.
+fn scan_line(line: &str, line_start: usize, notes_only: bool, out: &mut Vec<RawLink>) {
     let bytes = line.as_bytes();
     let context = line.trim().to_string();
     let mut i = 0;
@@ -97,7 +200,8 @@ fn scan_line(line: &str, line_start: usize, out: &mut Vec<RawLink>) {
                     if bytes.get(after) == Some(&b'(') {
                         if let Some(paren) = line[after + 1..].find(')') {
                             let target = line[after + 1..after + 1 + paren].trim();
-                            if target.ends_with(".md") && !target.contains("://") {
+                            let is_note_link = target.ends_with(".md") && !target.contains("://");
+                            if !target.is_empty() && (is_note_link || !notes_only) {
                                 out.push(RawLink {
                                     target: target.to_string(),
                                     wiki: false,
@@ -187,6 +291,37 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Where `[[target]]`, written in a note living in `from_dir`, would be
+/// created — or `None` when that lands anywhere but inside `root`.
+///
+/// `target` is unsanitised document text. It may contain `..`, it may be
+/// absolute (`Path::join` with an absolute path DISCARDS the base, so
+/// `[[/tmp/x]]` escapes without a single `..`), and it may travel
+/// through a symlink that leaves the workspace.
+///
+/// Containment is decided the same way `Index::resolve` decides it — on
+/// canonicalised paths, the only form that sees where a path really
+/// lands — but a note that does not exist yet cannot be canonicalised,
+/// and neither can a parent directory we are about to create. So the
+/// deepest ancestor that *does* canonicalise is the one checked, self
+/// first: a path that already exists as a symlink out of the workspace
+/// is caught by its own entry. Everything below the anchor is a plain
+/// name (`normalize` has collapsed every `.` and `..`), so it cannot
+/// climb back out. Fails closed: anything uncanonicalisable is refused.
+///
+/// The path handed back is the lexical one, not the canonical one, so it
+/// keeps the identity the index and the open tabs already use; it names
+/// the same location the check approved.
+pub fn creatable_note_path(root: &Path, from_dir: &Path, target: &str) -> Option<PathBuf> {
+    if target.trim().is_empty() {
+        return None;
+    }
+    let path = normalize(&from_dir.join(format!("{target}.md")));
+    let canon_root = root.canonicalize().ok()?;
+    let anchor = path.ancestors().find_map(|a| a.canonicalize().ok())?;
+    anchor.starts_with(&canon_root).then_some(path)
+}
+
 fn stem_of(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -196,6 +331,18 @@ impl Index {
     pub fn scan(root: &Path) -> Self {
         let mut index = Index { root: root.to_path_buf(), notes: BTreeMap::new() };
         for item in crate::files::workspace_walk(root).flatten() {
+            // Only real files that live under `root` may be indexed. A
+            // symlink inside the workspace can point anywhere on disk and
+            // `read_to_string` would follow it, so `<root>/leak.md ->
+            // ~/.ssh/id_rsa` would otherwise be indexed under an in-root
+            // path — and every lookup answers from the index before any
+            // escape guard runs. The walker does not follow links
+            // (`follow_links(false)`), so a symlink arrives here as an
+            // entry of its own with `is_symlink()` set; dropping it is
+            // what makes the in-index short-circuit in `resolve` safe.
+            if !item.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
             let path = item.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Ok(text) = std::fs::read_to_string(path) {
@@ -242,7 +389,45 @@ impl Index {
         } else {
             let base = from.parent()?;
             let resolved = normalize(&base.join(&link.target));
-            self.notes.contains_key(&resolved).then_some(resolved)
+            // A known note answers straight from the index without a
+            // filesystem check, which is what keeps a rename working:
+            // the *old* path can still be indexed after the file has
+            // already moved off disk under it, and a link written to it
+            // must still resolve until the watcher catches up.
+            //
+            // What makes that safe is `scan` (and `on_fs_events`)
+            // refusing to index anything that is not a real file
+            // beneath `root` — symlinks included. It is NOT true that a
+            // path merely reached via the workspace walk is inside
+            // `root`: without that filter a symlinked note would be
+            // indexed under an in-root path and this branch would hand
+            // it back before the escape guard below ever ran.
+            if self.notes.contains_key(&resolved) {
+                return Some(resolved);
+            }
+            // Opening is a different question from indexing: any file
+            // inside the workspace that exists on disk is a valid
+            // target, which is what makes `[config](./config.toml)`
+            // work even though the index holds only `.md`.
+            if !resolved.is_file() {
+                return None;
+            }
+            // A lexical `starts_with(&self.root)` is not enough: a
+            // symlink *inside* the workspace can point outside it
+            // (`<root>/esc -> /etc`). A target like `./esc/passwd` has
+            // no `..` for `normalize` to collapse, so a lexical check
+            // would pass it straight through, and `is_file()` above
+            // already followed the symlink to wherever it really
+            // leads. Canonicalise both sides so the comparison sees
+            // where the path actually lands. If either side fails to
+            // canonicalise, fail closed and deny the link — for a
+            // workspace-escape guard the unsafe default is failing
+            // open (a link that escapes), not failing closed (a link
+            // that doesn't resolve), and this check exists specifically
+            // to hold up under the sandboxed App Store build.
+            let Ok(canon_root) = self.root.canonicalize() else { return None };
+            let Ok(canon_resolved) = resolved.canonicalize() else { return None };
+            canon_resolved.starts_with(&canon_root).then_some(resolved)
         }
     }
 
@@ -275,6 +460,33 @@ impl Index {
     }
 
     /// All tags with their occurrence counts, most-used first.
+    /// Link targets in `path` that resolve to nothing, deduplicated
+    /// and in document order. These are the notes the vault refers to
+    /// but does not have — the graph draws them as ghosts.
+    pub fn unresolved_links(&self, path: &Path) -> Vec<String> {
+        let Some(note) = self.notes.get(path) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for link in &note.links {
+            // Only wiki links: a relative path that does not exist is a
+            // typo, not a note someone intends to write.
+            if !link.wiki || self.resolve(path, link).is_some() {
+                continue;
+            }
+            if !out.contains(&link.target) {
+                out.push(link.target.clone());
+            }
+        }
+        out
+    }
+
+    /// The tags on one note, in the order they appear. Used by the
+    /// graph to colour nodes by tag.
+    pub fn note_tags(&self, path: &Path) -> Vec<String> {
+        self.notes.get(path).map(|n| n.tags.clone()).unwrap_or_default()
+    }
+
     pub fn tags(&self) -> Vec<(String, usize)> {
         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
         for data in self.notes.values() {
@@ -366,7 +578,7 @@ impl Index {
 
     /// The link (if any) whose range contains `offset` in `text`.
     pub fn link_at(text: &str, offset: usize) -> Option<RawLink> {
-        extract_links(text)
+        extract_all_links(text)
             .into_iter()
             .find(|l| l.range.contains(&offset))
     }
@@ -465,6 +677,35 @@ pub fn relative_path(dir: &Path, target: &Path) -> String {
 mod tests {
     use super::*;
 
+    fn raw(target: &str, wiki: bool) -> RawLink {
+        RawLink { target: target.into(), wiki, range: 0..1, context: String::new() }
+    }
+
+    #[test]
+    fn classify_separates_external_wiki_and_relative() {
+        assert_eq!(classify(&raw("https://apple.com", false)),
+                   LinkTarget::External("https://apple.com".into()));
+        assert_eq!(classify(&raw("http://localhost:8080", false)),
+                   LinkTarget::External("http://localhost:8080".into()));
+        assert_eq!(classify(&raw("Note", true)), LinkTarget::Wiki("Note".into()));
+        assert_eq!(classify(&raw("./config.toml", false)),
+                   LinkTarget::Relative("./config.toml".into()));
+    }
+
+    #[test]
+    fn classify_treats_other_schemes_as_relative_not_external() {
+        // Only http(s) is opened. A note is untrusted content; file://,
+        // mailto: and supermd:// must not become one-click actions.
+        for t in ["file:///etc/passwd", "mailto:a@b.c", "supermd://install-plugin?name=x"] {
+            assert!(matches!(classify(&raw(t, false)), LinkTarget::Relative(_)), "{t}");
+        }
+    }
+
+    #[test]
+    fn a_wiki_link_is_wiki_even_if_it_looks_like_a_url() {
+        assert_eq!(classify(&raw("https://x", true)), LinkTarget::Wiki("https://x".into()));
+    }
+
     const NOTE: &str = "# Project\n\
         See [[Roadmap]] and [[plans/Budget|the budget]].\n\
         Also [the spec](specs/design.md) and [site](https://x.y).\n\
@@ -516,6 +757,72 @@ mod tests {
         (dir, index)
     }
 
+    /// The committed example vault is a demo people open first, so a
+    /// dangling link in it reads as the app being broken. Index it for
+    /// real and resolve every link with the same code the editor uses,
+    /// so the vault cannot rot silently as features change.
+    ///
+    /// The unresolved names below are deliberate: the vault teaches that
+    /// clicking a link to a note that does not exist creates it, which
+    /// needs links that genuinely do not resolve.
+    #[test]
+    fn the_example_vault_has_no_accidentally_broken_links() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vault");
+        assert!(root.is_dir(), "the example vault is committed at examples/vault");
+        let index = Index::scan(&root);
+
+        const DELIBERATELY_MISSING: &[&str] = &[
+            "Ghost note",
+            "Another missing page",
+            "A note nobody has written",
+            "Rope internals",
+            // Images.md shows what a broken image looks like in place.
+            "../assets/nothing-here.png",
+        ];
+
+        let mut broken = Vec::new();
+        for entry in ignore::Walk::new(&root).flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(path).unwrap();
+            // `extract_all_links` is what the click path asks, and it
+            // already skips fenced and inline code — so prose *about*
+            // link syntax does not count as a link.
+            for link in extract_all_links(&text) {
+                if matches!(classify(&link), LinkTarget::External(_)) {
+                    continue;
+                }
+                if DELIBERATELY_MISSING.contains(&link.target.as_str()) {
+                    continue;
+                }
+                // An in-document anchor is not a path — it must name a
+                // heading in this same file. The `toc` plugin writes a
+                // page of them into Plugins.md, so this checks the
+                // generated table of contents actually points at
+                // something.
+                if let LinkTarget::Anchor(a) = classify(&link) {
+                    if heading_offset(&text, &a).is_none() {
+                        broken.push(format!(
+                            "{}: anchor #{a} names no heading",
+                            path.strip_prefix(&root).unwrap().display()
+                        ));
+                    }
+                    continue;
+                }
+                if index.resolve(path, &link).is_none() {
+                    broken.push(format!(
+                        "{}: [[{}]]",
+                        path.strip_prefix(&root).unwrap().display(),
+                        link.target
+                    ));
+                }
+            }
+        }
+        assert!(broken.is_empty(), "unresolved links in the example vault: {broken:#?}");
+    }
+
     #[test]
     fn scan_indexes_markdown_only_and_resolves_wiki_stems() {
         let (dir, index) = fixture();
@@ -541,6 +848,198 @@ mod tests {
         assert_eq!(index.resolve(&project, &ci), Some(dir.path().join("Roadmap.md")));
         let nope = RawLink { target: "Ghost".into(), wiki: true, range: 0..0, context: String::new() };
         assert_eq!(index.resolve(&project, &nope), None);
+    }
+
+    #[test]
+    fn relative_links_resolve_to_any_file_that_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("note.md"), "see [c](./config.toml)").unwrap();
+        std::fs::write(root.join("config.toml"), "x = 1").unwrap();
+        let index = Index::scan(root);
+
+        let link = RawLink {
+            target: "./config.toml".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(
+            index.resolve(&root.join("note.md"), &link),
+            Some(normalize(&root.join("config.toml"))),
+            "a non-Markdown file that exists should resolve"
+        );
+    }
+
+    #[test]
+    fn relative_links_to_missing_files_do_not_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let index = Index::scan(root);
+        let link = RawLink {
+            target: "./nope.png".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        // Unlike a wiki link, a relative link to a missing file is not
+        // created — inventing `nope.png` would be nonsense.
+        assert_eq!(index.resolve(&root.join("note.md"), &link), None);
+    }
+
+    #[test]
+    fn relative_links_cannot_escape_the_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "s").unwrap();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let index = Index::scan(&root);
+        let link = RawLink {
+            target: "../secret.txt".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(index.resolve(&root.join("note.md"), &link), None,
+                   "a link must not reach outside the opened folder");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_links_through_a_symlink_cannot_escape_the_workspace_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        // A symlink living *inside* the workspace but pointing outside
+        // it: `../secret.txt`-style lexical checks never see this,
+        // because the link text itself contains no `..`.
+        symlink(&outside, root.join("esc")).unwrap();
+        let index = Index::scan(&root);
+        let link = RawLink {
+            target: "./esc/secret.txt".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(
+            index.resolve(&root.join("note.md"), &link), None,
+            "a symlink inside the workspace must not be usable to escape it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_markdown_file_is_neither_indexed_nor_resolved() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&outside, "secret").unwrap();
+        // The dangerous shape the *directory* symlink test above never
+        // reaches: a symlinked `.md` FILE sitting directly in the
+        // workspace. The walker yields it (there is nothing to descend
+        // into), `scan` only checked the extension, and `read_to_string`
+        // follows the link — so its contents were indexed under an
+        // in-root path, and every later lookup answered from the index
+        // before any escape guard could run.
+        let leak = root.join("leak.md");
+        symlink(&outside, &leak).unwrap();
+        let index = Index::scan(&root);
+        assert!(
+            !index.notes.contains_key(&leak),
+            "a symlinked note must never enter the index"
+        );
+
+        let relative = RawLink {
+            target: "./leak.md".into(), wiki: false, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(
+            index.resolve(&root.join("note.md"), &relative), None,
+            "a relative link through a symlinked note must not resolve"
+        );
+        let wiki = RawLink {
+            target: "leak".into(), wiki: true, range: 0..1,
+            context: String::new(),
+        };
+        assert_eq!(
+            index.resolve(&root.join("note.md"), &wiki), None,
+            "a wiki link to a symlinked note must not resolve"
+        );
+    }
+
+    #[test]
+    fn creatable_note_paths_stay_inside_the_workspace() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("ws");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let dir = root.join("sub");
+
+        assert_eq!(
+            creatable_note_path(&root, &dir, "Fresh"),
+            Some(dir.join("Fresh.md")),
+            "a plain target is created beside the note"
+        );
+        assert_eq!(
+            creatable_note_path(&root, &dir, "deep/nested/Fresh"),
+            Some(dir.join("deep").join("nested").join("Fresh.md")),
+            "directories that do not exist yet are still creatable"
+        );
+        assert_eq!(
+            creatable_note_path(&root, &dir, "../Sibling"),
+            Some(root.join("Sibling.md")),
+            "a `..` that stays inside the workspace is fine"
+        );
+
+        assert_eq!(
+            creatable_note_path(&root, &dir, "../../escape"), None,
+            "`..` must not climb out of the workspace"
+        );
+        let absolute = base.path().join("victim");
+        assert_eq!(
+            creatable_note_path(&root, &dir, &absolute.display().to_string()), None,
+            "an absolute target replaces the base entirely and must be refused"
+        );
+        assert_eq!(creatable_note_path(&root, &dir, ""), None, "empty target");
+        assert_eq!(creatable_note_path(&root, &dir, "  "), None, "blank target");
+        assert_eq!(
+            creatable_note_path(&base.path().join("gone"), &dir, "Fresh"), None,
+            "a root that cannot be canonicalised fails closed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_creatable_note_path_cannot_travel_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.md"), "precious").unwrap();
+        // A directory symlink leaving the workspace: `esc/victim` has no
+        // `..` for `normalize` to collapse, so only canonicalisation
+        // sees the escape.
+        symlink(&outside, root.join("esc")).unwrap();
+        assert_eq!(
+            creatable_note_path(&root, &root, "esc/victim"), None,
+            "a symlinked directory must not be a route out"
+        );
+        assert_eq!(
+            creatable_note_path(&root, &root, "esc/brand-new"), None,
+            "…including for a note that does not exist yet"
+        );
+        // A symlinked *file* is caught by its own entry, not its parent.
+        symlink(outside.join("victim.md"), root.join("leak.md")).unwrap();
+        assert_eq!(
+            creatable_note_path(&root, &root, "leak"), None,
+            "an in-root name that is a symlink out must be refused"
+        );
     }
 
     #[test]
@@ -617,6 +1116,38 @@ mod tests {
         // The index itself now answers for the new path.
         assert!(index.note_names().iter().any(|(n, _)| n == "Vision"));
         assert!(!index.note_names().iter().any(|(n, _)| n == "Roadmap"));
+    }
+
+    /// The `toc` plugin writes `[Heading](#heading)` links. They were
+    /// classified as relative paths, joined onto a directory, resolved
+    /// to nothing, and did nothing when clicked — a plugin we ship
+    /// generating links the editor could not follow.
+    #[test]
+    fn an_anchor_is_its_own_kind_not_a_relative_path() {
+        let link = RawLink {
+            target: "#calc--arithmetic".into(),
+            wiki: false,
+            range: 0..0,
+            context: String::new(),
+        };
+        assert_eq!(classify(&link), LinkTarget::Anchor("calc--arithmetic".into()));
+    }
+
+    #[test]
+    fn heading_offset_finds_the_heading_an_anchor_names() {
+        let doc = "# Top\n\nbody\n\n## calc — arithmetic in prose\n\nmore\n";
+        let at = heading_offset(doc, "calc--arithmetic-in-prose").expect("found");
+        assert_eq!(&doc[at..at + 6], "## cal");
+        assert_eq!(heading_offset(doc, "top"), Some(0));
+        assert_eq!(heading_offset(doc, "nothing-like-this"), None);
+    }
+
+    /// Same two traps the `toc` plugin had: a fenced `# heading` is not
+    /// a heading, and `#guide` is a tag, not a level-1 heading.
+    #[test]
+    fn heading_offset_ignores_fenced_code_and_tag_lines() {
+        assert_eq!(heading_offset("```\n# Fenced\n```\n", "fenced"), None);
+        assert_eq!(heading_offset("#guide #plugins\n", "guide-plugins"), None);
     }
 
     #[test]

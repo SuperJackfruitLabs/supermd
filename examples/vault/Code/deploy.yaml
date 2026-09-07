@@ -1,0 +1,37 @@
+# A CI pipeline, shaped like the real one. Note the mas job: it is the
+# App Store configuration, and the reason this file is worth reading.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build plugin fixtures
+        run: bash scripts/build_plugins.sh --fixtures
+      - name: Run tests
+        run: cargo test
+
+      # The sandboxed App Store configuration is a different feature
+      # set: the Pulley interpreter instead of a JIT, and no wasm
+      # grammars. It rots silently unless it is built and tested too.
+      - name: Test the App Store configuration
+        if: runner.os == 'macOS'
+        run: cargo test --no-default-features --features mas
+      - name: Refuse private Apple APIs
+        if: runner.os == 'macOS'
+        run: bash scripts/check_private_apis.sh target/release/supermd
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo llvm-cov --summary-only --fail-under-lines 90

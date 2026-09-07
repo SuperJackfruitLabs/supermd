@@ -1,6 +1,6 @@
 [package]
 name = "supermd"
-version = "0.0.14"
+version = "0.0.15"
 edition = "2021"
 
 [dependencies]
@@ -65,6 +65,12 @@ lto = "thin"
 # gpui is heavy; keep debug builds usable
 [profile.dev]
 opt-level = 1
+# Full debug info made target/debug reach 21 GB and repeatedly filled
+# the disk mid-run. Line tables keep what is actually read out of a
+# failure -- file, line and column in every backtrace frame -- and drop
+# the type and variable descriptions that are most of the bulk. Raise
+# this to `true` temporarily if you need to step in a debugger.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2

@@ -189,8 +189,36 @@ impl DiagramKey {
 #[derive(Clone)]
 pub enum DiagramState {
     Pending,
-    Ready(Arc<gpui::Image>),
+    /// The rendered image, with the size it should be *drawn* at.
+    ///
+    /// The PNG is rasterised at `RASTER_SCALE` for crispness, so its
+    /// pixel dimensions are that many times larger than the diagram
+    /// actually is. Drawing it at its pixel size made every diagram
+    /// twice its intended size — a seven-node flowchart needed two
+    /// screens.
+    Ready { image: Arc<gpui::Image>, width: f32, height: f32 },
     Failed(String),
+}
+
+/// Rasterisation factor: enough for a retina display without making the
+/// cache enormous. Divide pixel dimensions by this to lay the image out.
+pub const RASTER_SCALE: f32 = 2.0;
+
+/// The size to draw a diagram, fitted into `available` width and never
+/// enlarged beyond its natural size.
+///
+/// Returns logical points, aspect preserved. A diagram narrower than
+/// the column keeps its own size rather than stretching to fill it.
+pub fn fit(pixel_w: u32, pixel_h: u32, available: f32) -> (f32, f32) {
+    let (w, h) = (pixel_w as f32 / RASTER_SCALE, pixel_h as f32 / RASTER_SCALE);
+    if w <= 0.0 || h <= 0.0 {
+        return (0.0, 0.0);
+    }
+    if w <= available {
+        return (w, h);
+    }
+    let k = available / w;
+    (available, (h * k).round())
 }
 
 const CACHE_CAP: usize = 128;
@@ -253,14 +281,20 @@ pub fn diagram_state(source: &str, width: f32, cx: &mut gpui::App) -> DiagramSta
     }
     cx.global_mut::<DiagramCache>().insert(key.clone(), DiagramState::Pending);
 
+    let available = width;
     let source = source.to_string();
     let render = cx.background_executor().spawn(async move {
-        to_svg(&source, &theme).and_then(|svg| rasterize(&svg, 2.0))
+        to_svg(&source, &theme).and_then(|svg| rasterize(&svg, RASTER_SCALE))
     });
     cx.spawn(async move |cx| {
         let state = match render.await {
-            Ok((png, _, _)) => {
-                DiagramState::Ready(Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)))
+            Ok((png, w, h)) => {
+                let (width, height) = fit(w, h, available);
+                DiagramState::Ready {
+                    image: Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)),
+                    width,
+                    height,
+                }
             }
             Err(e) => DiagramState::Failed(e),
         };
@@ -305,20 +339,25 @@ pub fn plugin_diagram_state(
     };
     cx.global_mut::<DiagramCache>().insert(key.clone(), DiagramState::Pending);
 
+    let available = width;
     let (plugin, lang, source) = (plugin.to_string(), lang.to_string(), source.to_string());
     let render = cx.background_executor().spawn(async move {
         let svg = host
             .lock()
             .unwrap()
             .render_block(&plugin, &lang, &source, &theme)?;
-        rasterize(&svg, 2.0)
+        rasterize(&svg, RASTER_SCALE)
     });
     cx.spawn(async move |cx| {
         let state = match render.await {
-            Ok((png, _, _)) => DiagramState::Ready(Arc::new(gpui::Image::from_bytes(
-                gpui::ImageFormat::Png,
-                png,
-            ))),
+            Ok((png, w, h)) => {
+                let (width, height) = fit(w, h, available);
+                DiagramState::Ready {
+                    image: Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)),
+                    width,
+                    height,
+                }
+            }
             Err(e) => DiagramState::Failed(e),
         };
         cx.update(|cx| {
@@ -356,6 +395,41 @@ mod tests {
     fn bad_source_reports_error() {
         let t = DiagramTheme::default_light();
         assert!(to_svg("not_a_diagram_type_xyz\n  a --> b", &t).is_err());
+    }
+
+    /// A diagram is drawn at the size it actually is. The PNG is
+    /// rasterised at 2x for crispness, and drawing it at its pixel size
+    /// made every diagram twice its intended size — a seven-node
+    /// flowchart ran past two screens.
+    #[test]
+    fn fit_undoes_the_raster_scale() {
+        // Comfortably inside the column: natural size, halved.
+        assert_eq!(fit(530, 1400, 664.0), (265.0, 700.0));
+        // Exactly the column width after halving: unchanged.
+        assert_eq!(fit(1328, 664, 664.0), (664.0, 332.0));
+    }
+
+    /// Wider than the column: scaled down, aspect kept.
+    #[test]
+    fn fit_shrinks_a_wide_diagram_and_keeps_its_shape() {
+        let (w, h) = fit(2656, 1328, 664.0);
+        assert_eq!(w, 664.0);
+        assert_eq!(h, 332.0, "half the width means half the height");
+        let (w2, h2) = fit(4000, 1000, 664.0);
+        assert_eq!(w2, 664.0);
+        assert!((h2 - 166.0).abs() <= 1.0, "aspect preserved, got {h2}");
+    }
+
+    /// A narrow diagram is never stretched to fill the column.
+    #[test]
+    fn fit_never_enlarges() {
+        assert_eq!(fit(100, 100, 664.0), (50.0, 50.0));
+    }
+
+    #[test]
+    fn fit_tolerates_a_degenerate_image() {
+        assert_eq!(fit(0, 0, 664.0), (0.0, 0.0));
+        assert_eq!(fit(100, 0, 664.0), (0.0, 0.0));
     }
 
     #[test]

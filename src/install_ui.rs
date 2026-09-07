@@ -47,6 +47,12 @@ pub fn catalog_browsable() -> bool {
 }
 
 impl InstallOverlay {
+    /// How many plugins this overlay is offering. Zero in the App Store
+    /// build, where `catalog_browsable()` is false by design.
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
     pub fn new(
         entries: Vec<CatalogEntry>,
         installed: Vec<String>,

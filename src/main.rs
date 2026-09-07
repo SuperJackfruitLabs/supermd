@@ -20,6 +20,8 @@ mod knowledge;
 mod install;
 mod install_ui;
 mod markdown;
+mod nav;
+mod preview;
 mod palette;
 mod platform;
 mod reader;
@@ -405,6 +407,8 @@ fn main() {
         ))));
 
         cx.set_global(catalog::CatalogFetcher(catalog::ureq_fetcher()));
+
+        cx.set_global(preview::PreviewState::new(preview::ureq_preview_fetcher()));
 
         extensions::start_inline_drainer(cx);
 

@@ -120,6 +120,14 @@ pub fn delete(path: &Path) -> Result<(), String> {
 /// unaffected.
 pub fn retarget(open_path: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
     let rest = open_path.strip_prefix(old).ok()?;
+    // `new.join("")` appends a separator, and a trailing slash on a
+    // regular file is not the same string to the OS: `stat` answers
+    // ENOTDIR, so `exists()` says false and opening it fails. Path
+    // equality ignores the difference, which is exactly why it goes
+    // unnoticed until something touches the disk.
+    if rest.as_os_str().is_empty() {
+        return Some(new.to_path_buf());
+    }
     Some(new.join(rest))
 }
 
@@ -204,9 +212,11 @@ mod tests {
     fn retarget_follows_renames_of_files_and_ancestors() {
         let p = |s: &str| PathBuf::from(s);
         // Exact file.
+        let exact = retarget(&p("/w/a.md"), &p("/w/a.md"), &p("/w/b.md"));
+        assert_eq!(exact, Some(p("/w/b.md")));
         assert_eq!(
-            retarget(&p("/w/a.md"), &p("/w/a.md"), &p("/w/b.md")),
-            Some(p("/w/b.md"))
+            exact.unwrap().to_string_lossy(), "/w/b.md",
+            "no trailing separator: `Path` equality hides one, the OS does not"
         );
         // Under a renamed folder.
         assert_eq!(
