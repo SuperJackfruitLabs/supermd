@@ -44,6 +44,9 @@ The modifier says what a shortcut acts on. New bindings follow the tier that mat
 | ⌘ G | Ctrl G | Graph Colour: Folder / Tag / None |
 | ⌘ F | Ctrl F | Search the Graph |
 | ⌘ ⇧ O | Ctrl Shift O | Graph: Orphans Only |
+| ⌘ L | Ctrl L | Graph: Local / Whole Vault |
+| ⌘ = | Ctrl = | Graph: One Hop Further |
+| ⌘ − | Ctrl − | Graph: One Hop Nearer |
 | ⌘ ⇧ P | Ctrl Shift P | Command Palette… |
 | ⌘ / | Ctrl / | Keyboard Shortcuts |
 

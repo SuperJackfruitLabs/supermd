@@ -49,6 +49,9 @@ actions!(
         GraphColorBy,
         GraphSearch,
         GraphOrphans,
+        GraphLocal,
+        GraphDepthIn,
+        GraphDepthOut,
         SidebarUp,
         SidebarDown,
         SidebarRename,
@@ -3794,6 +3797,56 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Narrow the graph to what is near the note you have open, or
+    /// widen it back to the whole vault.
+    fn graph_local(&mut self, _: &GraphLocal, _: &mut Window, cx: &mut Context<Self>) {
+        let open = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
+        let Some(graph) = self.graph.as_mut() else { return };
+        if graph.filter.local.is_some() {
+            graph.filter.local = None;
+            graph.filter.in_scope = None;
+            self.show_command_error("Graph: whole vault".into(), cx);
+            cx.notify();
+            return;
+        }
+        let Some(open) = open else {
+            self.show_command_error("Open a note to centre the graph on it".into(), cx);
+            return;
+        };
+        let Some(center) = graph.sim.nodes.iter().position(|n| n.path == open) else {
+            self.show_command_error("That note is not in the graph".into(), cx);
+            return;
+        };
+        graph.filter.local = Some((center, 1));
+        let edges = graph.sim.edges.clone();
+        graph.filter.resolve_scope(&edges);
+        self.show_command_error("Graph: 1 hop from this note".into(), cx);
+        cx.notify();
+    }
+
+    fn graph_depth(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        let Some((center, depth)) = graph.filter.local else {
+            self.show_command_error("Turn on local mode first".into(), cx);
+            return;
+        };
+        let depth = (depth as isize + delta).clamp(1, 6) as usize;
+        graph.filter.local = Some((center, depth));
+        let edges = graph.sim.edges.clone();
+        graph.filter.resolve_scope(&edges);
+        let n = graph.filter.in_scope.as_ref().map_or(0, |s| s.len());
+        self.show_command_error(format!("Graph: {depth} hops · {n} notes"), cx);
+        cx.notify();
+    }
+
+    fn graph_depth_out(&mut self, _: &GraphDepthOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.graph_depth(1, cx);
+    }
+
+    fn graph_depth_in(&mut self, _: &GraphDepthIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.graph_depth(-1, cx);
+    }
+
     fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
         // A live filter is what Escape clears first.
         if let Some(graph) = self.graph.as_mut() {
@@ -3877,8 +3930,8 @@ impl Workspace {
                 let on = lit
                     .as_ref()
                     .is_none_or(|l| l.contains(&e.from) && l.contains(&e.to))
-                    && state.filter.matches(a)
-                    && state.filter.matches(b);
+                    && state.filter.matches_at(e.from, a)
+                    && state.filter.matches_at(e.to, b);
                 (at(a), at(b), on, e.both, node_r(a), node_r(b))
             })
             .collect();
@@ -3929,7 +3982,7 @@ impl Workspace {
             // Lit means: inside the hovered neighbourhood, and matching
             // whatever the view is narrowed to.
             let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
-                && state.filter.matches(node);
+                && state.filter.matches_at(ix, node);
             let is_open = open_path.as_deref() == Some(node.path.as_path());
             let group = match state.color_by {
                 crate::graph::ColorBy::None => None,
@@ -4022,7 +4075,12 @@ impl Workspace {
         // A status strip: what the view is narrowed to, and what colour
         // means. Only drawn when it has something to say, so an
         // untouched graph stays clean.
-        let matches = state.nodes().iter().filter(|n| state.filter.matches(n)).count();
+        let matches = state
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(ix, n)| state.filter.matches_at(*ix, n))
+            .count();
         let showing_strip = state.searching || !state.filter.is_empty();
         let strip = showing_strip.then(|| {
             let mut parts: Vec<String> = Vec::new();
@@ -4103,6 +4161,9 @@ impl Workspace {
                 .on_action(cx.listener(Self::graph_color_by))
                 .on_action(cx.listener(Self::graph_search))
                 .on_action(cx.listener(Self::graph_orphans))
+                .on_action(cx.listener(Self::graph_local))
+                .on_action(cx.listener(Self::graph_depth_in))
+                .on_action(cx.listener(Self::graph_depth_out))
                 .overflow_hidden()
                 .on_mouse_down(
                     gpui::MouseButton::Left,

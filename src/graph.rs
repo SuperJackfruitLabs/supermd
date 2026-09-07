@@ -549,6 +549,47 @@ pub fn layout(nodes: &mut [GraphNode], edges: &[Edge], iterations: usize) {
     }
 }
 
+/// Nodes within `depth` hops of `center`, as a set of indices.
+///
+/// Depth 1 is the note and what it touches; 2 adds their neighbours,
+/// and so on. Used by local mode, which narrows the graph to the
+/// neighbourhood of what you are reading instead of the whole vault.
+pub fn within_depth(
+    edges: &[Edge],
+    center: usize,
+    depth: usize,
+) -> std::collections::BTreeSet<usize> {
+    let mut seen = std::collections::BTreeSet::new();
+    seen.insert(center);
+    let mut frontier = vec![center];
+    for _ in 0..depth {
+        let mut next = Vec::new();
+        for &ix in &frontier {
+            for e in edges {
+                // Links are followed both ways here: a note you link to
+                // and a note that links to you are both neighbours.
+                let other = if e.from == ix {
+                    Some(e.to)
+                } else if e.to == ix {
+                    Some(e.from)
+                } else {
+                    None
+                };
+                if let Some(o) = other {
+                    if seen.insert(o) {
+                        next.push(o);
+                    }
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    seen
+}
+
 /// Ghost nodes: link targets that resolve to nothing.
 ///
 /// A vault's unwritten notes are a to-write list, and the graph is
@@ -611,6 +652,12 @@ pub struct Filter {
     pub folder: Option<String>,
     /// Only notes with no links at all, in or out.
     pub orphans_only: bool,
+    /// Only notes within this many hops of a centre. `None` shows the
+    /// whole vault.
+    pub local: Option<(usize, usize)>,
+    /// Resolved from `local` when the filter is applied, so `matches`
+    /// stays a cheap lookup rather than a graph walk per node.
+    pub in_scope: Option<std::collections::BTreeSet<usize>>,
 }
 
 impl Filter {
@@ -620,6 +667,26 @@ impl Filter {
             && self.tag.is_none()
             && self.folder.is_none()
             && !self.orphans_only
+            && self.local.is_none()
+    }
+
+    /// Work out which nodes are in local scope. Called when the centre
+    /// or depth changes, not per node.
+    pub fn resolve_scope(&mut self, edges: &[Edge]) {
+        self.in_scope = self
+            .local
+            .map(|(center, depth)| within_depth(edges, center, depth));
+    }
+
+    /// Index-aware match. `matches` alone cannot answer local scope,
+    /// which is about position in the graph rather than the node.
+    pub fn matches_at(&self, ix: usize, node: &GraphNode) -> bool {
+        if let Some(scope) = &self.in_scope {
+            if !scope.contains(&ix) {
+                return false;
+            }
+        }
+        self.matches(node)
     }
 
     pub fn matches(&self, node: &GraphNode) -> bool {
@@ -1056,6 +1123,53 @@ mod tests {
         let (mut nodes, mut edges) = build(&index);
         with_ghosts(&index, &mut nodes, &mut edges);
         assert!(!nodes.iter().any(|n| n.ghost), "no ghost for a broken path");
+    }
+
+    #[test]
+    fn depth_walks_out_hop_by_hop() {
+        // 0 - 1 - 2 - 3, plus an unconnected 4.
+        let edges = vec![
+            Edge { from: 0, to: 1, both: false },
+            Edge { from: 1, to: 2, both: false },
+            Edge { from: 2, to: 3, both: false },
+        ];
+        let set = |d| within_depth(&edges, 0, d).into_iter().collect::<Vec<_>>();
+        assert_eq!(set(0), vec![0], "depth 0 is the note alone");
+        assert_eq!(set(1), vec![0, 1]);
+        assert_eq!(set(2), vec![0, 1, 2]);
+        assert_eq!(set(3), vec![0, 1, 2, 3]);
+        assert_eq!(set(9), vec![0, 1, 2, 3], "past the end it stops growing");
+    }
+
+    /// Backlinks are neighbours too: a note that links *to* you is one
+    /// hop away, not unreachable.
+    #[test]
+    fn depth_follows_links_in_both_directions() {
+        let edges = vec![Edge { from: 1, to: 0, both: false }];
+        assert!(within_depth(&edges, 0, 1).contains(&1), "the note linking in is a neighbour");
+    }
+
+    /// A cycle must terminate rather than walking forever.
+    #[test]
+    fn depth_terminates_on_a_cycle() {
+        let edges = vec![
+            Edge { from: 0, to: 1, both: false },
+            Edge { from: 1, to: 2, both: false },
+            Edge { from: 2, to: 0, both: false },
+        ];
+        assert_eq!(within_depth(&edges, 0, 50).len(), 3);
+    }
+
+    #[test]
+    fn local_scope_narrows_the_filter() {
+        let edges = vec![Edge { from: 0, to: 1, both: false }];
+        let mut f = Filter { local: Some((0, 1)), ..Default::default() };
+        assert!(!f.is_empty());
+        f.resolve_scope(&edges);
+        let n = node_named("x", 1, None, None);
+        assert!(f.matches_at(0, &n), "the centre is in scope");
+        assert!(f.matches_at(1, &n), "and its neighbour");
+        assert!(!f.matches_at(7, &n), "something two hops out is not");
     }
 
     #[test]
