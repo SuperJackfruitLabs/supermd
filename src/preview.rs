@@ -177,6 +177,91 @@ pub struct FetchedMeta {
     pub description: Option<String>,
 }
 
+/// How much of a page to read. Titles and descriptions live in
+/// `<head>`; anything past this is body we would throw away, and a
+/// hover must never pull a large download.
+pub const MAX_FETCH_BYTES: usize = 128 * 1024;
+
+/// How long a preview fetch may take before it is abandoned. Short: a
+/// popover that arrives after the pointer has moved on is noise.
+pub const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Pull a title and description out of a page's HTML.
+///
+/// Deliberately not an HTML parser: this reads a few well-known tags
+/// out of untrusted bytes, so it stays a small amount of code with no
+/// recursion and no allocation proportional to nesting depth. Open
+/// Graph wins over the plain tags when both are present, because it is
+/// what the page chose to show when shared.
+pub fn parse_meta(html: &str) -> Option<FetchedMeta> {
+    let head = html.get(..html.len().min(MAX_FETCH_BYTES)).unwrap_or(html);
+    let title = meta_content(head, "og:title")
+        .or_else(|| tag_text(head, "title"))
+        .map(|t| collapse(&t))
+        .filter(|t| !t.is_empty())?;
+    let description = meta_content(head, "og:description")
+        .or_else(|| meta_content(head, "description"))
+        .map(|d| collapse(&d))
+        .filter(|d| !d.is_empty());
+    Some(FetchedMeta { title, description })
+}
+
+/// The text of the first `<tag>…</tag>`.
+fn tag_text(html: &str, tag: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find(&format!("<{tag}"))?;
+    let gt = lower[open..].find('>')? + open + 1;
+    let close = lower[gt..].find(&format!("</{tag}"))? + gt;
+    Some(unescape(&html[gt..close]))
+}
+
+/// The `content` of a `<meta>` whose name or property matches.
+fn meta_content(html: &str, key: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let needle = key.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find("<meta") {
+        let start = from + rel;
+        let end = lower[start..].find('>').map_or(lower.len(), |e| start + e);
+        let tag = &html[start..end];
+        let tag_lower = &lower[start..end];
+        let names_it = [format!("name=\"{needle}\""), format!("property=\"{needle}\"")]
+            .iter()
+            .any(|pat| tag_lower.contains(pat.as_str()));
+        if names_it {
+            if let Some(c) = attr(tag, "content") {
+                return Some(unescape(&c));
+            }
+        }
+        from = end.max(start + 5);
+    }
+    None
+}
+
+/// A double-quoted attribute's value.
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let at = lower.find(&format!("{name}=\""))? + name.len() + 2;
+    let rest = &tag[at..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// The handful of entities worth resolving in a title.
+fn unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "\'")
+        .replace("&nbsp;", " ")
+}
+
+/// Whitespace in markup is not whitespace on screen.
+fn collapse(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The preview for an external link, before any request is made.
 pub fn external_preview(url: &str, link_text: &str, grants: &[String]) -> Preview {
     let domain = domain_of(url).unwrap_or("").to_string();
@@ -189,6 +274,79 @@ pub fn external_preview(url: &str, link_text: &str, grants: &[String]) -> Previe
         consent,
         fetched: None,
     }
+}
+
+/// The only path to the network for previews. Separate from the
+/// catalog fetcher because the budgets are different: a catalog
+/// download may take 30 s and 20 MB, a hover may not.
+pub type PreviewFetcher = std::sync::Arc<
+    dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync,
+>;
+
+/// Real transport. HTTPS only — `domain_of` already refuses anything
+/// else, and this is the second place that must hold.
+pub fn ureq_preview_fetcher() -> PreviewFetcher {
+    std::sync::Arc::new(|url: &str| {
+        if domain_of(url).is_none() {
+            return Err("only https:// URLs are previewed".to_string());
+        }
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(FETCH_TIMEOUT))
+            .build();
+        let agent: ureq::Agent = config.into();
+        let response = agent.get(url).call().map_err(|e| e.to_string())?;
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        response
+            .into_body()
+            .into_reader()
+            .take(MAX_FETCH_BYTES as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(bytes)
+    })
+}
+
+/// Fetcher plus the session's memo of what has already been read.
+/// Cached so moving back and forth over the same link asks once.
+#[derive(Clone)]
+pub struct PreviewState {
+    pub fetcher: PreviewFetcher,
+    pub cache: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, FetchedMeta>>>,
+}
+
+impl PreviewState {
+    pub fn new(fetcher: PreviewFetcher) -> Self {
+        Self { fetcher, cache: Default::default() }
+    }
+
+    pub fn cached(&self, url: &str) -> Option<FetchedMeta> {
+        self.cache.lock().ok()?.get(url).cloned()
+    }
+
+    pub fn remember(&self, url: &str, meta: FetchedMeta) {
+        if let Ok(mut c) = self.cache.lock() {
+            c.insert(url.to_string(), meta);
+        }
+    }
+}
+
+impl gpui::Global for PreviewState {}
+
+/// Add a domain to the grant list, replacing any refusal of it.
+/// Returns the list to store back under the `supermd` key.
+pub fn grant_domain(domain: &str, grants: &[String]) -> Vec<String> {
+    let d = domain.to_ascii_lowercase();
+    let mut out: Vec<String> = grants
+        .iter()
+        .filter(|g| {
+            !g.strip_prefix("denied:net:").is_some_and(|x| x.eq_ignore_ascii_case(&d))
+                && !g.strip_prefix("net:").is_some_and(|x| x.eq_ignore_ascii_case(&d))
+        })
+        .cloned()
+        .collect();
+    out.push(format!("net:{d}"));
+    out
 }
 
 /// When the popover should be open, as a function of pointer history
@@ -311,6 +469,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_meta_reads_title_and_description() {
+        let html = "<html><head><title>CommonMark Spec</title>\
+                    <meta name=\"description\" content=\"A strongly defined spec.\">\
+                    </head><body>ignored</body></html>";
+        let m = parse_meta(html).expect("meta");
+        assert_eq!(m.title, "CommonMark Spec");
+        assert_eq!(m.description.as_deref(), Some("A strongly defined spec."));
+    }
+
+    /// Open Graph is what a page chose to show when shared, so it wins.
+    #[test]
+    fn open_graph_wins_over_the_plain_tags() {
+        let html = "<head><title>fallback</title>\
+                    <meta property=\"og:title\" content=\"The Real Title\">\
+                    <meta property=\"og:description\" content=\"og text\">\
+                    <meta name=\"description\" content=\"plain text\"></head>";
+        let m = parse_meta(html).expect("meta");
+        assert_eq!(m.title, "The Real Title");
+        assert_eq!(m.description.as_deref(), Some("og text"));
+    }
+
+    /// Markup whitespace is not screen whitespace, and entities are not
+    /// text. A popover full of `&amp;` and newlines is worse than none.
+    #[test]
+    fn titles_are_unescaped_and_collapsed() {
+        let html = "<head><title>\n  Rust &amp; Wasm\n   guide  </title></head>";
+        assert_eq!(parse_meta(html).unwrap().title, "Rust & Wasm guide");
+    }
+
+    /// Untrusted bytes: none of these may panic or hang.
+    #[test]
+    fn malformed_html_yields_nothing_rather_than_panicking() {
+        assert_eq!(parse_meta(""), None);
+        assert_eq!(parse_meta("<html><head><title>"), None, "unterminated title");
+        assert_eq!(parse_meta("<meta name=\"description\" content=\"only a desc\">"), None);
+        assert_eq!(parse_meta("<head><title>   </title></head>"), None, "blank title");
+        assert_eq!(parse_meta("<<<<>>>><meta<meta<meta"), None);
+        // A description with no closing quote must not run away.
+        assert!(parse_meta("<head><title>t</title><meta name=\"description\" content=\"x").is_some());
+    }
+
+    #[test]
     fn consent_reads_the_existing_plugin_grant_format() {
         let grants = vec![
             "net:en.wikipedia.org".to_string(),
@@ -325,6 +525,48 @@ mod tests {
 
     /// A denial outranks a grant: if both are recorded for one domain,
     /// the refusal is the answer.
+    /// Enabling a site must clear a previous refusal of it, or the
+    /// denial would outrank the new grant and the button would appear
+    /// to do nothing.
+    #[test]
+    fn granting_a_domain_clears_an_earlier_refusal() {
+        let grants = vec![
+            "net:keep.test".to_string(),
+            "denied:net:x.test".to_string(),
+        ];
+        let after = grant_domain("X.TEST", &grants);
+        assert_eq!(consent_for("x.test", &after), Consent::Granted);
+        assert_eq!(
+            consent_for("keep.test", &after),
+            Consent::Granted,
+            "other domains are untouched"
+        );
+        assert!(!after.iter().any(|g| g.starts_with("denied:net:x.test")));
+    }
+
+    #[test]
+    fn granting_the_same_domain_twice_does_not_duplicate_it() {
+        let once = grant_domain("a.test", &[]);
+        let twice = grant_domain("a.test", &once);
+        assert_eq!(twice, vec!["net:a.test".to_string()]);
+    }
+
+    #[test]
+    fn the_cache_answers_without_a_second_request() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let state = PreviewState::new(std::sync::Arc::new(move |_: &str| {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(b"<head><title>Once</title></head>".to_vec())
+        }));
+        assert_eq!(state.cached("https://a.test"), None);
+        let bytes = (state.fetcher)("https://a.test").unwrap();
+        let meta = parse_meta(&String::from_utf8_lossy(&bytes)).unwrap();
+        state.remember("https://a.test", meta.clone());
+        assert_eq!(state.cached("https://a.test"), Some(meta));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "asked once");
+    }
+
     #[test]
     fn a_denial_outranks_a_grant_for_the_same_domain() {
         let grants = vec!["net:x.test".to_string(), "denied:net:x.test".to_string()];

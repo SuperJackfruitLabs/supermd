@@ -408,6 +408,8 @@ fn main() {
 
         cx.set_global(catalog::CatalogFetcher(catalog::ureq_fetcher()));
 
+        cx.set_global(preview::PreviewState::new(preview::ureq_preview_fetcher()));
+
         extensions::start_inline_drainer(cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());

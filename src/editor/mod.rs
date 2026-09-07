@@ -2060,13 +2060,84 @@ impl Editor {
         }
     }
 
-    /// The dwell elapsed: work out what to show.
+    /// The dwell elapsed: work out what to show, and if the site is
+    /// one the user has enabled, go and read its title.
     fn open_hover_preview(&mut self, cx: &mut Context<Self>) {
         let Some(link) = self.hover_link.clone() else {
             return;
         };
-        self.hover_preview = Some(self.preview_for(&link, cx));
+        let preview = self.preview_for(&link, cx);
+        // A granted domain we have not read yet: fetch once, in the
+        // background. The task lives in `hover_task`, so moving the
+        // pointer away drops it and the answer is discarded.
+        if let crate::preview::Preview::External { url, consent, fetched: None, .. } = &preview {
+            if *consent == crate::preview::Consent::Granted {
+                let url = url.clone();
+                if let Some(state) = cx.try_global::<crate::preview::PreviewState>().cloned() {
+                    self.hover_task = Some(cx.spawn(async move |this, cx| {
+                        let fetched = cx
+                            .background_executor()
+                            .spawn({
+                                let url = url.clone();
+                                let state = state.clone();
+                                async move {
+                                    match state.cached(&url) {
+                                        Some(m) => Some(m),
+                                        None => (state.fetcher)(&url).ok().and_then(|bytes| {
+                                            let meta = crate::preview::parse_meta(
+                                                &String::from_utf8_lossy(&bytes),
+                                            )?;
+                                            state.remember(&url, meta.clone());
+                                            Some(meta)
+                                        }),
+                                    }
+                                }
+                            })
+                            .await;
+                        this.update(cx, |editor, cx| {
+                            // Only if the pointer is still on the link
+                            // this answer belongs to.
+                            let still_here = matches!(
+                                &editor.hover_preview,
+                                Some(crate::preview::Preview::External { url: u, .. }) if *u == url
+                            );
+                            if still_here {
+                                if let Some(crate::preview::Preview::External { fetched: f, .. }) =
+                                    editor.hover_preview.as_mut()
+                                {
+                                    *f = fetched;
+                                    cx.notify();
+                                }
+                            }
+                        })
+                        .ok();
+                    }));
+                }
+            }
+        }
+        self.hover_preview = Some(preview);
         cx.notify();
+    }
+
+    /// Enable previews for the site the popover is showing, and read it
+    /// straight away so the click has a visible result.
+    fn enable_previews_for_hovered_site(&mut self, cx: &mut Context<Self>) {
+        let Some(crate::preview::Preview::External { domain, .. }) = self.hover_preview.clone()
+        else {
+            return;
+        };
+        if domain.is_empty() {
+            return;
+        }
+        let dir = crate::settings::config_dir();
+        let mut settings = crate::settings::load(&dir);
+        let grants = settings.plugin_grants.entry("supermd".to_string()).or_default();
+        *grants = crate::preview::grant_domain(&domain, grants);
+        if let Err(err) = crate::settings::save(&dir, &settings) {
+            eprintln!("supermd: cannot record the preview grant: {err}");
+            return;
+        }
+        self.open_hover_preview(cx);
     }
 
     /// What a link's popover should contain. Pure decisions live in
@@ -3422,7 +3493,32 @@ impl Render for Editor {
                         _ if domain.is_empty() => url.clone(),
                         _ => domain.clone(),
                     };
-                    body(title, sub, url.clone(), &t).when(*mismatch, |d| {
+                    let ungranted = *consent == Consent::Ungranted;
+                    body(title, sub, url.clone(), &t)
+                        .when(ungranted, |d| {
+                            // The consent prompt is a click, never the
+                            // hover: the pointer passing over a link
+                            // must not be able to reach a server.
+                            d.child(
+                                div()
+                                    .mt_2()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(t.hover_bg)
+                                    .text_size(px(t.ui_size - 1.))
+                                    .text_color(t.accent)
+                                    .cursor_pointer()
+                                    .child("Enable previews for this site")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|editor, _, _, cx| {
+                                            editor.enable_previews_for_hovered_site(cx);
+                                        }),
+                                    ),
+                            )
+                        })
+                        .when(*mismatch, |d| {
                         d.child(
                             div()
                                 .mt_1()
@@ -5067,6 +5163,67 @@ mod tests {
         assert_eq!(consent, crate::preview::Consent::Ungranted);
         assert_eq!(fetched, None, "nothing is fetched before consent");
         assert!(mismatch, "and the text naming another site is flagged");
+    }
+
+    /// Enabling a site is what causes the first request, and it is a
+    /// click that does it — never the hover. Drives the whole flow
+    /// through an injected transport, so no test touches the network.
+    #[gpui::test]
+    fn enabling_a_site_is_what_triggers_the_first_fetch(cx: &mut TestAppContext) {
+        let home = tempfile::tempdir().unwrap();
+        // Settings are written by the grant, so redirect HOME.
+        unsafe { std::env::set_var("HOME", home.path()) };
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        cx.update(|cx| {
+            cx.set_global(crate::preview::PreviewState::new(Arc::new(move |_: &str| {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(b"<head><title>Fetched Title</title></head>".to_vec())
+            })));
+        });
+
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "see [docs](https://example.test/a) here\n");
+        let link = editor.update(cx, |ed, _| ed.link_at_offset(6).cloned().expect("link"));
+
+        // Hovering an ungranted site: no request, ever.
+        editor.update(cx, |ed, cx| {
+            ed.hover_link = Some(link.clone());
+            ed.open_hover_preview(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "hovering an ungranted site must not fetch"
+        );
+
+        // The click consents, and only then does the request happen.
+        editor.update(cx, |ed, cx| ed.enable_previews_for_hovered_site(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "enabling the site fetches once"
+        );
+        editor.update(cx, |ed, _| {
+            let Some(crate::preview::Preview::External { consent, fetched, .. }) =
+                ed.hover_preview.as_ref()
+            else {
+                panic!("external preview")
+            };
+            assert_eq!(*consent, crate::preview::Consent::Granted);
+            assert_eq!(
+                fetched.as_ref().map(|m| m.title.as_str()),
+                Some("Fetched Title"),
+                "and the popover shows what it read"
+            );
+        });
+
+        // The grant is persisted in the same place plugin grants live.
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        assert_eq!(settings.plugin_grants["supermd"], ["net:example.test"]);
     }
 
     #[gpui::test]

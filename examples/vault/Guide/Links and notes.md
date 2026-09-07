@@ -42,6 +42,21 @@ else — `mailto:`, `file://`, a bare path — is treated as a path inside
 the workspace, so a document can never talk the editor into opening
 something outside the folder you opened.
 
+## Hover to see what is on the other side
+
+Rest the pointer on any link above for a moment. A note shows its title
+and opening lines, a code file its first lines, a link to a note that
+does not exist says so.
+
+An external link shows its destination domain and full address — and
+warns you when the visible text names a *different* site than the link
+actually goes to, like [supermd.app](https://example.test/not-supermd)
+above. That check is local: nothing is requested to make it.
+
+Nothing is fetched until you say so. Hovering an external link never
+reaches the network; the popover offers **Enable previews for this
+site**, one site at a time, and only that click makes a request.
+
 ## Tags
 
 Tags are just `#words` in the text. This note carries `#guide` and
