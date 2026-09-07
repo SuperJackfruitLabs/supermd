@@ -6,6 +6,13 @@
 
 use std::path::{Path, PathBuf};
 
+/// How long the popover survives after the pointer leaves the link.
+///
+/// Without this the popover vanished the instant the pointer moved off
+/// the link — including when it moved *towards* the popover — so the
+/// consent button could never be clicked.
+pub const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// How long the pointer must rest on a link before its preview opens.
 pub const DWELL: std::time::Duration = std::time::Duration::from_millis(400);
 
@@ -634,4 +641,150 @@ mod tests {
         h.moved_to(10, t0 + Duration::from_millis(399));
         assert!(h.poll(t0 + DWELL), "the original dwell still governs");
     }
+}
+
+/// A `Preview` as a tooltip view, for the rendered reading view.
+///
+/// The editor draws its own popover so the consent button can be
+/// clicked; a tooltip cannot hold an interactive control, so this shows
+/// what a site *would* preview and leaves enabling it to the editor.
+pub struct PreviewTooltip {
+    pub preview: Preview,
+}
+
+impl gpui::Render for PreviewTooltip {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{div, px, InteractiveElement, ParentElement, SharedString, Styled};
+        let t = crate::theme::theme(cx);
+        let (title, sub, body) = describe(&self.preview);
+        div()
+            .max_w(px(360.))
+            .bg(t.panel_bg)
+            .border_1()
+            .border_color(t.border)
+            .rounded_lg()
+            .shadow_lg()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(t.ui_size))
+                    .text_color(t.fg_strong)
+                    .child(SharedString::from(title)),
+            )
+            .children(sub.map(|s| {
+                div()
+                    .text_size(px(t.ui_size - 1.))
+                    .text_color(t.fg_muted)
+                    .child(SharedString::from(s))
+            }))
+            .children((!body.is_empty()).then(|| {
+                div()
+                    .mt_1()
+                    .text_size(px(t.ui_size - 1.))
+                    .text_color(t.fg)
+                    .child(SharedString::from(body))
+            }))
+    }
+}
+
+/// A preview as (title, subtitle, body). Shared by the editor's popover
+/// and the reading view's tooltip so the two cannot drift apart.
+pub fn describe(preview: &Preview) -> (String, Option<String>, String) {
+    match preview {
+        Preview::Note { title, excerpt } => (title.clone(), None, excerpt.clone()),
+        Preview::Code { language, excerpt } => (
+            language.clone().unwrap_or_else(|| "Text".into()),
+            None,
+            excerpt.clone(),
+        ),
+        Preview::Anchor { heading, excerpt } => (heading.clone(), None, excerpt.clone()),
+        Preview::Image { path } => (
+            path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            Some("Image".into()),
+            String::new(),
+        ),
+        Preview::Missing { name } => (
+            name.clone(),
+            Some("Does not exist — click to create".into()),
+            String::new(),
+        ),
+        Preview::External { url, domain, mismatch, consent, fetched } => {
+            let title = match (consent, fetched) {
+                (Consent::Granted, Some(m)) => m.title.clone(),
+                _ if domain.is_empty() => url.clone(),
+                _ => domain.clone(),
+            };
+            let mut sub = match (consent, fetched) {
+                (Consent::Granted, Some(m)) => m.description.clone(),
+                (Consent::Ungranted, _) => Some("Previews are off for this site".into()),
+                (Consent::Denied, _) => Some("Previews refused for this site".into()),
+                _ => None,
+            };
+            if *mismatch {
+                let warn = "⚠ the link text names a different site";
+                sub = Some(match sub {
+                    Some(s) => format!("{warn} · {s}"),
+                    None => warn.to_string(),
+                });
+            }
+            (title, sub, url.clone())
+        }
+    }
+}
+
+/// The preview for a link, given a way to resolve paths and the stored
+/// grants. Shared by the editor's popover and the reading view's
+/// tooltip so the two cannot disagree about what a link shows.
+///
+/// Anchors are the caller's business: only it knows the document text.
+pub fn preview_for_link(
+    link: &crate::knowledge::RawLink,
+    link_text: &str,
+    grants: &[String],
+    resolve: impl FnOnce(&crate::knowledge::RawLink) -> Option<std::path::PathBuf>,
+) -> Preview {
+    use crate::knowledge::LinkTarget;
+    match crate::knowledge::classify(link) {
+        LinkTarget::External(url) => external_preview(&url, link_text, grants),
+        LinkTarget::Anchor(a) => Preview::Missing { name: format!("#{a}") },
+        LinkTarget::Wiki(name) | LinkTarget::Relative(name) => {
+            let Some(path) = resolve(link) else {
+                return Preview::Missing { name };
+            };
+            if crate::files::is_image_path(&path) {
+                return Preview::Image { path };
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                return Preview::Missing { name };
+            };
+            let is_md = matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("md" | "markdown" | "mdown" | "mdx")
+            );
+            if is_md {
+                Preview::Note { title: title_of(&text, &path), excerpt: excerpt(&text, 8) }
+            } else {
+                Preview::Code {
+                    language: crate::reader::language_for_path(&path),
+                    excerpt: excerpt(&text, 10),
+                }
+            }
+        }
+    }
+}
+
+/// The `supermd` preview grants, from disk.
+pub fn stored_grants() -> Vec<String> {
+    crate::settings::load(&crate::settings::config_dir())
+        .plugin_grants
+        .get("supermd")
+        .cloned()
+        .unwrap_or_default()
 }

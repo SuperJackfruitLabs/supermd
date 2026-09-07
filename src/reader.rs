@@ -93,9 +93,21 @@ impl Reader {
         langs: &Languages,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::from_source_at(None, title, source, langs, cx)
+    }
+
+    /// As `from_source`, remembering which file the text came from so a
+    /// relative link in it can be resolved for its hover preview.
+    pub fn from_source_at(
+        path: Option<PathBuf>,
+        title: SharedString,
+        source: &str,
+        langs: &Languages,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut document = markdown::parse(source);
         langs.highlight_document(&mut document);
-        Self::from_document(None, title, document, cx)
+        Self::from_document(path, title, document, cx)
     }
 
     pub fn welcome(langs: &Languages, cx: &mut Context<Self>) -> Self {
@@ -238,6 +250,16 @@ impl gpui::Focusable for Reader {
     }
 }
 
+/// A link was clicked in the rendered view. Carries the destination
+/// exactly as written; the workspace classifies and resolves it,
+/// because only it knows which file this reader is showing.
+#[derive(Debug, Clone)]
+pub enum ReaderEvent {
+    Follow(String),
+}
+
+impl gpui::EventEmitter<ReaderEvent> for Reader {}
+
 impl Render for Reader {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.weak_entity();
@@ -260,7 +282,38 @@ impl Render for Reader {
                     };
                     let t = theme(cx);
                     let document = reader.read(cx).document.clone();
-                    view::list_item(&document, ix, &t, cx)
+                    // Clicking a link in the rendered view emits; the
+                    // workspace resolves it against the open file.
+                    let follow: view::Follow = {
+                        let reader = reader.clone();
+                        std::rc::Rc::new(move |dest: &str, _window: &mut Window, cx: &mut App| {
+                            let dest = dest.to_string();
+                            reader.update(cx, |_, cx| cx.emit(ReaderEvent::Follow(dest)));
+                        })
+                    };
+                    let base = reader.read(cx).path.clone();
+                    let describe: view::Describe = std::rc::Rc::new(
+                        move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
+                            let base = base.clone()?;
+                            let link = crate::knowledge::RawLink {
+                                target: dest.to_string(),
+                                wiki: false,
+                                range: 0..0,
+                                context: String::new(),
+                            };
+                            let grants = crate::preview::stored_grants();
+                            Some(crate::preview::preview_for_link(
+                                &link,
+                                dest,
+                                &grants,
+                                |l| {
+                                    cx.try_global::<crate::knowledge::KnowledgeState>()
+                                        .and_then(|s| s.0.lock().unwrap().resolve(&base, l))
+                                },
+                            ))
+                        },
+                    );
+                    view::list_item(&document, ix, &t, cx, Some(&follow), Some(&describe))
                 })
                 .size_full(),
             )

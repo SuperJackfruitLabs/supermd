@@ -85,24 +85,98 @@ fn runs_for(inline: &InlineText, base: BaseStyle, t: &Theme) -> Vec<TextRun> {
     runs
 }
 
+/// Called when a link is clicked in the rendered view.
+pub type Follow = std::rc::Rc<dyn Fn(&str, &mut gpui::Window, &mut gpui::App)>;
+
+/// Builds a hover preview for a link destination in the rendered view.
+/// Returns None when there is nothing worth showing.
+pub type Describe =
+    std::rc::Rc<dyn Fn(&str, &mut gpui::App) -> Option<crate::preview::Preview>>;
+
+/// Inline text, made clickable where it holds links.
+///
+/// `InteractiveText` hit-tests by character index, which is why the
+/// destinations had to survive parsing: `SpanStyle::link` says a run is
+/// a link, but not where it goes.
+fn inline_el(
+    inline: &InlineText,
+    base: BaseStyle,
+    t: &Theme,
+    id: impl Into<gpui::ElementId>,
+    follow: Option<&Follow>,
+    describe: Option<&Describe>,
+) -> AnyElement {
+    let text = inline_text(inline, base, t);
+    match follow {
+        Some(follow) if !inline.links.is_empty() => {
+            let ranges: Vec<std::ops::Range<usize>> =
+                inline.links.iter().map(|(r, _)| r.clone()).collect();
+            let dests: Vec<String> =
+                inline.links.iter().map(|(_, d)| d.clone()).collect();
+            let follow = follow.clone();
+            let described = describe.cloned();
+            let tip_dests = dests.clone();
+            let tip_ranges: Vec<std::ops::Range<usize>> =
+                inline.links.iter().map(|(r, _)| r.clone()).collect();
+            gpui::InteractiveText::new(id, text)
+                .on_click(ranges, move |ix, window, cx| {
+                    if let Some(dest) = dests.get(ix) {
+                        follow(dest, window, cx);
+                    }
+                })
+                .tooltip(move |char_ix, _window, cx| {
+                    // The editor draws its own popover so the consent
+                    // button can be clicked; a tooltip cannot hold a
+                    // control, so the reading view gets the information
+                    // and leaves enabling a site to the editor.
+                    let describe = described.as_ref()?;
+                    let ix = tip_ranges.iter().position(|r| r.contains(&char_ix))?;
+                    let preview = describe(tip_dests.get(ix)?, cx)?;
+                    Some(
+                        cx.new(|_| crate::preview::PreviewTooltip { preview })
+                            .into(),
+                    )
+                })
+                .into_any_element()
+        }
+        _ => text.into_any_element(),
+    }
+}
+
 fn inline_text(inline: &InlineText, base: BaseStyle, t: &Theme) -> StyledText {
     let runs = runs_for(inline, base, t);
     StyledText::new(inline.text.clone()).with_runs(runs)
 }
 
-fn paragraph(inline: &InlineText, t: &Theme) -> AnyElement {
+fn paragraph(
+    inline: &InlineText,
+    t: &Theme,
+    id: impl Into<gpui::ElementId>,
+    follow: Option<&Follow>,
+    describe: Option<&Describe>,
+) -> AnyElement {
     div()
         .text_size(px(t.body_size))
         .line_height(relative(t.body_line_height))
-        .child(inline_text(
+        .child(inline_el(
             inline,
             BaseStyle { weight: FontWeight::NORMAL, color: t.fg },
             t,
+            id,
+            follow,
+            describe,
         ))
         .into_any_element()
 }
 
-fn heading(level: u8, content: &InlineText, t: &Theme) -> AnyElement {
+fn heading(
+    level: u8,
+    content: &InlineText,
+    t: &Theme,
+    id: impl Into<gpui::ElementId>,
+    follow: Option<&Follow>,
+    describe: Option<&Describe>,
+) -> AnyElement {
     let weight = if level <= 2 { FontWeight::BOLD } else { FontWeight::SEMIBOLD };
     let margin_top = match level {
         1 => px(28.),
@@ -113,7 +187,7 @@ fn heading(level: u8, content: &InlineText, t: &Theme) -> AnyElement {
         .mt(margin_top)
         .text_size(px(t.heading_size(level)))
         .line_height(relative(1.3))
-        .child(inline_text(content, BaseStyle { weight, color: t.fg_strong }, t))
+        .child(inline_el(content, BaseStyle { weight, color: t.fg_strong }, t, id, follow, describe))
         .into_any_element()
 }
 
@@ -280,7 +354,14 @@ fn diagram_block(code: &str, t: &Theme, cx: &mut gpui::App) -> AnyElement {
     }
 }
 
-fn quote(blocks: &[Block], t: &Theme, cx: &mut gpui::App) -> AnyElement {
+fn quote(
+    blocks: &[Block],
+    t: &Theme,
+    cx: &mut gpui::App,
+    path: &str,
+    follow: Option<&Follow>,
+    describe: Option<&Describe>,
+) -> AnyElement {
     div()
         .flex()
         .flex_row()
@@ -294,12 +375,26 @@ fn quote(blocks: &[Block], t: &Theme, cx: &mut gpui::App) -> AnyElement {
                 .flex_col()
                 .gap_2()
                 .text_color(t.fg_muted)
-                .children(blocks.iter().map(|b| block(b, t, cx)).collect::<Vec<_>>()),
+                .children(
+                    blocks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, b)| block(b, t, cx, &format!("{path}q{i}"), follow, describe))
+                        .collect::<Vec<_>>(),
+                ),
         )
         .into_any_element()
 }
 
-fn list(start: Option<u64>, items: &[ListItem], t: &Theme, cx: &mut gpui::App) -> AnyElement {
+fn list(
+    start: Option<u64>,
+    items: &[ListItem],
+    t: &Theme,
+    cx: &mut gpui::App,
+    path: &str,
+    follow: Option<&Follow>,
+    describe: Option<&Describe>,
+) -> AnyElement {
     let rows = items.iter().enumerate().map(|(index, item)| {
         let marker: AnyElement = match (item.checked, start) {
             (Some(done), _) => div()
@@ -337,7 +432,13 @@ fn list(start: Option<u64>, items: &[ListItem], t: &Theme, cx: &mut gpui::App) -
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .children(item.blocks.iter().map(|b| block(b, t, cx)).collect::<Vec<_>>()),
+                    .children(
+                        item.blocks
+                            .iter()
+                            .enumerate()
+                            .map(|(i, b)| block(b, t, cx, &format!("{path}l{index}b{i}"), follow, describe))
+                            .collect::<Vec<_>>(),
+                    ),
             )
     });
 
@@ -382,20 +483,45 @@ fn rule(t: &Theme) -> AnyElement {
     div().my_2().h(px(1.)).w_full().bg(t.border).into_any_element()
 }
 
-fn block(b: &Block, t: &Theme, cx: &mut gpui::App) -> AnyElement {
+/// `path` uniquely identifies a block within the document, including
+/// nested ones, so every `InteractiveText` gets a stable distinct id.
+fn block(
+    b: &Block,
+    t: &Theme,
+    cx: &mut gpui::App,
+    path: &str,
+    follow: Option<&Follow>,
+    describe: Option<&Describe>,
+) -> AnyElement {
     match b {
-        Block::Paragraph(inline) => paragraph(inline, t),
-        Block::Heading { level, content } => heading(*level, content, t),
+        Block::Paragraph(inline) => {
+            paragraph(inline, t, gpui::SharedString::from(format!("p-{path}")), follow, describe)
+        }
+        Block::Heading { level, content } => heading(
+            *level,
+            content,
+            t,
+            gpui::SharedString::from(format!("h-{path}")),
+            follow,
+            describe,
+        ),
         Block::Code { lang, code, spans } => code_block(lang.as_deref(), code, spans, t, cx),
-        Block::Quote(blocks) => quote(blocks, t, cx),
-        Block::List { start, items } => list(*start, items, t, cx),
+        Block::Quote(blocks) => quote(blocks, t, cx, path, follow, describe),
+        Block::List { start, items } => list(*start, items, t, cx, path, follow, describe),
         Block::Table { head, rows } => table(head, rows, t),
         Block::Rule => rule(t),
     }
 }
 
 /// One top-level block as a list item, constrained to the reading column.
-pub fn list_item(doc: &Document, ix: usize, t: &Theme, cx: &mut gpui::App) -> AnyElement {
+pub fn list_item(
+    doc: &Document,
+    ix: usize,
+    t: &Theme,
+    cx: &mut gpui::App,
+    follow: Option<&Follow>,
+    describe: Option<&Describe>,
+) -> AnyElement {
     let Some(b) = doc.blocks.get(ix) else {
         return div().into_any_element();
     };
@@ -413,7 +539,7 @@ pub fn list_item(doc: &Document, ix: usize, t: &Theme, cx: &mut gpui::App) -> An
                 .px(px(48.))
                 .when(first, |d| d.pt(px(40.)))
                 .pb(if last { px(96.) } else { px(12.) })
-                .child(block(b, t, cx)),
+                .child(block(b, t, cx, &ix.to_string(), follow, describe)),
         )
         .into_any_element()
 }
@@ -435,7 +561,7 @@ mod tests {
     }
 
     fn inline(text: &str, spans: Vec<(std::ops::Range<usize>, SpanStyle)>) -> InlineText {
-        InlineText { text: text.to_string(), spans }
+        InlineText { text: text.to_string(), spans, links: Vec::new() }
     }
 
     fn body(t: &Theme) -> BaseStyle {
@@ -798,10 +924,10 @@ no language
             // First, middle, and last positions all build; the loop walks every
             // branch of `block` (headings, code, quote, lists, table, rule).
             for ix in 0..doc.blocks.len() {
-                let _ = list_item(&doc, ix, &t, cx);
+                let _ = list_item(&doc, ix, &t, cx, None, None);
             }
             // Out-of-range index degrades to an empty element instead of panicking.
-            let _ = list_item(&doc, doc.blocks.len(), &t, cx);
+            let _ = list_item(&doc, doc.blocks.len(), &t, cx, None, None);
         });
     }
 
@@ -818,7 +944,7 @@ no language
 
         // First render: cache miss → pending placeholder, render job spawned.
         cx.update(|cx| {
-            let _ = list_item(&doc, 0, &t, cx);
+            let _ = list_item(&doc, 0, &t, cx, None, None);
             assert!(matches!(
                 crate::diagram::diagram_state(&code, 664.0, cx),
                 crate::diagram::DiagramState::Pending
@@ -831,7 +957,7 @@ no language
                 crate::diagram::diagram_state(&code, 664.0, cx),
                 crate::diagram::DiagramState::Ready(_)
             ));
-            let _ = list_item(&doc, 0, &t, cx);
+            let _ = list_item(&doc, 0, &t, cx, None, None);
         });
     }
 
@@ -846,14 +972,14 @@ no language
         let code = code.clone();
 
         cx.update(|cx| {
-            let _ = list_item(&doc, 0, &t, cx); // spawns the render, shows pending
+            let _ = list_item(&doc, 0, &t, cx, None, None); // spawns the render, shows pending
         });
         cx.run_until_parked();
         cx.update(|cx| {
             let state = crate::diagram::diagram_state(&code, 664.0, cx);
             let crate::diagram::DiagramState::Failed(msg) = state else { panic!("expected failure") };
             assert!(!msg.is_empty());
-            let _ = list_item(&doc, 0, &t, cx); // error strip + plain code branch
+            let _ = list_item(&doc, 0, &t, cx, None, None); // error strip + plain code branch
         });
     }
 }

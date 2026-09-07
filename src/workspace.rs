@@ -325,7 +325,58 @@ fn make_editor(
     editor
 }
 
+/// Build a preview Reader and listen for link clicks in it.
+///
+/// The reader does not know which file it is showing, so it emits the
+/// destination as written and the workspace resolves it against the
+/// active tab — the reader always *is* the active tab's view.
+fn make_reader(
+    path: Option<PathBuf>,
+    title: SharedString,
+    source: &str,
+    langs: &crate::highlight::Languages,
+    cx: &mut Context<Workspace>,
+) -> Entity<Reader> {
+    let reader = cx.new(|cx| Reader::from_source_at(path, title, source, langs, cx));
+    cx.subscribe(&reader, |this, _reader, event, cx| {
+        let crate::reader::ReaderEvent::Follow(dest) = event;
+        this.follow_from_reader(dest, cx);
+    })
+    .detach();
+    reader
+}
+
 impl Workspace {
+    /// A link was clicked in a rendered preview. Same rules as the
+    /// editor: only http(s) leaves the app, an anchor stays put, and a
+    /// path is resolved inside the workspace or ignored.
+    fn follow_from_reader(&mut self, dest: &str, cx: &mut Context<Self>) {
+        let link = crate::knowledge::RawLink {
+            target: dest.to_string(),
+            wiki: false,
+            range: 0..0,
+            context: String::new(),
+        };
+        match crate::knowledge::classify(&link) {
+            crate::knowledge::LinkTarget::External(url) => cx.open_url(&url),
+            // An anchor inside a rendered document has nowhere to go
+            // yet: the reader scrolls by block, not by byte offset.
+            crate::knowledge::LinkTarget::Anchor(_) => {}
+            _ => {
+                let Some(base) = self.tabs.get(self.active).and_then(|t| t.path(cx)) else {
+                    return;
+                };
+                let resolved = cx
+                    .try_global::<crate::knowledge::KnowledgeState>()
+                    .and_then(|s| s.0.lock().unwrap().resolve(&base, &link));
+                if let Some(path) = resolved {
+                    self.pending_link_opens.push(path);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
     pub fn new(arg: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut tree = None;
         let mut tabs = Vec::new();
@@ -1029,7 +1080,7 @@ impl Workspace {
                 this.update_in(cx, |this, window, cx| {
                     let langs = languages(cx);
                     let title = editor.read(cx).title();
-                    let reader = cx.new(|cx| Reader::from_source(title, &markdown, &langs, cx));
+                    let reader = make_reader(Some(editor.read(cx).path().to_path_buf()), title, &markdown, &langs, cx);
                     // Only swap if that tab still shows this editor in
                     // Edit view (the user may have toggled or closed).
                     if let Some(Tab::Editor { editor: e, view }) = this.tabs.get_mut(tab_ix) {
@@ -1108,7 +1159,7 @@ impl Workspace {
                     let lang = crate::reader::language_for_path(&path);
                     crate::reader::source_as_document(&text, lang.as_deref())
                 };
-                let reader = cx.new(|cx| Reader::from_source(title, &source, &langs, cx));
+                let reader = make_reader(Some(path.clone()), title, &source, &langs, cx);
                 if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(tab_ix) {
                     *view = EditorView::Preview(reader);
                 }
@@ -6127,6 +6178,72 @@ mod tests {
             assert!(
                 matches!(w.tabs.get(w.active), Some(Tab::Editor { view: EditorView::Edit, .. })),
                 "a double click opens for editing"
+            );
+        });
+    }
+
+    /// A link clicked in the rendered preview must navigate. The
+    /// reading view had no link handling at all: `markdown.rs` recorded
+    /// only *that* a run was a link and dropped the destination, so a
+    /// preview could draw links it could never follow — which became
+    /// the common case when a single click started opening previews.
+    /// A preview reader must know which file it is showing, or a
+    /// relative link in it has no base to resolve against and its hover
+    /// preview silently shows nothing.
+    #[gpui::test]
+    fn a_preview_reader_knows_its_own_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("expected a preview tab")
+            };
+            assert_eq!(
+                reader.read(app).path.as_deref(),
+                Some(a.as_path()),
+                "the reader carries the file it renders"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_a_link_in_the_rendered_preview_navigates(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        std::fs::write(&a, format!("see [b]({})\n", b.file_name().unwrap().to_string_lossy()))
+            .unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.run_until_parked();
+
+        // The destination survived parsing into the rendered document.
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("expected a preview tab")
+            };
+            let doc = &reader.read(app).document;
+            let crate::markdown::Block::Paragraph(inline) = &doc.blocks[0] else {
+                panic!("paragraph")
+            };
+            assert_eq!(inline.links.len(), 1, "the rendered view knows where the link goes");
+        });
+
+        // Following it opens the target.
+        ws.update(cx, |ws, cx| ws.follow_from_reader("b.md", cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(
+                w.tabs[w.active].path(app).as_deref(),
+                Some(b.as_path()),
+                "the click opened the linked note"
             );
         });
     }

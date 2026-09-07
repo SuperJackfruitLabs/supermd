@@ -166,6 +166,9 @@ pub struct Editor {
     hover_task: Option<gpui::Task<()>>,
     hover_at: Option<gpui::Point<Pixels>>,
     hover_preview: Option<crate::preview::Preview>,
+    /// The pointer is inside the popover itself, so it must not close.
+    hover_held: bool,
+    hover_close_task: Option<gpui::Task<()>>,
 }
 
 /// Snapshot taken right after a paste lands, so a background enricher
@@ -325,6 +328,8 @@ impl Editor {
             hover_task: None,
             hover_at: None,
             hover_preview: None,
+            hover_held: false,
+            hover_close_task: None,
         };
         editor.restyle(langs);
         editor.schedule_status(cx);
@@ -2034,8 +2039,15 @@ impl Editor {
         // restarting it on every pixel, so sliding within a link opens
         // the popover on time.
         if self.hover_link.as_ref().is_some_and(|l| l.range == link.range) {
+            // Back on the link it belongs to: call off any pending close.
+            self.hover_close_task = None;
             return;
         }
+        // Moving to a different link closes the old popover outright —
+        // the grace period exists for travel to the popover, not for
+        // sliding along a line of links.
+        self.hover_close_task = None;
+        self.hover_held = false;
         self.hover_link = Some(link);
         self.hover_at = Some(position);
         self.hover_preview = None;
@@ -2048,16 +2060,46 @@ impl Editor {
         }));
     }
 
-    /// The pointer left the link. Closes at once and drops the dwell:
-    /// a popover that outlives the pointer is in the way.
+    /// The pointer left the link. The popover does not close at once:
+    /// reaching its button means moving off the link, and closing on
+    /// that movement made the button unclickable. It survives a short
+    /// grace period, and indefinitely while the pointer is inside it.
     fn hover_left(&mut self, cx: &mut Context<Self>) {
-        if self.hover_link.is_some() || self.hover_preview.is_some() {
+        if self.hover_link.is_none() && self.hover_preview.is_none() {
+            return;
+        }
+        // Nothing shown yet — just a dwell in progress. Drop it now;
+        // there is nothing on screen to walk to.
+        if self.hover_preview.is_none() {
             self.hover_link = None;
             self.hover_task = None;
             self.hover_at = None;
-            self.hover_preview = None;
             cx.notify();
+            return;
         }
+        if self.hover_close_task.is_some() || self.hover_held {
+            return;
+        }
+        self.hover_close_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::preview::CLOSE_GRACE).await;
+            this.update(cx, |editor, cx| {
+                if !editor.hover_held {
+                    editor.close_hover(cx);
+                }
+                editor.hover_close_task = None;
+            })
+            .ok();
+        }));
+    }
+
+    /// Drop the popover and everything behind it.
+    fn close_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_link = None;
+        self.hover_task = None;
+        self.hover_at = None;
+        self.hover_preview = None;
+        self.hover_held = false;
+        cx.notify();
     }
 
     /// The dwell elapsed: work out what to show, and if the site is
@@ -3544,6 +3586,19 @@ impl Render for Editor {
                     .snap_to_window_with_margin(px(8.))
                     .child(
                         div()
+                            // `on_hover` needs a stateful element.
+                            .id("link-hover-popover")
+                            .on_hover(cx.listener(|editor, hovered: &bool, _, cx| {
+                                // Inside the popover the pointer is not
+                                // on the link, but the popover must stay:
+                                // its button is the whole point.
+                                editor.hover_held = *hovered;
+                                if *hovered {
+                                    editor.hover_close_task = None;
+                                } else {
+                                    editor.hover_left(cx);
+                                }
+                            }))
                             .max_w(px(360.))
                             .bg(t.panel_bg)
                             .border_1()

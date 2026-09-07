@@ -31,6 +31,13 @@ impl SpanStyle {
 pub struct InlineText {
     pub text: String,
     pub spans: Vec<(Range<usize>, SpanStyle)>,
+    /// Where each link in `text` points, by byte range.
+    ///
+    /// `SpanStyle::link` records only *that* a run is a link; the
+    /// destination was dropped on the floor, so the rendered view could
+    /// draw a link but never follow one. Kept beside the spans rather
+    /// than inside `SpanStyle`, which is `Copy` and compared by value.
+    pub links: Vec<(Range<usize>, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +73,9 @@ pub struct Document {
 #[derive(Default)]
 struct InlineBuilder {
     out: InlineText,
+    /// Byte offset where the currently-open link began, and where it
+    /// points. Nested links are not a thing in CommonMark.
+    open_link: Option<(usize, String)>,
 }
 
 impl InlineBuilder {
@@ -79,6 +89,19 @@ impl InlineBuilder {
 
     fn is_empty(&self) -> bool {
         self.out.text.is_empty()
+    }
+
+    fn begin_link(&mut self, dest: String) {
+        self.open_link = Some((self.out.text.len(), dest));
+    }
+
+    fn end_link(&mut self) {
+        if let Some((start, dest)) = self.open_link.take() {
+            let end = self.out.text.len();
+            if start < end {
+                self.out.links.push((start..end, dest));
+            }
+        }
     }
 
     fn finish(self) -> InlineText {
@@ -276,8 +299,18 @@ pub fn parse(source: &str) -> Document {
             Event::End(TagEnd::Emphasis) => styles.italic -= 1,
             Event::Start(Tag::Strikethrough) => styles.strike += 1,
             Event::End(TagEnd::Strikethrough) => styles.strike -= 1,
-            Event::Start(Tag::Link { .. }) => styles.link += 1,
-            Event::End(TagEnd::Link) => styles.link -= 1,
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                styles.link += 1;
+                if let Some(builder) = inline.as_mut() {
+                    builder.begin_link(dest_url.to_string());
+                }
+            }
+            Event::End(TagEnd::Link) => {
+                styles.link -= 1;
+                if let Some(builder) = inline.as_mut() {
+                    builder.end_link();
+                }
+            }
             Event::Start(Tag::Image { .. }) => {
                 // Phase 0: render images as a labeled placeholder of their alt text.
                 styles.image += 1;
@@ -368,6 +401,40 @@ mod tests {
         let bold = SpanStyle { bold: true, ..Default::default() };
         let bold_italic = SpanStyle { bold: true, italic: true, ..Default::default() };
         assert_eq!(inline.spans, vec![(2..4, bold), (4..5, bold_italic)]);
+    }
+
+    /// A rendered link must know where it points. The destination used
+    /// to be dropped at parse time — `SpanStyle` recorded only that a
+    /// run *was* a link — so the reading view could draw links it could
+    /// never follow.
+    #[test]
+    fn link_destinations_survive_parsing() {
+        let doc = parse("see [the spec](https://commonmark.org) and [a note](Notes/a.md)\n");
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
+        let targets: Vec<(&str, &str)> = inline
+            .links
+            .iter()
+            .map(|(r, dest)| (&inline.text[r.clone()], dest.as_str()))
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                ("the spec", "https://commonmark.org"),
+                ("a note", "Notes/a.md"),
+            ]
+        );
+    }
+
+    /// A link whose text is styled still records one range covering the
+    /// whole of it, not one per style run.
+    #[test]
+    fn a_styled_link_is_still_one_destination() {
+        let doc = parse("[**bold** and *italic*](x.md)\n");
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(inline.links.len(), 1);
+        let (range, dest) = &inline.links[0];
+        assert_eq!(&inline.text[range.clone()], "bold and italic");
+        assert_eq!(dest, "x.md");
     }
 
     #[test]
