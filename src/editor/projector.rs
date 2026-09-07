@@ -218,7 +218,7 @@ impl Projector for DiagramProjector {
             .expect("diagram projector payload");
         let t = ctx.theme;
         match crate::diagram::diagram_state(&payload.body, 664.0, ctx.cx) {
-            crate::diagram::DiagramState::Ready(image) => {
+            crate::diagram::DiagramState::Ready { image, width, height } => {
                 let handle = ctx.editor.clone();
                 let first_line = ctx.lines.start;
                 div()
@@ -237,7 +237,7 @@ impl Projector for DiagramProjector {
                             cx.notify();
                         });
                     })
-                    .child(gpui::img(image).max_w_full().rounded_md())
+                    .child(gpui::img(image).w(px(width)).h(px(height)).rounded_md())
                     .into_any_element()
             }
             crate::diagram::DiagramState::Pending => div()
@@ -392,7 +392,7 @@ impl Projector for PluginBlockProjector {
             });
         };
         match state {
-            crate::diagram::DiagramState::Ready(image) => div()
+            crate::diagram::DiagramState::Ready { image, width, height } => div()
                 .id(("plugin-block", ctx.item_ix))
                 .my_1()
                 .w_full()
@@ -400,7 +400,7 @@ impl Projector for PluginBlockProjector {
                 .justify_center()
                 .cursor_pointer()
                 .on_click(dissolve)
-                .child(gpui::img(image).max_w_full().rounded_md())
+                .child(gpui::img(image).w(px(width)).h(px(height)).rounded_md())
                 .into_any_element(),
             crate::diagram::DiagramState::Pending => div()
                 .my_1()

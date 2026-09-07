@@ -306,11 +306,14 @@ fn code_block(
 /// plain code on failure.
 fn diagram_block(code: &str, t: &Theme, cx: &mut gpui::App) -> AnyElement {
     match crate::diagram::diagram_state(code, 664.0, cx) {
-        crate::diagram::DiagramState::Ready(image) => div()
+        crate::diagram::DiagramState::Ready { image, width, height } => div()
             .w_full()
             .flex()
             .justify_center()
-            .child(gpui::img(image).max_w_full().rounded_md())
+            // Drawn at the size the diagram actually is: the PNG is
+            // rasterised at RASTER_SCALE, so its pixel dimensions are
+            // that many times larger.
+            .child(gpui::img(image).w(px(width)).h(px(height)).rounded_md())
             .into_any_element(),
         crate::diagram::DiagramState::Pending => div()
             .w_full()
@@ -955,7 +958,7 @@ no language
         cx.update(|cx| {
             assert!(matches!(
                 crate::diagram::diagram_state(&code, 664.0, cx),
-                crate::diagram::DiagramState::Ready(_)
+                crate::diagram::DiagramState::Ready { .. }
             ));
             let _ = list_item(&doc, 0, &t, cx, None, None);
         });
