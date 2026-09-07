@@ -543,6 +543,61 @@ pub fn layout(nodes: &mut [GraphNode], edges: &[Edge], iterations: usize) {
     }
 }
 
+/// Which nodes the view is showing.
+///
+/// A filter never removes nodes from the simulation — the layout would
+/// jump every time you typed a character. It marks them, and the
+/// renderer fades what does not match, so the shape you were reading
+/// stays put while the matches light up.
+#[derive(Debug, Clone, Default)]
+pub struct Filter {
+    /// Case-insensitive substring of the note's name.
+    pub query: String,
+    /// Only notes carrying this tag.
+    pub tag: Option<String>,
+    /// Only notes under this top-level folder.
+    pub folder: Option<String>,
+    /// Only notes with no links at all, in or out.
+    pub orphans_only: bool,
+}
+
+impl Filter {
+    /// Nothing is being filtered, so everything is a match.
+    pub fn is_empty(&self) -> bool {
+        self.query.is_empty()
+            && self.tag.is_none()
+            && self.folder.is_none()
+            && !self.orphans_only
+    }
+
+    pub fn matches(&self, node: &GraphNode) -> bool {
+        if self.orphans_only && node.degree > 0 {
+            return false;
+        }
+        if let Some(tag) = &self.tag {
+            if node.tag.as_deref() != Some(tag.as_str()) {
+                return false;
+            }
+        }
+        if let Some(folder) = &self.folder {
+            if node.folder.as_deref() != Some(folder.as_str()) {
+                return false;
+            }
+        }
+        if !self.query.is_empty() {
+            let name = node
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if !name.contains(&self.query.to_ascii_lowercase()) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// How a node is grouped, for colouring.
 ///
 /// Obsidian calls these colour groups. Folder is the useful default:
@@ -902,6 +957,70 @@ mod tests {
         let index = Index::scan(dir.path());
         let (_nodes, edges) = build(&index);
         assert!(edges.is_empty(), "no self edge: {edges:?}");
+    }
+
+    fn node_named(name: &str, degree: usize, folder: Option<&str>, tag: Option<&str>) -> GraphNode {
+        GraphNode {
+            path: PathBuf::from(format!("/v/{name}.md")),
+            x: 0.5,
+            y: 0.5,
+            vx: 0.0,
+            vy: 0.0,
+            pinned: false,
+            degree,
+            folder: folder.map(str::to_string),
+            tag: tag.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_empty_filter_matches_everything() {
+        let f = Filter::default();
+        assert!(f.is_empty());
+        assert!(f.matches(&node_named("Anything", 0, None, None)));
+    }
+
+    #[test]
+    fn the_query_matches_a_name_case_insensitively() {
+        let f = Filter { query: "read".into(), ..Default::default() };
+        assert!(f.matches(&node_named("Reading list", 2, None, None)));
+        assert!(f.matches(&node_named("UNREADABLE", 2, None, None)), "substring, any case");
+        assert!(!f.matches(&node_named("Editing", 2, None, None)));
+    }
+
+    /// Finding notes nothing links to is one of the genuinely useful
+    /// things a graph does, and there was no way to ask for it.
+    #[test]
+    fn orphans_only_keeps_the_unlinked() {
+        let f = Filter { orphans_only: true, ..Default::default() };
+        assert!(f.matches(&node_named("Loner", 0, None, None)));
+        assert!(!f.matches(&node_named("Hub", 3, None, None)));
+    }
+
+    #[test]
+    fn tag_and_folder_filters_are_exact_and_combine() {
+        let f = Filter {
+            folder: Some("Guide".into()),
+            tag: Some("links".into()),
+            ..Default::default()
+        };
+        assert!(f.matches(&node_named("A", 1, Some("Guide"), Some("links"))));
+        assert!(!f.matches(&node_named("B", 1, Some("Notes"), Some("links"))), "wrong folder");
+        assert!(!f.matches(&node_named("C", 1, Some("Guide"), Some("guide"))), "wrong tag");
+        assert!(!f.matches(&node_named("D", 1, None, None)), "ungrouped is not a match");
+    }
+
+    /// Every criterion has to hold at once, not any of them.
+    #[test]
+    fn criteria_are_conjunctive() {
+        let f = Filter {
+            query: "read".into(),
+            orphans_only: true,
+            ..Default::default()
+        };
+        assert!(f.matches(&node_named("Reading list", 0, None, None)));
+        assert!(!f.matches(&node_named("Reading list", 4, None, None)), "matches name, not orphan");
+        assert!(!f.matches(&node_named("Loner", 0, None, None)), "orphan, wrong name");
     }
 
     #[test]

@@ -47,6 +47,8 @@ actions!(
         GraphDismiss,
         GraphFit,
         GraphColorBy,
+        GraphSearch,
+        GraphOrphans,
         SidebarUp,
         SidebarDown,
         SidebarRename,
@@ -309,6 +311,11 @@ struct GraphViewState {
     ticker: Option<gpui::Task<()>>,
     /// What node colour means right now.
     color_by: crate::graph::ColorBy,
+    /// What the view is narrowed to. Non-matching nodes fade rather
+    /// than vanish, so the layout does not jump as you type.
+    filter: crate::graph::Filter,
+    /// True while the query box is taking keystrokes.
+    searching: bool,
 }
 
 impl GraphViewState {
@@ -3693,6 +3700,8 @@ impl Workspace {
             hovered: None,
             ticker: None,
             color_by: crate::graph::ColorBy::Folder,
+            filter: crate::graph::Filter::default(),
+            searching: false,
         });
         window.focus(&self.graph_focus);
         self.graph_tick(cx);
@@ -3758,7 +3767,38 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Start typing a query. Escape while searching clears it rather
+    /// than closing the graph, so a mistyped filter is one key away
+    /// from undone.
+    fn graph_search(&mut self, _: &GraphSearch, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(graph) = self.graph.as_mut() {
+            graph.searching = true;
+            cx.notify();
+        }
+    }
+
+    /// Show only notes nothing links to, and that link nowhere.
+    fn graph_orphans(&mut self, _: &GraphOrphans, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        graph.filter.orphans_only = !graph.filter.orphans_only;
+        let on = graph.filter.orphans_only;
+        self.show_command_error(
+            if on { "Graph: orphans only".into() } else { "Graph: all notes".to_string() },
+            cx,
+        );
+        cx.notify();
+    }
+
     fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
+        // A live filter is what Escape clears first.
+        if let Some(graph) = self.graph.as_mut() {
+            if graph.searching || !graph.filter.is_empty() {
+                graph.searching = false;
+                graph.filter = crate::graph::Filter::default();
+                cx.notify();
+                return;
+            }
+        }
         self.graph = None;
         self.focus_active(window, cx);
         cx.notify();
@@ -3828,9 +3868,12 @@ impl Workspace {
             .edges()
             .iter()
             .map(|e| {
-                let on =
-                    lit.as_ref().is_none_or(|l| l.contains(&e.from) && l.contains(&e.to));
                 let (a, b) = (&state.nodes()[e.from], &state.nodes()[e.to]);
+                let on = lit
+                    .as_ref()
+                    .is_none_or(|l| l.contains(&e.from) && l.contains(&e.to))
+                    && state.filter.matches(a)
+                    && state.filter.matches(b);
                 (at(a), at(b), on, e.both, node_r(a), node_r(b))
             })
             .collect();
@@ -3878,7 +3921,10 @@ impl Workspace {
             // Hovering one node lights it and everything it links to,
             // and fades the rest back — the shape stays legible while
             // one neighbourhood is picked out.
-            let on = lit.as_ref().is_none_or(|l| l.contains(&ix));
+            // Lit means: inside the hovered neighbourhood, and matching
+            // whatever the view is narrowed to.
+            let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
+                && state.filter.matches(node);
             let is_open = open_path.as_deref() == Some(node.path.as_path());
             let group = match state.color_by {
                 crate::graph::ColorBy::None => None,
@@ -3964,6 +4010,41 @@ impl Workspace {
             );
         }
 
+        // A status strip: what the view is narrowed to, and what colour
+        // means. Only drawn when it has something to say, so an
+        // untouched graph stays clean.
+        let matches = state.nodes().iter().filter(|n| state.filter.matches(n)).count();
+        let showing_strip = state.searching || !state.filter.is_empty();
+        let strip = showing_strip.then(|| {
+            let mut parts: Vec<String> = Vec::new();
+            if state.searching || !state.filter.query.is_empty() {
+                parts.push(format!("search: {}▏", state.filter.query));
+            }
+            if state.filter.orphans_only {
+                parts.push("orphans only".into());
+            }
+            if let Some(tag) = &state.filter.tag {
+                parts.push(format!("#{tag}"));
+            }
+            if let Some(folder) = &state.filter.folder {
+                parts.push(folder.clone());
+            }
+            parts.push(format!("{matches} of {}", state.nodes().len()));
+            div()
+                .absolute()
+                .top(px(16.))
+                .left(px(16.))
+                .px_3()
+                .py_1p5()
+                .rounded_lg()
+                .bg(t.panel_bg)
+                .border_1()
+                .border_color(t.border)
+                .text_size(px(t.ui_size))
+                .text_color(t.fg)
+                .child(SharedString::from(parts.join("  ·  ")))
+        });
+
         Some(
             div()
                 .absolute()
@@ -3972,9 +4053,47 @@ impl Workspace {
                 .bg(t.bg)
                 .key_context("GraphView")
                 .track_focus(&self.graph_focus)
+                // Typing narrows the view. Only while searching, so the
+                // other single-key shortcuts keep working otherwise.
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    let Some(graph) = this.graph.as_mut() else { return };
+                    if !graph.searching {
+                        return;
+                    }
+                    let key = event.keystroke.key.as_str();
+                    match key {
+                        "backspace" => {
+                            graph.filter.query.pop();
+                        }
+                        "enter" => graph.searching = false,
+                        _ => {
+                            // A printable character, and no modifier
+                            // that would make it a command.
+                            if event.keystroke.modifiers.platform
+                                || event.keystroke.modifiers.control
+                            {
+                                return;
+                            }
+                            let text = event
+                                .keystroke
+                                .key_char
+                                .as_deref()
+                                .unwrap_or(key);
+                            if text.chars().count() == 1 {
+                                graph.filter.query.push_str(text);
+                            } else {
+                                return;
+                            }
+                        }
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
                 .on_action(cx.listener(Self::graph_dismiss))
                 .on_action(cx.listener(Self::graph_fit))
                 .on_action(cx.listener(Self::graph_color_by))
+                .on_action(cx.listener(Self::graph_search))
+                .on_action(cx.listener(Self::graph_orphans))
                 .overflow_hidden()
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -4038,6 +4157,7 @@ impl Workspace {
                     }
                 }))
                 .child(board)
+                .children(strip)
                 .child(
                     div()
                         .absolute()
