@@ -448,15 +448,27 @@ fn list(
     div().flex().flex_col().gap_1().children(rows).into_any_element()
 }
 
-fn table(head: &[InlineText], rows: &[Vec<InlineText>], t: &Theme) -> AnyElement {
+fn table(
+    head: &[InlineText],
+    rows: &[Vec<InlineText>],
+    t: &Theme,
+    path: &str,
+    follow: Option<&Follow>,
+    describe: Option<&Describe>,
+) -> AnyElement {
     let cell_base = BaseStyle { weight: FontWeight::NORMAL, color: t.fg };
     let head_base = BaseStyle { weight: FontWeight::SEMIBOLD, color: t.fg_strong };
 
-    let render_row = |cells: &[InlineText], base: BaseStyle, t: &Theme| {
+    // Cells get the same link handling as prose. They were rendered
+    // with `inline_text`, so a link in a table was coloured and
+    // underlined but unclickable and had no preview — a visible dead
+    // end rather than a graceful omission. `row` distinguishes the
+    // header from each body row so element ids stay unique.
+    let render_row = |cells: &[InlineText], base: BaseStyle, t: &Theme, row: &str| {
         div()
             .flex()
             .flex_row()
-            .children(cells.iter().map(|cell| {
+            .children(cells.iter().enumerate().map(|(col, cell)| {
                 div()
                     .flex_1()
                     .min_w_0()
@@ -464,7 +476,14 @@ fn table(head: &[InlineText], rows: &[Vec<InlineText>], t: &Theme) -> AnyElement
                     .py_2()
                     .text_size(px(t.body_size - 1.))
                     .line_height(relative(1.45))
-                    .child(inline_text(cell, base, t))
+                    .child(inline_el(
+                        cell,
+                        base,
+                        t,
+                        gpui::SharedString::from(format!("t-{path}-{row}-{col}")),
+                        follow,
+                        describe,
+                    ))
             }))
     };
 
@@ -474,10 +493,15 @@ fn table(head: &[InlineText], rows: &[Vec<InlineText>], t: &Theme) -> AnyElement
         .border_color(t.border)
         .flex()
         .flex_col()
-        .child(render_row(head, head_base, t).bg(t.code_bg).rounded_t_lg())
+        .child(render_row(head, head_base, t, "h").bg(t.code_bg).rounded_t_lg())
         .children(
             rows.iter()
-                .map(|row| render_row(row, cell_base, t).border_t_1().border_color(t.border)),
+                .enumerate()
+                .map(|(i, row)| {
+                    render_row(row, cell_base, t, &i.to_string())
+                        .border_t_1()
+                        .border_color(t.border)
+                }),
         )
         .into_any_element()
 }
@@ -511,7 +535,7 @@ fn block(
         Block::Code { lang, code, spans } => code_block(lang.as_deref(), code, spans, t, cx),
         Block::Quote(blocks) => quote(blocks, t, cx, path, follow, describe),
         Block::List { start, items } => list(*start, items, t, cx, path, follow, describe),
-        Block::Table { head, rows } => table(head, rows, t),
+        Block::Table { head, rows } => table(head, rows, t, path, follow, describe),
         Block::Rule => rule(t),
     }
 }

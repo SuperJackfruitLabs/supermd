@@ -334,6 +334,10 @@ fn scan_wiki(s: &str) -> Option<Range<usize>> {
         // `[[Target|label]]`: the left names the note, the right is
         // what the reader meant to read. Hiding only the brackets
         // would leak the pipe into prose as `Target|label`.
+        //
+        // An empty label shows the target instead — hiding everything
+        // rendered the whole link as zero characters.
+        Some(bar) if inner[bar + 1..].trim().is_empty() => 2..2 + bar,
         Some(bar) => 2 + bar + 1..2 + inner.len(),
         None => 2..2 + inner.len(),
     })
@@ -500,6 +504,15 @@ mod tests {
     fn a_labelled_wiki_link_displays_its_label() {
         let dl = display_line("[[Roadmap|the plan]]", 0, &[span(0..20, StyleKind::Link)], 30..30);
         assert_eq!(dl.text, "the plan");
+    }
+
+    /// `[[Target|]]` used to render as nothing at all: the label is
+    /// empty, so hiding the target *and* the brackets left zero
+    /// characters, with nothing to click and no sign the link existed.
+    #[test]
+    fn an_empty_label_falls_back_to_the_target() {
+        let dl = display_line("[[Roadmap|]]", 0, &[span(0..12, StyleKind::Link)], 30..30);
+        assert_eq!(dl.text, "Roadmap");
     }
 
     /// A markdown link must keep hiding `](dest)` exactly as before: the

@@ -203,7 +203,12 @@ fn resolve_wiki_links(inline: &mut InlineText) {
         };
         let inner = &src[i + 2..i + 2 + rel];
         let (target, label) = match inner.split_once('|') {
-            Some((t, l)) => (t.trim(), l.trim()),
+            // An empty label falls back to the target. `[[Target|]]`
+            // otherwise rendered as nothing at all: eleven bytes of
+            // source became zero characters, with nothing to click and
+            // no way to tell the link was there.
+            Some((t, l)) if !l.trim().is_empty() => (t.trim(), l.trim()),
+            Some((t, _)) => (t.trim(), t.trim()),
             None => (inner.trim(), inner.trim()),
         };
         if target.is_empty() {
@@ -590,6 +595,14 @@ mod tests {
         assert_eq!(inline.text, "the table guide follows");
         assert_eq!(inline.links[0].1, "[[Tables");
         assert_eq!(&inline.text[inline.links[0].0.clone()], "the table guide");
+    }
+
+    #[test]
+    fn an_empty_label_falls_back_to_the_target() {
+        let doc = parse("[[Roadmap|]] and [[A| ]] end\n");
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(inline.text, "Roadmap and A end", "neither renders as nothing");
+        assert_eq!(inline.links.len(), 2, "both are still links");
     }
 
     /// Code is literal: a wiki link inside backticks stays as written.
