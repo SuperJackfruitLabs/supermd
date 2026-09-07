@@ -5032,16 +5032,15 @@ mod tests {
         );
     }
 
-    /// A wiki target is unsanitised text: `..` segments and absolute
-    /// paths must not reach outside the workspace root. `Path::join`
-    /// with an absolute path replaces the base entirely, so `[[/tmp/x]]`
-    /// escapes without a single `..`.
     /// A *dangling* symlink defeats the containment check: with no
     /// canonical leaf it anchors at the parent, which is inside the
     /// root, and approves the path. `create_new`'s O_EXCL refuses to
     /// write through it, but treating that refusal as "open it anyway"
     /// handed the editor a path outside the workspace — and the next
     /// save wrote through it. A vault cloned from git can carry one.
+    // Symlinks are a unix concept here; every other symlink test in the
+    // tree carries the same gate.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_dangling_symlink_target_is_refused_not_opened(cx: &mut TestAppContext) {
         let fx = tempfile::tempdir().unwrap();
@@ -5064,6 +5063,10 @@ mod tests {
         assert!(!outside.exists(), "and nothing was created outside the workspace");
     }
 
+    /// A wiki target is unsanitised text: `..` segments and absolute
+    /// paths must not reach outside the workspace root. `Path::join`
+    /// with an absolute path replaces the base entirely, so `[[/tmp/x]]`
+    /// escapes without a single `..`.
     #[gpui::test]
     fn a_wiki_link_cannot_create_a_note_outside_the_workspace(cx: &mut TestAppContext) {
         let base = tempfile::tempdir().unwrap();
