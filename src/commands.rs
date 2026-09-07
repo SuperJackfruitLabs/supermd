@@ -216,8 +216,11 @@ commands! {
         keys: ["cmd-="], ctx: Some("GraphView"), menu: None, help: Some(General) },
     ws::GraphDepthIn => { id: "graph_depth_in", label: "Graph: One Hop Nearer",
         keys: ["cmd--"], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    // Not `space`: gpui resolves keymap actions before an element's
+    // key handler, so a bare space could never reach the graph's search
+    // box — typing a two-word query froze the layout instead.
     ws::GraphFreeze => { id: "graph_freeze", label: "Graph: Freeze / Run",
-        keys: ["space"], ctx: Some("GraphView"), menu: None, help: Some(General) },
+        keys: ["cmd-."], ctx: Some("GraphView"), menu: None, help: Some(General) },
     ws::GraphSpread => { id: "graph_spread", label: "Graph Spread: Tight / Normal / Loose",
         keys: ["cmd-e"], ctx: Some("GraphView"), menu: None, help: Some(General) },
     ws::TogglePalette => { id: "palette", label: "Command Palette…",

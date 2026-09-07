@@ -309,6 +309,12 @@ struct GraphViewState {
     drag: Option<(f32, f32)>,
     /// The node being dragged, and the pointer offset within it.
     node_drag: Option<usize>,
+    /// The pointer actually moved while a node was held. gpui only
+    /// suppresses a click past its drag threshold when a drag listener
+    /// is registered, and this drag is hand-rolled — so without this,
+    /// releasing after moving a node fired `on_click` and opened the
+    /// note, which made dragging impossible.
+    node_dragged: bool,
     /// The node under the pointer: it and its neighbours stay lit while
     /// everything else dims.
     hovered: Option<usize>,
@@ -3725,6 +3731,7 @@ impl Workspace {
             zoom: 1.0,
             drag: None,
             node_drag: None,
+            node_dragged: false,
             hovered: None,
             ticker: None,
             color_by: crate::graph::ColorBy::Folder,
@@ -3912,13 +3919,46 @@ impl Workspace {
     }
 
     /// Open the note behind a graph node and close the overlay.
+    ///
+    /// A ghost has no file: its path is the bare name the link asked
+    /// for. Clicking one creates the note beside the note that
+    /// referenced it, which is what following that link would have
+    /// done — previously it closed the overlay, failed to read a
+    /// relative path against the process working directory, and
+    /// printed to stderr.
     fn open_graph_node(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.graph.as_ref().and_then(|g| g.nodes().get(ix)).map(|n| n.path.clone())
-        else {
+        let Some(node) = self.graph.as_ref().and_then(|g| g.nodes().get(ix)).cloned() else {
             return;
         };
         self.graph = None;
-        self.open_path(&path, window, cx);
+        if node.ghost {
+            let Some(source) = node.ghost_source else { return };
+            let Some(dir) = source.parent() else { return };
+            let name = node
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let root = cx
+                .try_global::<crate::knowledge::KnowledgeState>()
+                .map(|s| s.0.lock().unwrap().root.clone());
+            let Some(root) = root else { return };
+            // The same containment the editor applies before creating a
+            // note from a link.
+            let Some(path) = crate::knowledge::creatable_note_path(&root, dir, &name) else {
+                self.show_command_error(format!("Cannot create {name} here"), cx);
+                return;
+            };
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) | Err(_) => {}
+            }
+            self.open_path(&path, window, cx);
+            return;
+        }
+        self.open_path(&node.path, window, cx);
     }
 
     fn render_graph(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -4088,6 +4128,7 @@ impl Workspace {
                             cx.stop_propagation();
                             if let Some(graph) = &mut this.graph {
                                 graph.node_drag = Some(ix);
+                                graph.node_dragged = false;
                                 graph.sim.hold_warm(true);
                             }
                             this.graph_tick(cx);
@@ -4116,6 +4157,10 @@ impl Workspace {
                     )
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
+                        // A release that ends a drag is not a click.
+                        if this.graph.as_ref().is_some_and(|g| g.node_dragged) {
+                            return;
+                        }
                         this.open_graph_node(ix, window, cx);
                     })),
             );
@@ -4233,6 +4278,7 @@ impl Workspace {
                     // layout space and pin the node there. The rest of
                     // the graph is pushed around by it, live.
                     if let Some(ix) = graph.node_drag {
+                        graph.node_dragged = true;
                         let base = 900.0 * graph.zoom;
                         // Layout space is unbounded, so a dragged node
                         // follows the pointer anywhere rather than
@@ -4251,6 +4297,27 @@ impl Workspace {
                         cx.notify();
                     }
                 }))
+                // A release outside the window still ends the drag.
+                // Without this the node stayed pinned, kept following
+                // the pointer with no button held, and `hold_warm` kept
+                // the frame ticker running for as long as the graph was
+                // open.
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                        if let Some(graph) = &mut this.graph {
+                            graph.drag = None;
+                            if let Some(ix) = graph.node_drag.take() {
+                                graph.sim.release(ix);
+                                graph.sim.hold_warm(false);
+                                graph.sim.reheat(0.6);
+                            }
+                            graph.node_dragged = false;
+                            cx.notify();
+                        }
+                        this.graph_tick(cx);
+                    }),
+                )
                 .on_mouse_up(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _: &MouseUpEvent, _, cx| {

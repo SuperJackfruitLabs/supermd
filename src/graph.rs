@@ -26,8 +26,11 @@ pub struct GraphNode {
     pub folder: Option<String>,
     pub tag: Option<String>,
     /// A note that does not exist yet — something links to it. Drawn
-    /// hollow, and clicking it creates the note.
+    /// hollow. `ghost_source` is the note that referenced it, which is
+    /// where clicking creates the file, exactly as following the link
+    /// from that note would.
     pub ghost: bool,
+    pub ghost_source: Option<PathBuf>,
 }
 
 /// Indexes into the node list: from → to, deduplicated per direction.
@@ -67,6 +70,7 @@ pub fn build(index: &Index) -> (Vec<GraphNode>, Vec<Edge>) {
                 folder: group_key(path, &index.root, &tags, ColorBy::Folder),
                 tag: group_key(path, &index.root, &tags, ColorBy::Tag),
                 ghost: false,
+                ghost_source: None,
             }
         })
         .collect();
@@ -127,6 +131,7 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<Edge>) {
         folder: None,
         tag: None,
         ghost: false,
+        ghost_source: None,
     }];
     let n = neighbors.len().max(1) as f32;
     for (ix, path) in neighbors.into_iter().enumerate() {
@@ -142,6 +147,7 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<Edge>) {
             folder: None,
             tag: None,
             ghost: false,
+            ghost_source: None,
         });
     }
     let edges =
@@ -721,13 +727,21 @@ pub fn with_ghosts(
             continue;
         };
         for link in index.unresolved_links(&source) {
+            let seed = ghost_ix.len();
             let ix = *ghost_ix.entry(link.clone()).or_insert_with(|| {
+                // Distinct seed positions. Two nodes at exactly the
+                // same point repel each other by exactly zero, so
+                // ghosts seeded together stayed together forever — an
+                // index note listing five unwritten pages drew as one
+                // dot. Deterministic, so layouts still reproduce.
+                let angle = seed as f32 * 2.399_963; // golden angle
+                let r = 0.08 + 0.02 * seed as f32;
                 nodes.push(GraphNode {
-                    // Not a real path: nothing opens it, and the name
-                    // is what the link asked for.
+                    // Not a real path: the name is what the link asked
+                    // for, resolved against the source note when opened.
                     path: PathBuf::from(format!("{link}.md")),
-                    x: 0.5,
-                    y: 0.5,
+                    x: 0.5 + r * angle.cos(),
+                    y: 0.5 + r * angle.sin(),
                     vx: 0.0,
                     vy: 0.0,
                     pinned: false,
@@ -735,6 +749,7 @@ pub fn with_ghosts(
                     folder: None,
                     tag: None,
                     ghost: true,
+                    ghost_source: Some(source.clone()),
                 });
                 nodes.len() - 1
             });
@@ -1048,6 +1063,7 @@ mod tests {
                     folder: None,
                     tag: None,
                     ghost: false,
+                    ghost_source: None,
                 }
             })
             .collect();
@@ -1241,6 +1257,7 @@ mod tests {
             folder: folder.map(str::to_string),
             tag: tag.map(str::to_string),
             ghost: false,
+            ghost_source: None,
         }
     }
 
@@ -1261,6 +1278,54 @@ mod tests {
         assert_eq!(ghosts.len(), 1, "both references share one ghost");
         assert!(ghosts[0].path.ends_with("Ghost.md"));
         assert_eq!(ghosts[0].degree, 2, "linked from both notes");
+    }
+
+    /// Ghosts seeded at the same point never separate: coincident
+    /// nodes repel each other by exactly zero. An index note listing
+    /// five unwritten pages drew as one dot.
+    #[test]
+    fn ghosts_get_distinct_seeds_and_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Index.md"),
+            "[[One]] [[Two]] [[Three]] [[Four]]\n",
+        )
+        .unwrap();
+        let index = Index::scan(dir.path());
+        let (mut nodes, mut edges) = build(&index);
+        with_ghosts(&index, &mut nodes, &mut edges);
+
+        let seeds: std::collections::BTreeSet<(i32, i32)> = nodes
+            .iter()
+            .filter(|n| n.ghost)
+            .map(|n| ((n.x * 10000.0) as i32, (n.y * 10000.0) as i32))
+            .collect();
+        assert_eq!(seeds.len(), 4, "four ghosts, four starting points");
+
+        let mut sim = Simulation::new(nodes, edges);
+        sim.run(400);
+        let settled: std::collections::BTreeSet<(i32, i32)> = sim
+            .nodes
+            .iter()
+            .filter(|n| n.ghost)
+            .map(|n| ((n.x * 500.0) as i32, (n.y * 500.0) as i32))
+            .collect();
+        assert_eq!(settled.len(), 4, "and they stay apart once settled");
+    }
+
+    /// A ghost remembers which note referenced it, so clicking it can
+    /// create the file where following that link would have.
+    #[test]
+    fn a_ghost_remembers_the_note_that_referenced_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Guide")).unwrap();
+        let source = dir.path().join("Guide/A.md");
+        std::fs::write(&source, "see [[Missing]]\n").unwrap();
+        let index = Index::scan(dir.path());
+        let (mut nodes, mut edges) = build(&index);
+        with_ghosts(&index, &mut nodes, &mut edges);
+        let ghost = nodes.iter().find(|n| n.ghost).expect("a ghost");
+        assert_eq!(ghost.ghost_source.as_deref(), Some(source.as_path()));
     }
 
     /// Only wiki links: a relative path that does not resolve is a
@@ -1515,6 +1580,7 @@ mod tests {
             folder: None,
             tag: None,
             ghost: false,
+            ghost_source: None,
         }];
         let (zoom, px_, py) = fit_to(&one, (800.0, 600.0), 40.0);
         assert!(zoom.is_finite() && px_.is_finite() && py.is_finite());
