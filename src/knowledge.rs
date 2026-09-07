@@ -460,6 +460,27 @@ impl Index {
     }
 
     /// All tags with their occurrence counts, most-used first.
+    /// Link targets in `path` that resolve to nothing, deduplicated
+    /// and in document order. These are the notes the vault refers to
+    /// but does not have — the graph draws them as ghosts.
+    pub fn unresolved_links(&self, path: &Path) -> Vec<String> {
+        let Some(note) = self.notes.get(path) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for link in &note.links {
+            // Only wiki links: a relative path that does not exist is a
+            // typo, not a note someone intends to write.
+            if !link.wiki || self.resolve(path, link).is_some() {
+                continue;
+            }
+            if !out.contains(&link.target) {
+                out.push(link.target.clone());
+            }
+        }
+        out
+    }
+
     /// The tags on one note, in the order they appear. Used by the
     /// graph to colour nodes by tag.
     pub fn note_tags(&self, path: &Path) -> Vec<String> {

@@ -3682,10 +3682,15 @@ impl Workspace {
             self.show_command_error("Open a folder to see its graph".to_string(), cx);
             return;
         };
-        let (mut nodes, edges) = {
+        let (mut nodes, mut edges) = {
             let index = state.0.lock().unwrap();
-            crate::graph::build(&index)
+            let (mut n, mut e) = crate::graph::build(&index);
+            // Notes the vault refers to but does not have. They are the
+            // to-write list, and the graph is where they are visible.
+            crate::graph::with_ghosts(&index, &mut n, &mut e);
+            (n, e)
         };
+        let _ = &mut edges;
         // Seed with a short run so the first frame is already sensible,
         // then let the ticker carry it the rest of the way on screen —
         // the graph settles in front of you instead of appearing done.
@@ -3935,6 +3940,10 @@ impl Workspace {
                 .map(|slot| palette[slot]);
             let base_color = if is_open {
                 t.link
+            } else if node.ghost {
+                // Hollow: it is a name, not a note. Clicking it creates
+                // the file, the same as following the link would.
+                Hsla { a: 0.30, ..t.fg_muted }
             } else if let Some(c) = grouped {
                 c
             } else if node.degree > 0 {

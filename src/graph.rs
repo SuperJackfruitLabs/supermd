@@ -25,6 +25,9 @@ pub struct GraphNode {
     /// at build time because the renderer has no index to ask.
     pub folder: Option<String>,
     pub tag: Option<String>,
+    /// A note that does not exist yet — something links to it. Drawn
+    /// hollow, and clicking it creates the note.
+    pub ghost: bool,
 }
 
 /// Indexes into the node list: from → to, deduplicated per direction.
@@ -63,6 +66,7 @@ pub fn build(index: &Index) -> (Vec<GraphNode>, Vec<Edge>) {
                 degree: 0,
                 folder: group_key(path, &index.root, &tags, ColorBy::Folder),
                 tag: group_key(path, &index.root, &tags, ColorBy::Tag),
+                ghost: false,
             }
         })
         .collect();
@@ -122,6 +126,7 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<Edge>) {
         degree: neighbors.len(),
         folder: None,
         tag: None,
+        ghost: false,
     }];
     let n = neighbors.len().max(1) as f32;
     for (ix, path) in neighbors.into_iter().enumerate() {
@@ -136,6 +141,7 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<Edge>) {
             degree: 1,
             folder: None,
             tag: None,
+            ghost: false,
         });
     }
     let edges =
@@ -543,6 +549,52 @@ pub fn layout(nodes: &mut [GraphNode], edges: &[Edge], iterations: usize) {
     }
 }
 
+/// Ghost nodes: link targets that resolve to nothing.
+///
+/// A vault's unwritten notes are a to-write list, and the graph is
+/// where they are most visible — but `build` only ever made nodes for
+/// files that exist, so a `[[Ghost]]` referenced ten times was
+/// invisible.
+pub fn with_ghosts(
+    index: &Index,
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<Edge>,
+) {
+    let mut ghost_ix: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    // Sorted, so ghost nodes land in the same order every run.
+    let sources: Vec<PathBuf> = index.note_names().iter().map(|(_, p)| p.clone()).collect();
+    for source in sources {
+        let Some(from) = nodes.iter().position(|n| n.path == source) else {
+            continue;
+        };
+        for link in index.unresolved_links(&source) {
+            let ix = *ghost_ix.entry(link.clone()).or_insert_with(|| {
+                nodes.push(GraphNode {
+                    // Not a real path: nothing opens it, and the name
+                    // is what the link asked for.
+                    path: PathBuf::from(format!("{link}.md")),
+                    x: 0.5,
+                    y: 0.5,
+                    vx: 0.0,
+                    vy: 0.0,
+                    pinned: false,
+                    degree: 0,
+                    folder: None,
+                    tag: None,
+                    ghost: true,
+                });
+                nodes.len() - 1
+            });
+            nodes[from].degree += 1;
+            nodes[ix].degree += 1;
+            if !edges.iter().any(|e| e.from == from && e.to == ix) {
+                edges.push(Edge { from, to: ix, both: false });
+            }
+        }
+    }
+}
+
 /// Which nodes the view is showing.
 ///
 /// A filter never removes nodes from the simulation — the layout would
@@ -817,6 +869,7 @@ mod tests {
                     degree: 2,
                     folder: None,
                     tag: None,
+                    ghost: false,
                 }
             })
             .collect();
@@ -970,7 +1023,39 @@ mod tests {
             degree,
             folder: folder.map(str::to_string),
             tag: tag.map(str::to_string),
+            ghost: false,
         }
+    }
+
+    /// A vault's unwritten notes are a to-write list, and the graph is
+    /// where they show. `build` only made nodes for files that exist,
+    /// so a `[[Ghost]]` referenced anywhere was simply invisible.
+    #[test]
+    fn unresolved_links_become_ghost_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.md"), "see [[Ghost]] and [[B]]\n").unwrap();
+        std::fs::write(dir.path().join("B.md"), "also [[Ghost]]\n").unwrap();
+        let index = Index::scan(dir.path());
+        let (mut nodes, mut edges) = build(&index);
+        assert_eq!(nodes.len(), 2, "only real notes to begin with");
+
+        with_ghosts(&index, &mut nodes, &mut edges);
+        let ghosts: Vec<&GraphNode> = nodes.iter().filter(|n| n.ghost).collect();
+        assert_eq!(ghosts.len(), 1, "both references share one ghost");
+        assert!(ghosts[0].path.ends_with("Ghost.md"));
+        assert_eq!(ghosts[0].degree, 2, "linked from both notes");
+    }
+
+    /// Only wiki links: a relative path that does not resolve is a
+    /// typo, not a note somebody means to write.
+    #[test]
+    fn a_broken_relative_link_is_not_a_ghost() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.md"), "see [x](nope.md)\n").unwrap();
+        let index = Index::scan(dir.path());
+        let (mut nodes, mut edges) = build(&index);
+        with_ghosts(&index, &mut nodes, &mut edges);
+        assert!(!nodes.iter().any(|n| n.ghost), "no ghost for a broken path");
     }
 
     #[test]
@@ -1126,6 +1211,7 @@ mod tests {
             degree: 0,
             folder: None,
             tag: None,
+            ghost: false,
         }];
         let (zoom, px_, py) = fit_to(&one, (800.0, 600.0), 40.0);
         assert!(zoom.is_finite() && px_.is_finite() && py.is_finite());
