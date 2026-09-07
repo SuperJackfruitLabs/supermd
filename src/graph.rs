@@ -338,6 +338,55 @@ pub struct Forces {
     pub velocity_decay: f32,
 }
 
+/// How spread out the layout sits. Named rather than numeric: the
+/// underlying constants are not meaningful to a reader, and three
+/// useful shapes cover what a slider would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spread {
+    /// Clusters pulled tight — good for seeing structure.
+    Tight,
+    Normal,
+    /// Pushed apart — good for reading labels in a dense vault.
+    Loose,
+}
+
+impl Spread {
+    pub fn forces(self) -> Forces {
+        let base = Forces::default();
+        match self {
+            Spread::Tight => Forces {
+                repel: base.repel * 0.5,
+                link_distance: base.link_distance * 0.6,
+                center: base.center * 1.6,
+                ..base
+            },
+            Spread::Normal => base,
+            Spread::Loose => Forces {
+                repel: base.repel * 2.2,
+                link_distance: base.link_distance * 1.6,
+                center: base.center * 0.6,
+                ..base
+            },
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Spread::Tight => Spread::Normal,
+            Spread::Normal => Spread::Loose,
+            Spread::Loose => Spread::Tight,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Spread::Tight => "tight",
+            Spread::Normal => "normal",
+            Spread::Loose => "loose",
+        }
+    }
+}
+
 impl Default for Forces {
     fn default() -> Self {
         Self {
@@ -369,6 +418,7 @@ pub struct Simulation {
     pub forces: Forces,
     alpha: f32,
     alpha_target: f32,
+    frozen: bool,
 }
 
 /// Below this the layout is at rest and the shell can stop stepping.
@@ -378,7 +428,27 @@ const ALPHA_DECAY: f32 = 0.0228;
 
 impl Simulation {
     pub fn new(nodes: Vec<GraphNode>, edges: Vec<Edge>) -> Self {
-        Self { nodes, edges, forces: Forces::default(), alpha: 1.0, alpha_target: 0.0 }
+        Self {
+            nodes,
+            edges,
+            forces: Forces::default(),
+            alpha: 1.0,
+            alpha_target: 0.0,
+            frozen: false,
+        }
+    }
+
+    /// Stop moving entirely, or let the layout settle again. A frozen
+    /// graph is one you can read and point at without it drifting.
+    pub fn freeze(&mut self, frozen: bool) {
+        self.frozen = frozen;
+        if !frozen {
+            self.reheat(0.3);
+        }
+    }
+
+    pub fn frozen(&self) -> bool {
+        self.frozen
     }
 
     pub fn alpha(&self) -> f32 {
@@ -387,7 +457,7 @@ impl Simulation {
 
     /// True once motion has died down enough to stop redrawing.
     pub fn settled(&self) -> bool {
-        self.alpha < ALPHA_REST && self.alpha_target < ALPHA_REST
+        self.frozen || (self.alpha < ALPHA_REST && self.alpha_target < ALPHA_REST)
     }
 
     /// Put heat back in: something changed and the layout should move
@@ -427,7 +497,7 @@ impl Simulation {
     /// started it has gone, which is what reads as momentum.
     pub fn step(&mut self) {
         let n = self.nodes.len();
-        if n < 2 {
+        if n < 2 || self.frozen {
             return;
         }
         self.alpha += (self.alpha_target - self.alpha) * ALPHA_DECAY;
@@ -1123,6 +1193,45 @@ mod tests {
         let (mut nodes, mut edges) = build(&index);
         with_ghosts(&index, &mut nodes, &mut edges);
         assert!(!nodes.iter().any(|n| n.ghost), "no ghost for a broken path");
+    }
+
+    /// Freezing must actually stop motion — a frozen graph you can
+    /// point at is the whole reason for it.
+    #[test]
+    fn freezing_stops_the_layout_dead() {
+        let (_d, index) = fixture();
+        let (nodes, edges) = build(&index);
+        let mut sim = Simulation::new(nodes, edges);
+        sim.step();
+        let before: Vec<(f32, f32)> = sim.nodes.iter().map(|n| (n.x, n.y)).collect();
+        sim.freeze(true);
+        for _ in 0..100 {
+            sim.step();
+        }
+        let after: Vec<(f32, f32)> = sim.nodes.iter().map(|n| (n.x, n.y)).collect();
+        assert_eq!(before, after, "nothing moved while frozen");
+        assert!(sim.settled(), "and the shell stops ticking");
+
+        sim.freeze(false);
+        assert!(!sim.settled(), "unfreezing puts it back in motion");
+    }
+
+    /// The three spreads have to be genuinely different, or the control
+    /// is decoration.
+    #[test]
+    fn spreads_differ_and_cycle() {
+        let (t, n, l) = (
+            Spread::Tight.forces(),
+            Spread::Normal.forces(),
+            Spread::Loose.forces(),
+        );
+        assert!(t.repel < n.repel && n.repel < l.repel, "repulsion widens");
+        assert!(
+            t.link_distance < n.link_distance && n.link_distance < l.link_distance,
+            "links lengthen"
+        );
+        assert!(t.center > n.center && n.center > l.center, "centring relaxes");
+        assert_eq!(Spread::Tight.next().next().next(), Spread::Tight, "cycles");
     }
 
     #[test]

@@ -47,6 +47,8 @@ The modifier says what a shortcut acts on. New bindings follow the tier that mat
 | ⌘ L | Ctrl L | Graph: Local / Whole Vault |
 | ⌘ = | Ctrl = | Graph: One Hop Further |
 | ⌘ − | Ctrl − | Graph: One Hop Nearer |
+| Space | Space | Graph: Freeze / Run |
+| ⌘ E | Ctrl E | Graph Spread: Tight / Normal / Loose |
 | ⌘ ⇧ P | Ctrl Shift P | Command Palette… |
 | ⌘ / | Ctrl / | Keyboard Shortcuts |
 

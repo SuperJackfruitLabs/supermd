@@ -52,6 +52,8 @@ actions!(
         GraphLocal,
         GraphDepthIn,
         GraphDepthOut,
+        GraphFreeze,
+        GraphSpread,
         SidebarUp,
         SidebarDown,
         SidebarRename,
@@ -314,6 +316,8 @@ struct GraphViewState {
     ticker: Option<gpui::Task<()>>,
     /// What node colour means right now.
     color_by: crate::graph::ColorBy,
+    /// How spread out the layout sits.
+    spread: crate::graph::Spread,
     /// What the view is narrowed to. Non-matching nodes fade rather
     /// than vanish, so the layout does not jump as you type.
     filter: crate::graph::Filter,
@@ -3708,6 +3712,7 @@ impl Workspace {
             hovered: None,
             ticker: None,
             color_by: crate::graph::ColorBy::Folder,
+            spread: crate::graph::Spread::Normal,
             filter: crate::graph::Filter::default(),
             searching: false,
         });
@@ -3845,6 +3850,31 @@ impl Workspace {
 
     fn graph_depth_in(&mut self, _: &GraphDepthIn, _: &mut Window, cx: &mut Context<Self>) {
         self.graph_depth(-1, cx);
+    }
+
+    /// Hold the layout still, or let it settle again.
+    fn graph_freeze(&mut self, _: &GraphFreeze, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        let frozen = !graph.sim.frozen();
+        graph.sim.freeze(frozen);
+        self.show_command_error(
+            if frozen { "Graph: frozen".into() } else { "Graph: running".to_string() },
+            cx,
+        );
+        self.graph_tick(cx);
+        cx.notify();
+    }
+
+    /// Cycle how spread out the layout sits.
+    fn graph_spread(&mut self, _: &GraphSpread, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        graph.spread = graph.spread.next();
+        graph.sim.forces = graph.spread.forces();
+        graph.sim.reheat(0.7);
+        let label = graph.spread.label();
+        self.show_command_error(format!("Graph spread: {label}"), cx);
+        self.graph_tick(cx);
+        cx.notify();
     }
 
     fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
@@ -4164,6 +4194,8 @@ impl Workspace {
                 .on_action(cx.listener(Self::graph_local))
                 .on_action(cx.listener(Self::graph_depth_in))
                 .on_action(cx.listener(Self::graph_depth_out))
+                .on_action(cx.listener(Self::graph_freeze))
+                .on_action(cx.listener(Self::graph_spread))
                 .overflow_hidden()
                 .on_mouse_down(
                     gpui::MouseButton::Left,
