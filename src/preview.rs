@@ -658,7 +658,7 @@ impl gpui::Render for PreviewTooltip {
         _window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
-        use gpui::{div, px, InteractiveElement, ParentElement, SharedString, Styled};
+        use gpui::{div, px, ParentElement, SharedString, Styled};
         let t = crate::theme::theme(cx);
         let (title, sub, body) = describe(&self.preview);
         div()

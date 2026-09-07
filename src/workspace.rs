@@ -3737,6 +3737,9 @@ impl Workspace {
     }
 
     fn render_graph(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        /// Width of a node's label box. Fixed, and centred on the node,
+        /// so label length never displaces the dot.
+        const LABEL_W: f32 = 160.0;
         // Which note is open, so its node can be marked. Read before
         // borrowing the graph state.
         let open_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
@@ -3804,9 +3807,14 @@ impl Workspace {
                     .absolute()
                     .left(px(x - r))
                     .top(px(y - r))
-                    .flex()
-                    .flex_col()
-                    .items_center()
+                    // Exactly the dot's size. A flex column sized by its
+                    // widest child let a long label stretch the box, and
+                    // `items_center` then centred the dot inside *that*
+                    // — so nodes with long names sat right of where
+                    // their edges met. The label is positioned below
+                    // without contributing to this box.
+                    .w(px(r * 2.0))
+                    .h(px(r * 2.0))
                     .cursor_pointer()
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if let Some(graph) = &mut this.graph {
@@ -3836,8 +3844,15 @@ impl Workspace {
                             .hover(|s| s.bg(t.link)),
                     )
                     .child(
+                        // A fixed-width box centred on the node, so the
+                        // label grows sideways from the dot rather than
+                        // moving it.
                         div()
-                            .mt(px(2.))
+                            .absolute()
+                            .top(px(r * 2.0 + 2.0))
+                            .left(px(r - LABEL_W / 2.0))
+                            .w(px(LABEL_W))
+                            .text_center()
                             .text_size(px(11.))
                             .text_color(label_color)
                             .child(SharedString::from(name)),

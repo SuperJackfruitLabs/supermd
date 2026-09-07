@@ -9,7 +9,7 @@ use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
 
-use super::blocks::{BlockInfo, BlockKind};
+use super::blocks::BlockInfo;
 use super::projector::Claim;
 
 #[derive(Debug, Clone)]
@@ -133,6 +133,9 @@ pub fn item_of_line(items: &[Item], line: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests build fences now: the projection itself stopped
+    // needing to know about them when delimiter omission was removed.
+    use super::super::blocks::BlockKind;
     use crate::editor::projector::TablePayload;
 
     fn lines_of(src: &str) -> Vec<Range<usize>> {
