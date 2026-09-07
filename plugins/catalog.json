@@ -12,7 +12,7 @@
     {
       "name": "toc",
       "description": "Table of contents: insert, update, and auto-refresh on save",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "capabilities": [],
       "download": "https://github.com/SuperJackfruitLabs/supermd/releases/download/v0.0.14/plugin-toc.zip",
       "sha256": "d2f9edce58f0846f27aaf444224ea5596cb90db502eaef96c54cb9dbfe87590d"

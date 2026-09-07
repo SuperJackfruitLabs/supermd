@@ -293,12 +293,42 @@ struct SidebarEdit {
 
 /// The full-workspace graph: laid-out nodes plus view transform.
 struct GraphViewState {
-    nodes: Vec<crate::graph::GraphNode>,
-    edges: Vec<crate::graph::GraphEdge>,
+    sim: crate::graph::Simulation,
     pan: (f32, f32),
     zoom: f32,
     /// Last mouse position while panning.
     drag: Option<(f32, f32)>,
+    /// The node being dragged, and the pointer offset within it.
+    node_drag: Option<usize>,
+    /// The node under the pointer: it and its neighbours stay lit while
+    /// everything else dims.
+    hovered: Option<usize>,
+    /// Ticks the layout while it still has motion in it.
+    ticker: Option<gpui::Task<()>>,
+}
+
+impl GraphViewState {
+    fn nodes(&self) -> &[crate::graph::GraphNode] {
+        &self.sim.nodes
+    }
+
+    fn edges(&self) -> &[crate::graph::GraphEdge] {
+        &self.sim.edges
+    }
+
+    /// Nodes one hop from `ix`, plus itself.
+    fn neighbourhood(&self, ix: usize) -> std::collections::BTreeSet<usize> {
+        let mut set = std::collections::BTreeSet::new();
+        set.insert(ix);
+        for &(a, b) in self.edges() {
+            if a == ix {
+                set.insert(b);
+            } else if b == ix {
+                set.insert(a);
+            }
+        }
+        set
+    }
 }
 
 /// Create an editor and subscribe the workspace to its events
@@ -3645,10 +3675,49 @@ impl Workspace {
             let index = state.0.lock().unwrap();
             crate::graph::build(&index)
         };
-        crate::graph::layout(&mut nodes, &edges, 150);
-        self.graph = Some(GraphViewState { nodes, edges, pan: (0.0, 0.0), zoom: 1.0, drag: None });
+        // Seed with a short run so the first frame is already sensible,
+        // then let the ticker carry it the rest of the way on screen —
+        // the graph settles in front of you instead of appearing done.
+        let mut sim = crate::graph::Simulation::new(nodes, edges);
+        sim.run(40);
+        self.graph = Some(GraphViewState {
+            sim,
+            pan: (0.0, 0.0),
+            zoom: 1.0,
+            drag: None,
+            node_drag: None,
+            hovered: None,
+            ticker: None,
+        });
         window.focus(&self.graph_focus);
+        self.graph_tick(cx);
         cx.notify();
+    }
+
+    /// Step the layout on the next frame while it still has motion.
+    ///
+    /// Stops itself once the simulation settles, so an idle graph costs
+    /// nothing — and any interaction reheats it, which starts this
+    /// again.
+    fn graph_tick(&mut self, cx: &mut Context<Self>) {
+        let Some(graph) = self.graph.as_mut() else { return };
+        if graph.sim.settled() {
+            graph.ticker = None;
+            return;
+        }
+        graph.ticker = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(16))
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(graph) = this.graph.as_mut() {
+                    graph.sim.step();
+                    cx.notify();
+                }
+                this.graph_tick(cx);
+            })
+            .ok();
+        }));
     }
 
     fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
@@ -3659,7 +3728,7 @@ impl Workspace {
 
     /// Open the note behind a graph node and close the overlay.
     fn open_graph_node(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.graph.as_ref().and_then(|g| g.nodes.get(ix)).map(|n| n.path.clone())
+        let Some(path) = self.graph.as_ref().and_then(|g| g.nodes().get(ix)).map(|n| n.path.clone())
         else {
             return;
         };
@@ -3668,6 +3737,9 @@ impl Workspace {
     }
 
     fn render_graph(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // Which note is open, so its node can be marked. Read before
+        // borrowing the graph state.
+        let open_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
         let state = self.graph.as_ref()?;
         let t = theme(cx);
         // World transform: unit square → an 900px board, panned/zoomed.
@@ -3675,19 +3747,28 @@ impl Workspace {
         let (pan_x, pan_y) = state.pan;
         let at = |n: &crate::graph::GraphNode| (pan_x + n.x * base + 60.0, pan_y + n.y * base + 60.0);
 
-        let edge_px: Vec<((f32, f32), (f32, f32))> = state
-            .edges
+        let lit = state.hovered.map(|ix| state.neighbourhood(ix));
+        let edge_px: Vec<((f32, f32), (f32, f32), bool)> = state
+            .edges()
             .iter()
-            .map(|&(a, b)| (at(&state.nodes[a]), at(&state.nodes[b])))
+            .map(|&(a, b)| {
+                let on = lit.as_ref().is_none_or(|l| l.contains(&a) && l.contains(&b));
+                (at(&state.nodes()[a]), at(&state.nodes()[b]), on)
+            })
             .collect();
         let edge_color = Hsla { a: 0.35, ..t.fg_muted };
+        let dim_edge = Hsla { a: 0.08, ..t.fg_muted };
         let edges_canvas = gpui::canvas(
             move |bounds, _, _| bounds,
             move |bounds, _, window, _| {
-                for (a, b) in &edge_px {
+                for (a, b, on) in &edge_px {
                     let pa = point(bounds.origin.x + px(a.0), bounds.origin.y + px(a.1));
                     let pb = point(bounds.origin.x + px(b.0), bounds.origin.y + px(b.1));
-                    window.paint_path(crate::graph::line_path(pa, pb, 1.5), edge_color);
+                    // Edges outside the hovered neighbourhood fade back
+                    // rather than disappear, so the shape of the graph
+                    // is still readable while one part is emphasised.
+                    let color = if *on { edge_color } else { dim_edge };
+                    window.paint_path(crate::graph::line_path(pa, pb, 1.5), color);
                 }
             },
         )
@@ -3695,7 +3776,7 @@ impl Workspace {
         .size_full();
 
         let mut board = div().absolute().inset_0().child(edges_canvas);
-        for (ix, node) in state.nodes.iter().enumerate() {
+        for (ix, node) in state.nodes().iter().enumerate() {
             let (x, y) = at(node);
             let r = (5.0 + (node.degree as f32).sqrt() * 3.0) * state.zoom.sqrt();
             let name = node
@@ -3703,6 +3784,20 @@ impl Workspace {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            // Hovering one node lights it and everything it links to,
+            // and fades the rest back — the shape stays legible while
+            // one neighbourhood is picked out.
+            let on = lit.as_ref().is_none_or(|l| l.contains(&ix));
+            let is_open = open_path.as_deref() == Some(node.path.as_path());
+            let base_color = if is_open {
+                t.link
+            } else if node.degree > 0 {
+                t.accent
+            } else {
+                t.fg_muted
+            };
+            let node_color = if on { base_color } else { Hsla { a: 0.25, ..base_color } };
+            let label_color = if on { t.fg } else { Hsla { a: 0.25, ..t.fg } };
             board = board.child(
                 div()
                     .id(("graph-node", ix))
@@ -3713,18 +3808,38 @@ impl Workspace {
                     .flex_col()
                     .items_center()
                     .cursor_pointer()
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if let Some(graph) = &mut this.graph {
+                            graph.hovered = hovered.then_some(ix);
+                            cx.notify();
+                        }
+                    }))
+                    // Press on a node grabs it rather than panning the
+                    // board, and holds the layout warm so the graph
+                    // keeps reacting while it is dragged around.
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(graph) = &mut this.graph {
+                                graph.node_drag = Some(ix);
+                                graph.sim.hold_warm(true);
+                            }
+                            this.graph_tick(cx);
+                        }),
+                    )
                     .child(
                         div()
                             .size(px(r * 2.0))
                             .rounded_full()
-                            .bg(if node.degree > 0 { t.accent } else { t.fg_muted })
+                            .bg(node_color)
                             .hover(|s| s.bg(t.link)),
                     )
                     .child(
                         div()
                             .mt(px(2.))
                             .text_size(px(11.))
-                            .text_color(t.fg)
+                            .text_color(label_color)
                             .child(SharedString::from(name)),
                     )
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -3755,15 +3870,25 @@ impl Workspace {
                     }),
                 )
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    if let Some(graph) = &mut this.graph {
-                        if let Some((lx, ly)) = graph.drag {
-                            let (x, y) =
-                                (f32::from(event.position.x), f32::from(event.position.y));
-                            graph.pan.0 += x - lx;
-                            graph.pan.1 += y - ly;
-                            graph.drag = Some((x, y));
-                            cx.notify();
-                        }
+                    let Some(graph) = &mut this.graph else { return };
+                    let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                    // Dragging a node: convert the pointer back into
+                    // layout space and pin the node there. The rest of
+                    // the graph is pushed around by it, live.
+                    if let Some(ix) = graph.node_drag {
+                        let base = 900.0 * graph.zoom;
+                        let nx = ((x - graph.pan.0 - 60.0) / base).clamp(0.0, 1.0);
+                        let ny = ((y - graph.pan.1 - 60.0) / base).clamp(0.0, 1.0);
+                        graph.sim.pin(ix, nx, ny);
+                        graph.sim.reheat(0.3);
+                        cx.notify();
+                        return;
+                    }
+                    if let Some((lx, ly)) = graph.drag {
+                        graph.pan.0 += x - lx;
+                        graph.pan.1 += y - ly;
+                        graph.drag = Some((x, y));
+                        cx.notify();
                     }
                 }))
                 .on_mouse_up(
@@ -3771,8 +3896,18 @@ impl Workspace {
                     cx.listener(|this, _: &MouseUpEvent, _, cx| {
                         if let Some(graph) = &mut this.graph {
                             graph.drag = None;
+                            // Letting go hands the node back to the
+                            // layout, which pulls it into place instead
+                            // of leaving it stranded where it was
+                            // dropped.
+                            if let Some(ix) = graph.node_drag.take() {
+                                graph.sim.release(ix);
+                                graph.sim.hold_warm(false);
+                                graph.sim.reheat(0.6);
+                            }
                             cx.notify();
                         }
+                        this.graph_tick(cx);
                     }),
                 )
                 .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
@@ -5061,8 +5196,8 @@ mod tests {
         cx.run_until_parked();
         cx.update(|_, app| {
             let state = ws.read(app).graph.as_ref().expect("graph open");
-            assert_eq!(state.nodes.len(), 3);
-            assert_eq!(state.edges.len(), 2);
+            assert_eq!(state.nodes().len(), 3);
+            assert_eq!(state.edges().len(), 2);
         });
 
         // Clicking a node opens its note and closes the graph.

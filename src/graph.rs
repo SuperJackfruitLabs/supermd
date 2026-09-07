@@ -11,6 +11,14 @@ pub struct GraphNode {
     /// Layout position in the unit square (0..1, 0..1).
     pub x: f32,
     pub y: f32,
+    /// Velocity, carried between ticks. A settled layout has none; a
+    /// nudged one coasts to rest, which is what makes the graph feel
+    /// alive rather than redrawn.
+    pub vx: f32,
+    pub vy: f32,
+    /// Held in place by the pointer. A pinned node still pushes and
+    /// pulls its neighbours but is not itself moved by them.
+    pub pinned: bool,
     /// Link count (in + out) — drives node size.
     pub degree: usize,
 }
@@ -31,6 +39,9 @@ pub fn build(index: &Index) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 path: path.clone(),
                 x: 0.5 + 0.35 * angle.cos(),
                 y: 0.5 + 0.35 * angle.sin(),
+                vx: 0.0,
+                vy: 0.0,
+                pinned: false,
                 degree: 0,
             }
         })
@@ -72,7 +83,15 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             }
         }
     }
-    let mut nodes = vec![GraphNode { path: center.to_path_buf(), x: 0.5, y: 0.5, degree: neighbors.len() }];
+    let mut nodes = vec![GraphNode {
+        path: center.to_path_buf(),
+        x: 0.5,
+        y: 0.5,
+        vx: 0.0,
+        vy: 0.0,
+        pinned: false,
+        degree: neighbors.len(),
+    }];
     let n = neighbors.len().max(1) as f32;
     for (ix, path) in neighbors.into_iter().enumerate() {
         let angle = ix as f32 / n * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
@@ -80,6 +99,9 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             path,
             x: 0.5 + 0.32 * angle.cos(),
             y: 0.5 + 0.32 * angle.sin(),
+            vx: 0.0,
+            vy: 0.0,
+            pinned: false,
             degree: 1,
         });
     }
@@ -89,6 +111,170 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<GraphEdge>) {
 
 /// Deterministic force layout over the unit square: springs along
 /// edges, repulsion between all pairs, `iterations` rounds.
+/// Tunable force strengths. Named after what a reader would call
+/// them, because these are meant to be exposed as settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Forces {
+    /// How hard nodes push each other apart.
+    pub repel: f32,
+    /// Rest length of a link.
+    pub link_distance: f32,
+    /// How strongly a link pulls to that length.
+    pub link_strength: f32,
+    /// Pull toward the middle, so disconnected notes stay on screen.
+    pub center: f32,
+    /// Fraction of velocity kept each tick. Lower settles sooner.
+    pub velocity_decay: f32,
+}
+
+impl Default for Forces {
+    fn default() -> Self {
+        Self {
+            repel: 0.004,
+            link_distance: 0.18,
+            link_strength: 0.9,
+            center: 0.05,
+            velocity_decay: 0.6,
+        }
+    }
+}
+
+/// A running force layout.
+///
+/// The previous layout ran a fixed 150 iterations once and drew the
+/// result — a still picture. This carries velocity between ticks and
+/// cools toward rest, so the shell can step it per frame: nodes settle
+/// visibly, a drag pushes its neighbours around, and releasing lets
+/// everything coast back. That motion is the whole difference between
+/// a diagram and something that feels alive.
+///
+/// The cooling model is d3-force's: `alpha` falls geometrically toward
+/// `alpha_target`, every force is scaled by it, and an interaction
+/// "reheats" by raising it again.
+#[derive(Debug, Clone)]
+pub struct Simulation {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub forces: Forces,
+    alpha: f32,
+    alpha_target: f32,
+}
+
+/// Below this the layout is at rest and the shell can stop stepping.
+pub const ALPHA_REST: f32 = 0.005;
+/// Fraction of the remaining heat lost per tick.
+const ALPHA_DECAY: f32 = 0.0228;
+
+impl Simulation {
+    pub fn new(nodes: Vec<GraphNode>, edges: Vec<GraphEdge>) -> Self {
+        Self { nodes, edges, forces: Forces::default(), alpha: 1.0, alpha_target: 0.0 }
+    }
+
+    pub fn alpha(&self) -> f32 {
+        self.alpha
+    }
+
+    /// True once motion has died down enough to stop redrawing.
+    pub fn settled(&self) -> bool {
+        self.alpha < ALPHA_REST && self.alpha_target < ALPHA_REST
+    }
+
+    /// Put heat back in: something changed and the layout should move
+    /// again. `0.3` is a nudge, `1.0` a fresh start.
+    pub fn reheat(&mut self, to: f32) {
+        self.alpha = self.alpha.max(to);
+    }
+
+    /// Hold the layout warm while a drag is in progress, so it keeps
+    /// responding instead of cooling under the pointer.
+    pub fn hold_warm(&mut self, warm: bool) {
+        self.alpha_target = if warm { 0.3 } else { 0.0 };
+        if warm {
+            self.reheat(0.3);
+        }
+    }
+
+    /// Move a node under the pointer and keep it there.
+    pub fn pin(&mut self, ix: usize, x: f32, y: f32) {
+        if let Some(n) = self.nodes.get_mut(ix) {
+            n.x = x;
+            n.y = y;
+            n.vx = 0.0;
+            n.vy = 0.0;
+            n.pinned = true;
+        }
+    }
+
+    pub fn release(&mut self, ix: usize) {
+        if let Some(n) = self.nodes.get_mut(ix) {
+            n.pinned = false;
+        }
+    }
+
+    /// One tick. Forces accumulate into velocity, velocity decays, and
+    /// position follows — so a node keeps moving after the force that
+    /// started it has gone, which is what reads as momentum.
+    pub fn step(&mut self) {
+        let n = self.nodes.len();
+        if n < 2 {
+            return;
+        }
+        self.alpha += (self.alpha_target - self.alpha) * ALPHA_DECAY;
+        let a = self.alpha;
+        let f = self.forces;
+
+        for i in 0..n {
+            for j in i + 1..n {
+                let dx = self.nodes[i].x - self.nodes[j].x;
+                let dy = self.nodes[i].y - self.nodes[j].y;
+                let d2 = (dx * dx + dy * dy).max(1e-4);
+                let d = d2.sqrt();
+                let rep = f.repel / d2 * a;
+                self.nodes[i].vx += rep * dx / d;
+                self.nodes[i].vy += rep * dy / d;
+                self.nodes[j].vx -= rep * dx / d;
+                self.nodes[j].vy -= rep * dy / d;
+            }
+        }
+        for &(p, q) in &self.edges {
+            let dx = self.nodes[q].x - self.nodes[p].x;
+            let dy = self.nodes[q].y - self.nodes[p].y;
+            let d = (dx * dx + dy * dy).sqrt().max(1e-4);
+            let pull = (d - f.link_distance) * f.link_strength * a;
+            self.nodes[p].vx += pull * dx / d;
+            self.nodes[p].vy += pull * dy / d;
+            self.nodes[q].vx -= pull * dx / d;
+            self.nodes[q].vy -= pull * dy / d;
+        }
+        for node in &mut self.nodes {
+            node.vx += (0.5 - node.x) * f.center * a;
+            node.vy += (0.5 - node.y) * f.center * a;
+            node.vx *= f.velocity_decay;
+            node.vy *= f.velocity_decay;
+            if node.pinned {
+                // A pinned node still pushed its neighbours above; it
+                // just does not move itself.
+                node.vx = 0.0;
+                node.vy = 0.0;
+                continue;
+            }
+            node.x = (node.x + node.vx).clamp(0.0, 1.0);
+            node.y = (node.y + node.vy).clamp(0.0, 1.0);
+        }
+    }
+
+    /// Step until at rest, or `max` ticks — whichever comes first.
+    /// Used to seed a layout before the first frame is drawn.
+    pub fn run(&mut self, max: usize) {
+        for _ in 0..max {
+            if self.settled() {
+                break;
+            }
+            self.step();
+        }
+    }
+}
+
 pub fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge], iterations: usize) {
     let n = nodes.len();
     if n < 2 {
@@ -195,6 +381,105 @@ mod tests {
         let neighbor = &nodes[1];
         let d = ((neighbor.x - 0.5).powi(2) + (neighbor.y - 0.5).powi(2)).sqrt();
         assert!((0.1..0.5).contains(&d), "neighbor on the ring: {d}");
+    }
+
+    /// The simulation cools to rest on its own, so the shell knows
+    /// when to stop redrawing. A layout that never settles would keep
+    /// the GPU busy forever on an idle window.
+    #[test]
+    fn a_simulation_cools_to_rest() {
+        let (_d, index) = fixture();
+        let (nodes, edges) = build(&index);
+        let mut sim = Simulation::new(nodes, edges);
+        assert!(!sim.settled(), "starts hot");
+        sim.run(2000);
+        assert!(sim.settled(), "reaches rest, alpha {}", sim.alpha());
+    }
+
+    /// Reheating is what makes an interaction feel alive: the layout
+    /// starts moving again rather than snapping to a new still frame.
+    #[test]
+    fn reheating_restarts_the_motion() {
+        let (_d, index) = fixture();
+        let (nodes, edges) = build(&index);
+        let mut sim = Simulation::new(nodes, edges);
+        sim.run(2000);
+        assert!(sim.settled());
+        sim.reheat(0.5);
+        assert!(!sim.settled(), "a nudge puts it back in motion");
+    }
+
+    /// Momentum: a node keeps moving for a tick or two after the force
+    /// that started it, instead of stopping dead.
+    #[test]
+    fn nodes_carry_velocity_between_ticks() {
+        let (_d, index) = fixture();
+        let (nodes, edges) = build(&index);
+        let mut sim = Simulation::new(nodes, edges);
+        sim.step();
+        assert!(
+            sim.nodes.iter().any(|n| n.vx.abs() > 0.0 || n.vy.abs() > 0.0),
+            "a tick leaves the graph in motion"
+        );
+    }
+
+    /// A pinned node is where the pointer put it and stays there, while
+    /// everything else reacts around it.
+    #[test]
+    fn a_pinned_node_stays_put_while_its_neighbours_move() {
+        let (_d, index) = fixture();
+        let (nodes, edges) = build(&index);
+        let mut sim = Simulation::new(nodes, edges);
+        sim.pin(0, 0.2, 0.8);
+        let others: Vec<(f32, f32)> = sim.nodes[1..].iter().map(|n| (n.x, n.y)).collect();
+        for _ in 0..50 {
+            sim.step();
+        }
+        assert_eq!((sim.nodes[0].x, sim.nodes[0].y), (0.2, 0.8), "the held node did not drift");
+        let moved = sim.nodes[1..]
+            .iter()
+            .zip(&others)
+            .any(|(n, (x, y))| (n.x - x).abs() > 1e-4 || (n.y - y).abs() > 1e-4);
+        assert!(moved, "the rest of the graph responded to it");
+
+        sim.release(0);
+        sim.reheat(1.0);
+        for _ in 0..50 {
+            sim.step();
+        }
+        assert!(
+            (sim.nodes[0].x - 0.2).abs() > 1e-4 || (sim.nodes[0].y - 0.8).abs() > 1e-4,
+            "released, it rejoins the layout"
+        );
+    }
+
+    /// Stepping is deterministic, like the old fixed-iteration layout:
+    /// the same vault draws the same frames every run.
+    #[test]
+    fn stepping_is_deterministic() {
+        let (_d, index) = fixture();
+        let run = || {
+            let (nodes, edges) = build(&index);
+            let mut sim = Simulation::new(nodes, edges);
+            sim.run(200);
+            sim.nodes.iter().map(|n| (n.x, n.y)).collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run(), "two runs, identical frames");
+    }
+
+    /// Holding warm keeps the layout responsive under a drag instead of
+    /// cooling to a standstill while the pointer is still moving.
+    #[test]
+    fn holding_warm_prevents_settling() {
+        let (_d, index) = fixture();
+        let (nodes, edges) = build(&index);
+        let mut sim = Simulation::new(nodes, edges);
+        sim.hold_warm(true);
+        sim.run(5000);
+        assert!(!sim.settled(), "stays warm while held");
+        sim.hold_warm(false);
+        sim.run(5000);
+        assert!(sim.settled(), "and cools once released");
     }
 
     #[test]
