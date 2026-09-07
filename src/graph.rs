@@ -27,11 +27,24 @@ pub struct GraphNode {
     pub tag: Option<String>,
 }
 
-/// Indexes into the node list, a < b, deduplicated.
+/// Indexes into the node list: from → to, deduplicated per direction.
+///
+/// Direction used to be discarded (`a.min(b), a.max(b)`), which threw
+/// away exactly what backlinks are about — "A links to B" and "B links
+/// to A" were indistinguishable. A pair linked both ways is one edge
+/// with `both` set, so it draws a single line with two arrowheads.
 pub type GraphEdge = (usize, usize);
 
+/// An edge and whether it is reciprocated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edge {
+    pub from: usize,
+    pub to: usize,
+    pub both: bool,
+}
+
 /// Every note and every resolved link in the workspace.
-pub fn build(index: &Index) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+pub fn build(index: &Index) -> (Vec<GraphNode>, Vec<Edge>) {
     let names = index.note_names();
     let mut nodes: Vec<GraphNode> = names
         .iter()
@@ -58,23 +71,32 @@ pub fn build(index: &Index) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         .enumerate()
         .map(|(ix, n)| (n.path.clone(), ix))
         .collect();
-    let mut edges: Vec<GraphEdge> = Vec::new();
+    let mut edges: Vec<Edge> = Vec::new();
     for (from, to) in index.edges() {
         let (Some(&a), Some(&b)) = (index_of.get(&from), index_of.get(&to)) else {
             continue;
         };
+        if a == b {
+            continue; // a note linking to itself is not a relationship
+        }
         nodes[a].degree += 1;
         nodes[b].degree += 1;
-        let edge = (a.min(b), a.max(b));
-        if !edges.contains(&edge) {
-            edges.push(edge);
+        // Already have this exact direction? Nothing to add. Have the
+        // opposite? Mark it reciprocated rather than drawing twice.
+        if edges.iter().any(|e| e.from == a && e.to == b) {
+            continue;
         }
+        if let Some(back) = edges.iter_mut().find(|e| e.from == b && e.to == a) {
+            back.both = true;
+            continue;
+        }
+        edges.push(Edge { from: a, to: b, both: false });
     }
     (nodes, edges)
 }
 
 /// The one-hop neighborhood of `center`: outgoing links + backlinks.
-pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<Edge>) {
     let mut neighbors: Vec<PathBuf> = Vec::new();
     for (from, to) in index.edges() {
         let other = if from == center {
@@ -116,7 +138,8 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             tag: None,
         });
     }
-    let edges = (1..nodes.len()).map(|ix| (0, ix)).collect();
+    let edges =
+        (1..nodes.len()).map(|ix| Edge { from: 0, to: ix, both: false }).collect();
     (nodes, edges)
 }
 
@@ -336,7 +359,7 @@ impl Default for Forces {
 #[derive(Debug, Clone)]
 pub struct Simulation {
     pub nodes: Vec<GraphNode>,
-    pub edges: Vec<GraphEdge>,
+    pub edges: Vec<Edge>,
     pub forces: Forces,
     alpha: f32,
     alpha_target: f32,
@@ -348,7 +371,7 @@ pub const ALPHA_REST: f32 = 0.005;
 const ALPHA_DECAY: f32 = 0.0228;
 
 impl Simulation {
-    pub fn new(nodes: Vec<GraphNode>, edges: Vec<GraphEdge>) -> Self {
+    pub fn new(nodes: Vec<GraphNode>, edges: Vec<Edge>) -> Self {
         Self { nodes, edges, forces: Forces::default(), alpha: 1.0, alpha_target: 0.0 }
     }
 
@@ -435,7 +458,7 @@ impl Simulation {
                 }
             }
         }
-        for &(p, q) in &self.edges {
+        for &Edge { from: p, to: q, .. } in &self.edges {
             let dx = self.nodes[q].x - self.nodes[p].x;
             let dy = self.nodes[q].y - self.nodes[p].y;
             let d = (dx * dx + dy * dy).sqrt().max(1e-4);
@@ -474,7 +497,7 @@ impl Simulation {
     }
 }
 
-pub fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge], iterations: usize) {
+pub fn layout(nodes: &mut [GraphNode], edges: &[Edge], iterations: usize) {
     let n = nodes.len();
     if n < 2 {
         return;
@@ -498,7 +521,7 @@ pub fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge], iterations: usize) {
                 fy[j] -= rep * dy / d;
             }
         }
-        for &(a, b) in edges {
+        for &Edge { from: a, to: b, .. } in edges {
             let dx = nodes[b].x - nodes[a].x;
             let dy = nodes[b].y - nodes[a].y;
             let d = (dx * dx + dy * dy).sqrt().max(1e-4);
@@ -628,6 +651,40 @@ pub fn fit_to(
     (zoom, pan_x, pan_y)
 }
 
+/// A filled triangle pointing along a→b, sitting `back` pixels short
+/// of `b` so it lands beside the node rather than under it.
+pub fn arrow_path(
+    a: gpui::Point<gpui::Pixels>,
+    b: gpui::Point<gpui::Pixels>,
+    back: f32,
+    size: f32,
+) -> gpui::Path<gpui::Pixels> {
+    let (dx, dy) = (f32::from(b.x - a.x), f32::from(b.y - a.y));
+    let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+    let (ux, uy) = (dx / len, dy / len);
+    // Tip, pulled back from the node it points at.
+    let tip = gpui::point(
+        gpui::px(f32::from(b.x) - ux * back),
+        gpui::px(f32::from(b.y) - uy * back),
+    );
+    // Two base corners, perpendicular to the direction of travel.
+    let (px_, py) = (-uy, ux);
+    let base_x = f32::from(tip.x) - ux * size;
+    let base_y = f32::from(tip.y) - uy * size;
+    let half = size * 0.45;
+    let mut path = gpui::Path::new(tip);
+    path.line_to(gpui::point(
+        gpui::px(base_x + px_ * half),
+        gpui::px(base_y + py * half),
+    ));
+    path.line_to(gpui::point(
+        gpui::px(base_x - px_ * half),
+        gpui::px(base_y - py * half),
+    ));
+    path.line_to(tip);
+    path
+}
+
 /// A thin filled quad along a→b — `paint_path` fills, so an edge line
 /// is a two-pixel-wide rectangle.
 pub fn line_path(
@@ -691,7 +748,7 @@ mod tests {
     }
 
     /// A synthetic graph of `n` notes in a chain, for scale tests.
-    fn chain(n: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+    fn chain(n: usize) -> (Vec<GraphNode>, Vec<Edge>) {
         let nodes = (0..n)
             .map(|i| {
                 let a = i as f32 / n as f32 * std::f32::consts::TAU;
@@ -708,7 +765,9 @@ mod tests {
                 }
             })
             .collect();
-        let edges = (0..n.saturating_sub(1)).map(|i| (i, i + 1)).collect();
+        let edges = (0..n.saturating_sub(1))
+            .map(|i| Edge { from: i, to: i + 1, both: false })
+            .collect();
         (nodes, edges)
     }
 
@@ -791,6 +850,58 @@ mod tests {
             "no node escaped to infinity"
         );
         assert!(sim.alpha() < 1.0, "it is cooling");
+    }
+
+    /// Direction is what backlinks are about, and it used to be thrown
+    /// away: edges were stored as (min, max), so "A links to B" and "B
+    /// links to A" were the same edge.
+    #[test]
+    fn edges_keep_their_direction() {
+        let (_d, index) = fixture();
+        let (nodes, edges) = build(&index);
+        let ix = |name: &str| {
+            nodes.iter().position(|n| n.path.ends_with(name)).expect(name)
+        };
+        let (hub, a, b) = (ix("Hub.md"), ix("SpokeA.md"), ix("SpokeB.md"));
+
+        // Hub links to SpokeB and SpokeB does not link back.
+        let one_way = edges
+            .iter()
+            .find(|e| (e.from == hub && e.to == b) || (e.from == b && e.to == hub))
+            .expect("hub -> SpokeB exists");
+        assert_eq!(one_way.from, hub, "the edge runs out of the note that wrote it");
+        assert_eq!(one_way.to, b);
+        assert!(!one_way.both, "SpokeB never links back");
+
+        // Hub and SpokeA link to each other.
+        let mutual = edges
+            .iter()
+            .find(|e| (e.from == hub && e.to == a) || (e.from == a && e.to == hub))
+            .expect("hub <-> SpokeA exists");
+        assert!(mutual.both, "a mutual pair is marked reciprocated");
+    }
+
+    /// A pair that links both ways is one edge with two arrowheads, not
+    /// two lines drawn over each other.
+    #[test]
+    fn a_mutual_link_is_one_reciprocated_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.md"), "see [[B]]\n").unwrap();
+        std::fs::write(dir.path().join("B.md"), "see [[A]]\n").unwrap();
+        let index = Index::scan(dir.path());
+        let (_nodes, edges) = build(&index);
+        assert_eq!(edges.len(), 1, "one edge, not two: {edges:?}");
+        assert!(edges[0].both, "marked as going both ways");
+    }
+
+    /// A note linking to itself is not a relationship worth drawing.
+    #[test]
+    fn a_self_link_makes_no_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.md"), "see [[A]] again\n").unwrap();
+        let index = Index::scan(dir.path());
+        let (_nodes, edges) = build(&index);
+        assert!(edges.is_empty(), "no self edge: {edges:?}");
     }
 
     #[test]

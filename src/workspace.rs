@@ -316,7 +316,7 @@ impl GraphViewState {
         &self.sim.nodes
     }
 
-    fn edges(&self) -> &[crate::graph::GraphEdge] {
+    fn edges(&self) -> &[crate::graph::Edge] {
         &self.sim.edges
     }
 
@@ -324,11 +324,11 @@ impl GraphViewState {
     fn neighbourhood(&self, ix: usize) -> std::collections::BTreeSet<usize> {
         let mut set = std::collections::BTreeSet::new();
         set.insert(ix);
-        for &(a, b) in self.edges() {
-            if a == ix {
-                set.insert(b);
-            } else if b == ix {
-                set.insert(a);
+        for e in self.edges() {
+            if e.from == ix {
+                set.insert(e.to);
+            } else if e.to == ix {
+                set.insert(e.from);
             }
         }
         set
@@ -3819,12 +3819,19 @@ impl Workspace {
             keys
         };
         let label_alpha = crate::graph::label_opacity(state.zoom);
-        let edge_px: Vec<((f32, f32), (f32, f32), bool)> = state
+        // (from, to, lit, reciprocated, radius at each end) — the radii
+        // let the arrowhead stop short of the node it points at.
+        let node_r = |n: &crate::graph::GraphNode| {
+            (5.0 + (n.degree as f32).sqrt() * 3.0) * state.zoom.sqrt()
+        };
+        let edge_px: Vec<((f32, f32), (f32, f32), bool, bool, f32, f32)> = state
             .edges()
             .iter()
-            .map(|&(a, b)| {
-                let on = lit.as_ref().is_none_or(|l| l.contains(&a) && l.contains(&b));
-                (at(&state.nodes()[a]), at(&state.nodes()[b]), on)
+            .map(|e| {
+                let on =
+                    lit.as_ref().is_none_or(|l| l.contains(&e.from) && l.contains(&e.to));
+                let (a, b) = (&state.nodes()[e.from], &state.nodes()[e.to]);
+                (at(a), at(b), on, e.both, node_r(a), node_r(b))
             })
             .collect();
         let edge_color = Hsla { a: 0.35, ..t.fg_muted };
@@ -3832,7 +3839,7 @@ impl Workspace {
         let edges_canvas = gpui::canvas(
             move |bounds, _, _| bounds,
             move |bounds, _, window, _| {
-                for (a, b, on) in &edge_px {
+                for (a, b, on, both, ra, rb) in &edge_px {
                     let pa = point(bounds.origin.x + px(a.0), bounds.origin.y + px(a.1));
                     let pb = point(bounds.origin.x + px(b.0), bounds.origin.y + px(b.1));
                     // Edges outside the hovered neighbourhood fade back
@@ -3840,6 +3847,19 @@ impl Workspace {
                     // is still readable while one part is emphasised.
                     let color = if *on { edge_color } else { dim_edge };
                     window.paint_path(crate::graph::line_path(pa, pb, 1.5), color);
+                    // Which way the link points. A pair that links both
+                    // ways gets an arrowhead at each end rather than two
+                    // lines drawn over each other.
+                    window.paint_path(
+                        crate::graph::arrow_path(pa, pb, rb + 2.0, 7.0),
+                        color,
+                    );
+                    if *both {
+                        window.paint_path(
+                            crate::graph::arrow_path(pb, pa, ra + 2.0, 7.0),
+                            color,
+                        );
+                    }
                 }
             },
         )
@@ -4104,7 +4124,7 @@ impl Workspace {
             let at = |n: &crate::graph::GraphNode| (12.0 + n.x * w, n.y * h);
             let edge_px: Vec<((f32, f32), (f32, f32))> = edges
                 .iter()
-                .map(|&(a, b)| (at(&nodes[a]), at(&nodes[b])))
+                .map(|e| (at(&nodes[e.from]), at(&nodes[e.to])))
                 .collect();
             let edge_color = Hsla { a: 0.3, ..t.fg_muted };
             let canvas_el = gpui::canvas(
