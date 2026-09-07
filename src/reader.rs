@@ -295,9 +295,17 @@ impl Render for Reader {
                     let describe: view::Describe = std::rc::Rc::new(
                         move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
                             let base = base.clone()?;
+                            // Same marker the click path reads: a wiki
+                            // destination resolves by stem, not as a
+                            // path, or every `[[Wiki]]` previewed as
+                            // "does not exist".
+                            let (wiki, target) = match dest.strip_prefix("[[") {
+                                Some(stem) => (true, stem.to_string()),
+                                None => (false, dest.to_string()),
+                            };
                             let link = crate::knowledge::RawLink {
-                                target: dest.to_string(),
-                                wiki: false,
+                                target,
+                                wiki,
                                 range: 0..0,
                                 context: String::new(),
                             };

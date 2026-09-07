@@ -399,9 +399,17 @@ impl Workspace {
     /// editor: only http(s) leaves the app, an anchor stays put, and a
     /// path is resolved inside the workspace or ignored.
     fn follow_from_reader(&mut self, dest: &str, cx: &mut Context<Self>) {
+        // `markdown.rs` marks a wiki destination with a `[[` prefix,
+        // because a wiki target is a stem to resolve against the index,
+        // not a path to join onto a directory. Without the distinction
+        // every `[[Wiki]]` in the reading view resolved to nothing.
+        let (wiki, target) = match dest.strip_prefix("[[") {
+            Some(stem) => (true, stem.to_string()),
+            None => (false, dest.to_string()),
+        };
         let link = crate::knowledge::RawLink {
-            target: dest.to_string(),
-            wiki: false,
+            target,
+            wiki,
             range: 0..0,
             context: String::new(),
         };
@@ -1176,7 +1184,15 @@ impl Workspace {
         };
         let editor = editor.clone();
         {
-            editor.update(cx, |editor, cx| editor.flush(cx));
+            // Only flush a buffer the user actually changed. `flush`
+            // runs the save hooks *before* its dirty check, and a hook
+            // that rewrites the document (the `toc` plugin does) marks
+            // it dirty and causes a write. Calling it for every tab a
+            // single click opens meant browsing the sidebar silently
+            // rewrote and saved files nobody had edited.
+            if editor.read(cx).save.is_dirty() {
+                editor.update(cx, |editor, cx| editor.flush(cx));
+            }
             // Viewer-claimed files re-render through the plugin so
             // edits show; everything else previews its own markdown.
             let viewer = editor
@@ -3717,6 +3733,9 @@ impl Workspace {
             searching: false,
         });
         window.focus(&self.graph_focus);
+        // The layout is unbounded, so frame it before the first paint —
+        // otherwise a large vault opens somewhere off screen.
+        self.graph_fit(&GraphFit, window, cx);
         self.graph_tick(cx);
         cx.notify();
     }
@@ -4215,8 +4234,11 @@ impl Workspace {
                     // the graph is pushed around by it, live.
                     if let Some(ix) = graph.node_drag {
                         let base = 900.0 * graph.zoom;
-                        let nx = ((x - graph.pan.0 - 60.0) / base).clamp(0.0, 1.0);
-                        let ny = ((y - graph.pan.1 - 60.0) / base).clamp(0.0, 1.0);
+                        // Layout space is unbounded, so a dragged node
+                        // follows the pointer anywhere rather than
+                        // sticking at the edge of a box.
+                        let nx = (x - graph.pan.0 - 60.0) / base;
+                        let ny = (y - graph.pan.1 - 60.0) / base;
                         graph.sim.pin(ix, nx, ny);
                         graph.sim.reheat(0.3);
                         cx.notify();
@@ -6621,6 +6643,33 @@ mod tests {
     /// A single click is a look; a double click is an edit. Both give
     /// a tab, but only the double click gives an editable one — and
     /// this holds for every file type, not just Markdown.
+    /// Looking at a file must not change it. Opening a preview used to
+    /// call `Editor::flush`, which runs the save hooks *before* its
+    /// dirty check -- a hook that rewrites the document marks it dirty
+    /// and the file is written. Browsing the sidebar therefore rewrote
+    /// and saved notes nobody had edited, and dirtied the git tree.
+    #[gpui::test]
+    fn browsing_a_file_does_not_write_it(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let before = std::fs::read_to_string(&a).unwrap();
+        let mtime = std::fs::metadata(&a).unwrap().modified().unwrap();
+
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.run_until_parked();
+        // And again, the way arrowing through a sidebar does.
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, false, window, cx));
+        cx.run_until_parked();
+
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), before, "contents untouched");
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().modified().unwrap(),
+            mtime,
+            "and the file was not rewritten at all"
+        );
+    }
+
     #[gpui::test]
     fn single_click_previews_and_double_click_edits(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -6664,6 +6713,47 @@ mod tests {
     /// A preview reader must know which file it is showing, or a
     /// relative link in it has no base to resolve against and its hover
     /// preview silently shows nothing.
+    /// A wiki link clicked in the reading view must open its note. The
+    /// reader built every link as `wiki: false`, so `[[Editing]]` was
+    /// classified as a relative path, matched no file, and did nothing —
+    /// in the view a single click now opens, in the release named
+    /// "links that work".
+    #[gpui::test]
+    fn a_wiki_link_in_the_rendered_preview_opens_its_note(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, b) = workspace_fixture();
+        let stem = b.file_stem().unwrap().to_string_lossy().into_owned();
+        std::fs::write(&a, format!("see [[{stem}]]\n")).unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
+        cx.run_until_parked();
+
+        // The destination carries the wiki marker through parsing.
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("expected a preview tab")
+            };
+            let doc = &reader.read(app).document;
+            let crate::markdown::Block::Paragraph(inline) = &doc.blocks[0] else {
+                panic!("paragraph")
+            };
+            assert_eq!(inline.links[0].1, format!("[[{stem}"), "marked as a wiki target");
+        });
+
+        ws.update(cx, |ws, cx| ws.follow_from_reader(&format!("[[{stem}"), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert_eq!(
+                w.tabs[w.active].path(app).as_deref(),
+                Some(b.as_path()),
+                "the wiki link opened its note"
+            );
+        });
+    }
+
     #[gpui::test]
     fn a_preview_reader_knows_its_own_file(cx: &mut TestAppContext) {
         let _home = temp_home();

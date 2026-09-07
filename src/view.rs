@@ -667,6 +667,36 @@ mod tests {
         assert_eq!(runs[0].font.weight, FontWeight::EXTRA_BOLD);
     }
 
+    /// The tiling assertion, pointed at a wiki link nested inside
+    /// emphasis — the shape that produced overlapping spans, and made
+    /// `runs_for` emit more run bytes than the text has. It underlined
+    /// the wrong characters and dropped the tail's weight.
+    #[test]
+    fn a_wiki_link_inside_emphasis_still_tiles_exactly() {
+        let t = Theme::dark();
+        for src in [
+            "**bold [[Wiki]] more**\n",
+            "~~gone [[W]] gone~~\n",
+            "*lead [[W]] tail*\n",
+            "plain [[W]] plain\n",
+            "[[A]] and [b](c.md) and [[D]]\n",
+        ] {
+            let doc = markdown::parse(src);
+            let markdown::Block::Paragraph(para) = &doc.blocks[0] else {
+                panic!("expected paragraph for {src:?}")
+            };
+            let runs = runs_for(para, body(&t), &t);
+            let painted: usize = runs.iter().map(|r| r.len).sum();
+            assert_eq!(
+                painted,
+                para.text.len(),
+                "runs must tile the text exactly for {src:?}: {:?}",
+                para.spans
+            );
+            assert_covers(&runs, para.text.len());
+        }
+    }
+
     #[test]
     fn parsed_paragraph_with_crossing_styles_tiles_exactly() {
         let t = Theme::dark();

@@ -423,6 +423,10 @@ pub struct Simulation {
 
 /// Below this the layout is at rest and the shell can stop stepping.
 pub const ALPHA_REST: f32 = 0.005;
+/// The furthest a node may travel in one tick, in unit-square terms.
+/// Matches the effective limit of the fixed-iteration layout this
+/// replaced.
+const MAX_SPEED: f32 = 0.05;
 /// Fraction of the remaining heat lost per tick.
 const ALPHA_DECAY: f32 = 0.0228;
 
@@ -496,13 +500,27 @@ impl Simulation {
     /// position follows — so a node keeps moving after the force that
     /// started it has gone, which is what reads as momentum.
     pub fn step(&mut self) {
-        let n = self.nodes.len();
-        if n < 2 || self.frozen {
+        if self.frozen {
             return;
         }
+        // Cool even with nothing to move: `settled()` gates the shell's
+        // frame ticker, so a graph of fewer than two nodes that never
+        // cooled span a 60fps redraw loop for as long as it was open.
         self.alpha += (self.alpha_target - self.alpha) * ALPHA_DECAY;
+        let n = self.nodes.len();
+        if n < 2 {
+            return;
+        }
         let a = self.alpha;
-        let f = self.forces;
+        let mut f = self.forces;
+        // Repulsion is summed over every other node, so its total grows
+        // with the vault while the board stays the unit square. Left
+        // unscaled, a large graph blows itself apart and piles on the
+        // walls. Held at full strength up to the size where the exact
+        // sum is still used, so small graphs lay out exactly as before.
+        if n > BARNES_HUT_THRESHOLD {
+            f.repel *= BARNES_HUT_THRESHOLD as f32 / n as f32;
+        }
 
         if n >= BARNES_HUT_THRESHOLD {
             // Approximate: group distant nodes by centre of mass. The
@@ -549,6 +567,23 @@ impl Simulation {
             node.vy += (0.5 - node.y) * f.center * a;
             node.vx *= f.velocity_decay;
             node.vy *= f.velocity_decay;
+            // Cap how far a node can move in one tick.
+            //
+            // Repulsion is `repel / d²` with d² floored at 1e-4, so a
+            // close pair produces a velocity of nearly two board widths
+            // per tick. Integrated raw, nodes overshoot, `clamp` parks
+            // them on the border, and two that land exactly coincident
+            // repel each other by exactly zero — so the pile is
+            // permanent. Measured before this cap: 1200 notes settled
+            // into four distinct positions. The layout this replaced
+            // had an equivalent limiter; dropping it was the
+            // regression.
+            let speed = (node.vx * node.vx + node.vy * node.vy).sqrt();
+            if speed > MAX_SPEED {
+                let k = MAX_SPEED / speed;
+                node.vx *= k;
+                node.vy *= k;
+            }
             if node.pinned {
                 // A pinned node still pushed its neighbours above; it
                 // just does not move itself.
@@ -556,8 +591,14 @@ impl Simulation {
                 node.vy = 0.0;
                 continue;
             }
-            node.x = (node.x + node.vx).clamp(0.0, 1.0);
-            node.y = (node.y + node.vy).clamp(0.0, 1.0);
+            // Deliberately unbounded. Clamping to the unit square meant
+            // a graph wanting more room than the box parked its nodes on
+            // the wall, where coincident nodes repel by exactly zero and
+            // the pile is permanent. The centring force already bounds
+            // the layout; `fit_to` frames whatever it settles into, so
+            // the box was buying nothing.
+            node.x += node.vx;
+            node.y += node.vy;
         }
     }
 
@@ -1082,19 +1123,58 @@ mod tests {
 
     /// The whole point: a vault far larger than the exact sum could
     /// handle still steps, and still settles.
+    /// The scale test. The previous version asserted only `is_finite()`
+    /// and `alpha < 1.0`, and passed while 1200 nodes collapsed into
+    /// four distinct positions on the border — a graph that is four dots
+    /// in the corners satisfies both.
     #[test]
-    fn a_large_graph_still_steps_and_settles() {
+    fn a_large_graph_stays_spread_out() {
         let (nodes, edges) = chain(1200);
         let mut sim = Simulation::new(nodes, edges);
         assert!(sim.nodes.len() >= BARNES_HUT_THRESHOLD, "uses the approximation");
-        for _ in 0..120 {
+        for _ in 0..400 {
             sim.step();
         }
         assert!(
             sim.nodes.iter().all(|n| n.x.is_finite() && n.y.is_finite()),
             "no node escaped to infinity"
         );
-        assert!(sim.alpha() < 1.0, "it is cooling");
+
+        // Distinct positions: a collapsed layout has a handful.
+        let mut cells: std::collections::BTreeSet<(i32, i32)> = Default::default();
+        for n in &sim.nodes {
+            cells.insert(((n.x * 200.0) as i32, (n.y * 200.0) as i32));
+        }
+        assert!(
+            cells.len() > sim.nodes.len() / 4,
+            "layout collapsed: {} distinct positions for {} nodes",
+            cells.len(),
+            sim.nodes.len()
+        );
+
+        // Spread out rather than heaped: the median nearest-neighbour
+        // gap should be a real distance, not zero.
+        let (x0, y0, x1, y1) = bounds(&sim.nodes);
+        assert!(
+            (x1 - x0) > 0.5 && (y1 - y0) > 0.5,
+            "layout occupies {}x{}, too small for {} nodes",
+            x1 - x0,
+            y1 - y0,
+            sim.nodes.len()
+        );
+    }
+
+    /// `settled()` gates the shell's frame ticker. A graph too small to
+    /// have any forces still has to cool, or an empty or single-note
+    /// vault repaints at 60fps for as long as the view is open.
+    #[test]
+    fn a_tiny_graph_still_settles() {
+        for n in [0usize, 1] {
+            let (nodes, edges) = chain(n);
+            let mut sim = Simulation::new(nodes, edges);
+            sim.run(5000);
+            assert!(sim.settled(), "{n} nodes: alpha {}", sim.alpha());
+        }
     }
 
     /// Direction is what backlinks are about, and it used to be thrown

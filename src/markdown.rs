@@ -31,7 +31,11 @@ impl SpanStyle {
 pub struct InlineText {
     pub text: String,
     pub spans: Vec<(Range<usize>, SpanStyle)>,
-    /// Where each link in `text` points, by byte range.
+    /// Where each link in `text` points, by byte range. A wiki link's
+    /// destination is prefixed `[[` so a consumer can resolve it by
+    /// stem rather than as a path — without it the reading view
+    /// classified `[[Editing]]` as a relative path, found no such file,
+    /// and every wiki link in the preview was silently dead.
     ///
     /// `SpanStyle::link` records only *that* a run is a link; the
     /// destination was dropped on the floor, so the rendered view could
@@ -110,6 +114,47 @@ impl InlineBuilder {
     }
 }
 
+/// Mark `range` as a link, splitting any span it partially overlaps so
+/// the result stays non-overlapping and sorted.
+fn apply_link_style(spans: &mut Vec<(Range<usize>, SpanStyle)>, range: Range<usize>) {
+    let mut out: Vec<(Range<usize>, SpanStyle)> = Vec::with_capacity(spans.len() + 2);
+    let mut covered: Vec<Range<usize>> = Vec::new();
+    for (r, st) in spans.iter() {
+        // No overlap: keep as is.
+        if r.end <= range.start || range.end <= r.start {
+            out.push((r.clone(), *st));
+            continue;
+        }
+        // The part before the link keeps the original style.
+        if r.start < range.start {
+            out.push((r.start..range.start, *st));
+        }
+        // The overlapping part gains `link` on top of what it had.
+        let mid = r.start.max(range.start)..r.end.min(range.end);
+        if mid.start < mid.end {
+            out.push((mid.clone(), SpanStyle { link: true, ..*st }));
+            covered.push(mid);
+        }
+        // And the part after keeps the original.
+        if range.end < r.end {
+            out.push((range.end..r.end, *st));
+        }
+    }
+    // Whatever the link covers that no existing span did.
+    covered.sort_by_key(|r| r.start);
+    let mut at = range.start;
+    for c in covered {
+        if at < c.start {
+            out.push((at..c.start, SpanStyle { link: true, ..Default::default() }));
+        }
+        at = at.max(c.end);
+    }
+    if at < range.end {
+        out.push((at..range.end, SpanStyle { link: true, ..Default::default() }));
+    }
+    *spans = out;
+}
+
 /// Turn `[[Target]]` and `[[Target|label]]` into real links.
 ///
 /// CommonMark has no wiki-link syntax, so pulldown-cmark hands these
@@ -176,7 +221,7 @@ fn resolve_wiki_links(inline: &mut InlineText) {
             map[k] = start;
         }
         link_spans.push(start..out.len());
-        links.push((start..out.len(), target.to_string()));
+        links.push((start..out.len(), format!("[[{target}")));
         i += 2 + rel + 2;
     }
     map[src.len()] = out.len();
@@ -188,8 +233,24 @@ fn resolve_wiki_links(inline: &mut InlineText) {
         .map(|(r, st)| (remap(r.start)..remap(r.end), *st))
         .filter(|(r, _)| r.start < r.end)
         .collect();
+    // Markdown links found before the rewrite carry pre-rewrite
+    // offsets, and removing brackets moved everything after each match.
+    // Leaving them stale pointed a link at the wrong words -- or past
+    // the end of the text -- while it still rendered as a link.
+    inline.links = inline
+        .links
+        .iter()
+        .map(|(r, dest)| (remap(r.start)..remap(r.end), dest.clone()))
+        .filter(|(r, _)| r.start < r.end)
+        .collect();
+    // Merge `link` into the styles already covering those bytes rather
+    // than appending a second span. `InlineText` documents its ranges
+    // as non-overlapping, and `view::runs_for` relies on it: two spans
+    // over the same bytes emit two runs, so the painted runs outrun the
+    // text and a wiki link inside `**bold**` underlined the wrong four
+    // characters and lost the tail's weight.
     for r in link_spans {
-        inline.spans.push((r, SpanStyle { link: true, ..Default::default() }));
+        apply_link_style(&mut inline.spans, r);
     }
     inline.spans.sort_by_key(|(r, _)| (r.start, r.end));
     // Wiki targets are appended after any markdown links already found,
@@ -512,7 +573,7 @@ mod tests {
             .collect();
         assert_eq!(
             targets,
-            vec![("Editing", "Editing"), ("Links and notes", "Links and notes")]
+            vec![("Editing", "[[Editing"), ("Links and notes", "[[Links and notes")]
         );
         assert!(
             inline.spans.iter().any(|(r, st)| st.link && &inline.text[r.clone()] == "Editing"),
@@ -527,7 +588,7 @@ mod tests {
         let doc = parse("[[Tables|the table guide]] follows\n");
         let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
         assert_eq!(inline.text, "the table guide follows");
-        assert_eq!(inline.links[0].1, "Tables");
+        assert_eq!(inline.links[0].1, "[[Tables");
         assert_eq!(&inline.text[inline.links[0].0.clone()], "the table guide");
     }
 
@@ -538,7 +599,7 @@ mod tests {
         let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
         assert!(inline.text.contains("[[not a link]]"), "code kept: {}", inline.text);
         assert_eq!(inline.links.len(), 1, "only the real one is a link");
-        assert_eq!(inline.links[0].1, "Real");
+        assert_eq!(inline.links[0].1, "[[Real");
     }
 
     /// Styling around a rewritten link must not end up pointing at the
@@ -596,6 +657,60 @@ mod tests {
                 ("a note", "Notes/a.md"),
             ]
         );
+    }
+
+    /// `InlineText` documents its spans as non-overlapping, and
+    /// `view::runs_for` relies on it: two spans over the same bytes emit
+    /// two runs, so the painted runs outran the text and a wiki link
+    /// inside `**bold**` underlined the wrong characters and lost the
+    /// tail's weight.
+    #[test]
+    fn a_wiki_link_inside_emphasis_keeps_spans_disjoint() {
+        let doc = parse("**bold [[Wiki]] more**\n");
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(inline.text, "bold Wiki more");
+
+        // Sorted, disjoint, in bounds.
+        let mut last = 0usize;
+        for (r, _) in &inline.spans {
+            assert!(r.start >= last, "spans overlap or are unsorted: {:?}", inline.spans);
+            assert!(r.end <= inline.text.len(), "span past the end: {r:?}");
+            last = r.end;
+        }
+        // The link's own bytes carry both styles.
+        let at = inline.text.find("Wiki").unwrap();
+        let (_, st) = inline
+            .spans
+            .iter()
+            .find(|(r, _)| r.start <= at && at < r.end)
+            .expect("a span covers the link");
+        assert!(st.link, "the link text is a link");
+        assert!(st.bold, "and keeps the emphasis it sits inside");
+    }
+
+    /// A wiki link and a markdown link in one paragraph: the rewrite
+    /// shortens the text, so every markdown-link offset after it moves.
+    /// Leaving them stale pointed a link at the wrong words, or past the
+    /// end of the text, while it still rendered as a link.
+    #[test]
+    fn markdown_links_after_a_wiki_link_still_point_at_their_own_text() {
+        let doc = parse("[[Setup]] see [guide](g.md) and [FAQ](f.md)\n");
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(inline.text, "Setup see guide and FAQ");
+        let got: Vec<(&str, &str)> = inline
+            .links
+            .iter()
+            .map(|(r, d)| (&inline.text[r.clone()], d.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("Setup", "[[Setup"), ("guide", "g.md"), ("FAQ", "f.md")],
+            "every link covers its own words"
+        );
+        // And none of them can index outside the text.
+        for (r, _) in &inline.links {
+            assert!(r.end <= inline.text.len(), "range {r:?} past the end");
+        }
     }
 
     /// A link whose text is styled still records one range covering the

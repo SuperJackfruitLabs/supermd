@@ -299,6 +299,15 @@ pub fn ureq_preview_fetcher() -> PreviewFetcher {
         }
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(FETCH_TIMEOUT))
+            // Consent is per domain, so the request must end at the
+            // domain that was granted. ureq defaults to following ten
+            // redirects with https_only off, which let a granted site
+            // redirect the fetch to any host, in cleartext -- to
+            // `http://192.168.1.1/admin/...`, say -- chosen entirely by
+            // the document's link target. That walks around the whole
+            // consent model, so: no redirects, and https only.
+            .https_only(true)
+            .max_redirects(0)
             .build();
         let agent: ureq::Agent = config.into();
         let response = agent.get(url).call().map_err(|e| e.to_string())?;

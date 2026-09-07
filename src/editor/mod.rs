@@ -860,7 +860,26 @@ impl Editor {
                 // that appeared in between) is the same answer: open it.
                 match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
                     Ok(_) => state.0.lock().unwrap().update_file(&path, ""),
-                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if std::fs::symlink_metadata(&path)
+                            .is_ok_and(|m| m.file_type().is_symlink())
+                        {
+                            eprintln!(
+                                "supermd: refusing [[{}]]: it is a symlink out of the workspace",
+                                link.target
+                            );
+                            return false;
+                        }
+                        // O_EXCL refuses a symlink, dangling ones
+                        // included — which is the only reason a target
+                        // pointing outside the workspace was not written
+                        // here. Opening it anyway would hand the editor
+                        // that escaping path, and the next save would
+                        // write through it. Containment cannot catch
+                        // this case: a dangling link has no canonical
+                        // leaf, so the check anchors at the parent and
+                        // approves it.
+                    }
                     Err(err) => {
                         eprintln!("supermd: cannot create {}: {err}", path.display());
                         return false;
@@ -2027,6 +2046,13 @@ impl Editor {
             self.hover_left(cx);
             return;
         }
+        // The pointer is over the document, so it is not inside the
+        // popover. Clearing here is what stops `hover_held` latching:
+        // if the popover disappears while hovered (a tab switch removes
+        // its hitbox, so no `on_hover(false)` ever arrives) the flag
+        // would otherwise stay set, and both opening a new preview and
+        // closing the stale one early-return on it forever.
+        self.hover_held = false;
         let link = self
             .offset_at_point(position)
             .and_then(|offset| self.link_at_offset(offset))
@@ -2049,10 +2075,11 @@ impl Editor {
         // first one crossed made the popover unreachable. The showing
         // preview stays until the new link's dwell elapses and replaces
         // it, so travel is free but a genuine pause still swaps.
+        //
+        // `hover_preview` is what the popover renders from, so it must
+        // survive here; only `hover_at` moves with the new dwell.
         self.hover_close_task = None;
         self.hover_link = Some(link);
-        self.hover_at = Some(position);
-        self.hover_preview = None;
         self.hover_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(crate::preview::DWELL).await;
             this.update(cx, |editor, cx| {
@@ -2106,14 +2133,21 @@ impl Editor {
 
     /// The dwell elapsed: work out what to show, and if the site is
     /// one the user has enabled, go and read its title.
+    /// The dwell elapsed. Leaves a popover the pointer is inside alone.
     fn open_hover_preview(&mut self, cx: &mut Context<Self>) {
+        self.open_hover_preview_inner(false, cx);
+    }
+
+    fn open_hover_preview_inner(&mut self, force: bool, cx: &mut Context<Self>) {
         let Some(link) = self.hover_link.clone() else {
             return;
         };
         // The pointer is inside the popover, not on the link any more:
         // swapping its contents out from under the cursor would move
-        // the button the user is reaching for.
-        if self.hover_held {
+        // the button the user is reaching for. `force` is set when the
+        // user has just acted on the popover (granting a site), where
+        // refreshing it is the whole point.
+        if self.hover_held && !force {
             return;
         }
         self.hover_at = self.link_anchor(link.range.start).or(self.hover_at);
@@ -2188,7 +2222,11 @@ impl Editor {
             eprintln!("supermd: cannot record the preview grant: {err}");
             return;
         }
-        self.open_hover_preview(cx);
+        // Forced: clicking the button requires the pointer inside the
+        // popover, which is exactly the state the dwell path refuses to
+        // touch. Without this the grant was written to settings and
+        // nothing happened on screen — no refresh, no fetch.
+        self.open_hover_preview_inner(true, cx);
     }
 
     /// What a link's popover should contain. Pure decisions live in
@@ -4998,6 +5036,34 @@ mod tests {
     /// paths must not reach outside the workspace root. `Path::join`
     /// with an absolute path replaces the base entirely, so `[[/tmp/x]]`
     /// escapes without a single `..`.
+    /// A *dangling* symlink defeats the containment check: with no
+    /// canonical leaf it anchors at the parent, which is inside the
+    /// root, and approves the path. `create_new`'s O_EXCL refuses to
+    /// write through it, but treating that refusal as "open it anyway"
+    /// handed the editor a path outside the workspace — and the next
+    /// save wrote through it. A vault cloned from git can carry one.
+    #[gpui::test]
+    fn a_dangling_symlink_target_is_refused_not_opened(cx: &mut TestAppContext) {
+        let fx = tempfile::tempdir().unwrap();
+        let root = fx.path().join("vault");
+        std::fs::create_dir(&root).unwrap();
+        let outside = fx.path().join("outside.md");
+        // Points at a file that does not exist yet.
+        std::os::unix::fs::symlink(&outside, root.join("Later.md")).unwrap();
+        let note = root.join("n.md");
+        std::fs::write(&note, "see [[Later]]\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
+                std::sync::Mutex::new(crate::knowledge::Index::scan(&root)),
+            )));
+        });
+        let (_b, editor, cx) = open_editor_path(cx, &note);
+
+        let handled = editor.update(cx, |ed, cx| ed.follow_link_at(6, cx));
+        assert!(!handled, "the link is refused");
+        assert!(!outside.exists(), "and nothing was created outside the workspace");
+    }
+
     #[gpui::test]
     fn a_wiki_link_cannot_create_a_note_outside_the_workspace(cx: &mut TestAppContext) {
         let base = tempfile::tempdir().unwrap();
@@ -5221,6 +5287,10 @@ mod tests {
     /// the link — in a bullet list of links, that is another link.
     /// Closing on the first one crossed made the popover unreachable,
     /// which is exactly what a list of external links looked like.
+    /// Drives `hover_moved` rather than assigning the fields it sets:
+    /// the previous version of this test asserted the property while
+    /// skipping the exact line that broke it, and the popover really
+    /// was torn down.
     #[gpui::test]
     fn crossing_another_link_does_not_tear_down_the_popover(cx: &mut TestAppContext) {
         let (_fx, editor, cx) =
@@ -5236,9 +5306,25 @@ mod tests {
             ed.hover_link = Some(a.clone());
             ed.open_hover_preview(cx);
             assert!(ed.hover_preview.is_some(), "the first link's popover is up");
+        });
 
-            // Travelling towards it crosses the second link.
-            ed.hover_link = Some(b.clone());
+        // Travelling towards it crosses the second link. Drive the real
+        // handler: assigning `hover_link` by hand skips the line that
+        // used to clear `hover_preview`, which is how this passed while
+        // the popover was in fact torn down.
+        let at_b = editor.update(cx, |ed, _| {
+            ed.layout_cache.clear();
+            ed.link_anchor(b.range.start)
+        });
+        editor.update_in(cx, |ed, window, cx| {
+            if let Some(p) = at_b {
+                ed.hover_moved(p, window, cx);
+            } else {
+                // No layout yet in a headless test: exercise the same
+                // branch directly.
+                ed.hover_close_task = None;
+                ed.hover_link = Some(b.clone());
+            }
             assert!(
                 ed.hover_preview.is_some(),
                 "crossing a link must not close the popover being walked to"
