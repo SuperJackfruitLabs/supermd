@@ -460,6 +460,12 @@ impl Index {
     }
 
     /// All tags with their occurrence counts, most-used first.
+    /// The tags on one note, in the order they appear. Used by the
+    /// graph to colour nodes by tag.
+    pub fn note_tags(&self, path: &Path) -> Vec<String> {
+        self.notes.get(path).map(|n| n.tags.clone()).unwrap_or_default()
+    }
+
     pub fn tags(&self) -> Vec<(String, usize)> {
         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
         for data in self.notes.values() {

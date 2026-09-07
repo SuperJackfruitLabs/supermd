@@ -204,6 +204,8 @@ commands! {
         ctx: None, menu: Some((Go, 0)), help: Some(General) },
     ws::GraphFit => { id: "graph_fit", label: "Fit Graph to Window",
         keys: ["cmd-0"], ctx: Some("GraphView"), menu: None, help: Some(General) },
+    ws::GraphColorBy => { id: "graph_color_by", label: "Graph Colour: Folder / Tag / None",
+        keys: ["cmd-g"], ctx: Some("GraphView"), menu: None, help: Some(General) },
     ws::TogglePalette => { id: "palette", label: "Command Palette…",
         keys: ["cmd-shift-p"], ctx: None, menu: Some((Tools, 0)), help: Some(General) },
     ws::InstallPlugins => { id: "install_plugins", label: "Install Plugins…",

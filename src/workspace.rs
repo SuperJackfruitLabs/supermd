@@ -46,6 +46,7 @@ actions!(
         InstallPlugins,
         GraphDismiss,
         GraphFit,
+        GraphColorBy,
         SidebarUp,
         SidebarDown,
         SidebarRename,
@@ -306,6 +307,8 @@ struct GraphViewState {
     hovered: Option<usize>,
     /// Ticks the layout while it still has motion in it.
     ticker: Option<gpui::Task<()>>,
+    /// What node colour means right now.
+    color_by: crate::graph::ColorBy,
 }
 
 impl GraphViewState {
@@ -3689,6 +3692,7 @@ impl Workspace {
             node_drag: None,
             hovered: None,
             ticker: None,
+            color_by: crate::graph::ColorBy::Folder,
         });
         window.focus(&self.graph_focus);
         self.graph_tick(cx);
@@ -3736,6 +3740,24 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Cycle what a node's colour means: folder, tag, or nothing.
+    fn graph_color_by(&mut self, _: &GraphColorBy, _: &mut Window, cx: &mut Context<Self>) {
+        use crate::graph::ColorBy;
+        let Some(graph) = self.graph.as_mut() else { return };
+        graph.color_by = match graph.color_by {
+            ColorBy::Folder => ColorBy::Tag,
+            ColorBy::Tag => ColorBy::None,
+            ColorBy::None => ColorBy::Folder,
+        };
+        let what = match graph.color_by {
+            ColorBy::Folder => "folder",
+            ColorBy::Tag => "tag",
+            ColorBy::None => "nothing",
+        };
+        self.show_command_error(format!("Graph colour: {what}"), cx);
+        cx.notify();
+    }
+
     fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
         self.graph = None;
         self.focus_active(window, cx);
@@ -3767,6 +3789,36 @@ impl Workspace {
         let at = |n: &crate::graph::GraphNode| (pan_x + n.x * base + 60.0, pan_y + n.y * base + 60.0);
 
         let lit = state.hovered.map(|ix| state.neighbourhood(ix));
+
+        // Colour groups. The palette comes from the theme's syntax
+        // colours: they are already chosen to be distinct from each
+        // other and to sit correctly on this background, so a graph
+        // stays coherent when the theme changes.
+        let palette: Vec<Hsla> = vec![
+            t.syntax.function,
+            t.syntax.string,
+            t.syntax.keyword,
+            t.syntax.constant,
+            t.syntax.tag,
+            t.syntax.property,
+        ];
+        // Sorted and deduplicated, so a group's colour is the same on
+        // every open rather than depending on node order.
+        let group_keys: Vec<String> = {
+            let mut keys: Vec<String> = state
+                .nodes()
+                .iter()
+                .filter_map(|n| match state.color_by {
+                    crate::graph::ColorBy::None => None,
+                    crate::graph::ColorBy::Folder => n.folder.clone(),
+                    crate::graph::ColorBy::Tag => n.tag.clone(),
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            keys
+        };
+        let label_alpha = crate::graph::label_opacity(state.zoom);
         let edge_px: Vec<((f32, f32), (f32, f32), bool)> = state
             .edges()
             .iter()
@@ -3808,15 +3860,27 @@ impl Workspace {
             // one neighbourhood is picked out.
             let on = lit.as_ref().is_none_or(|l| l.contains(&ix));
             let is_open = open_path.as_deref() == Some(node.path.as_path());
+            let group = match state.color_by {
+                crate::graph::ColorBy::None => None,
+                crate::graph::ColorBy::Folder => node.folder.as_deref(),
+                crate::graph::ColorBy::Tag => node.tag.as_deref(),
+            };
+            let grouped = crate::graph::color_slot(group, &group_keys, palette.len())
+                .map(|slot| palette[slot]);
             let base_color = if is_open {
                 t.link
+            } else if let Some(c) = grouped {
+                c
             } else if node.degree > 0 {
                 t.accent
             } else {
                 t.fg_muted
             };
             let node_color = if on { base_color } else { Hsla { a: 0.25, ..base_color } };
-            let label_color = if on { t.fg } else { Hsla { a: 0.25, ..t.fg } };
+            let label_color = Hsla {
+                a: if on { label_alpha } else { label_alpha * 0.25 },
+                ..t.fg
+            };
             board = board.child(
                 div()
                     .id(("graph-node", ix))
@@ -3890,6 +3954,7 @@ impl Workspace {
                 .track_focus(&self.graph_focus)
                 .on_action(cx.listener(Self::graph_dismiss))
                 .on_action(cx.listener(Self::graph_fit))
+                .on_action(cx.listener(Self::graph_color_by))
                 .overflow_hidden()
                 .on_mouse_down(
                     gpui::MouseButton::Left,

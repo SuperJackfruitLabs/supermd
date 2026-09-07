@@ -21,6 +21,10 @@ pub struct GraphNode {
     pub pinned: bool,
     /// Link count (in + out) — drives node size.
     pub degree: usize,
+    /// Top-level folder, and first tag, for colour grouping. Resolved
+    /// at build time because the renderer has no index to ask.
+    pub folder: Option<String>,
+    pub tag: Option<String>,
 }
 
 /// Indexes into the node list, a < b, deduplicated.
@@ -35,6 +39,7 @@ pub fn build(index: &Index) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         .map(|(ix, (_, path))| {
             // Deterministic seed positions on a circle, by index.
             let angle = ix as f32 / names.len().max(1) as f32 * std::f32::consts::TAU;
+            let tags = index.note_tags(path);
             GraphNode {
                 path: path.clone(),
                 x: 0.5 + 0.35 * angle.cos(),
@@ -43,6 +48,8 @@ pub fn build(index: &Index) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 vy: 0.0,
                 pinned: false,
                 degree: 0,
+                folder: group_key(path, &index.root, &tags, ColorBy::Folder),
+                tag: group_key(path, &index.root, &tags, ColorBy::Tag),
             }
         })
         .collect();
@@ -91,6 +98,8 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         vy: 0.0,
         pinned: false,
         degree: neighbors.len(),
+        folder: None,
+        tag: None,
     }];
     let n = neighbors.len().max(1) as f32;
     for (ix, path) in neighbors.into_iter().enumerate() {
@@ -103,6 +112,8 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             vy: 0.0,
             pinned: false,
             degree: 1,
+            folder: None,
+            tag: None,
         });
     }
     let edges = (1..nodes.len()).map(|ix| (0, ix)).collect();
@@ -509,6 +520,74 @@ pub fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge], iterations: usize) {
     }
 }
 
+/// How a node is grouped, for colouring.
+///
+/// Obsidian calls these colour groups. Folder is the useful default:
+/// it matches how people already organise, and needs no configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorBy {
+    /// Every node the same — the original look.
+    None,
+    /// The note's top-level folder inside the vault.
+    Folder,
+    /// The note's first tag.
+    Tag,
+}
+
+/// A stable colour slot for a node, or None to use the default.
+///
+/// Returns an index into the caller's palette rather than a colour, so
+/// this stays pure and the theme keeps deciding what things look like.
+/// Slots are assigned by first appearance in `keys`, which is sorted,
+/// so the same vault colours the same way every time.
+pub fn color_slot(key: Option<&str>, keys: &[String], palette_len: usize) -> Option<usize> {
+    if palette_len == 0 {
+        return None;
+    }
+    let key = key?;
+    let ix = keys.iter().position(|k| k == key)?;
+    Some(ix % palette_len)
+}
+
+/// The grouping key for a node: its top-level folder under `root`, or
+/// its first tag. None when the note is at the vault root, or untagged.
+pub fn group_key(
+    path: &Path,
+    root: &Path,
+    tags: &[String],
+    by: ColorBy,
+) -> Option<String> {
+    match by {
+        ColorBy::None => None,
+        ColorBy::Folder => path
+            .strip_prefix(root)
+            .ok()?
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            // A file directly in the vault root has only its own name
+            // as a component, which is not a folder.
+            .filter(|first| path.strip_prefix(root).map(|r| r.components().count() > 1).unwrap_or(false) && !first.is_empty()),
+        ColorBy::Tag => tags.first().cloned(),
+    }
+}
+
+/// Labels crowd into illegibility when zoomed out. Below this they are
+/// hidden; between here and `LABEL_FULL` they fade in.
+pub const LABEL_FADE_START: f32 = 0.55;
+pub const LABEL_FULL: f32 = 0.85;
+
+/// Label opacity at a given zoom: 0 hidden, 1 fully drawn.
+pub fn label_opacity(zoom: f32) -> f32 {
+    if zoom <= LABEL_FADE_START {
+        return 0.0;
+    }
+    if zoom >= LABEL_FULL {
+        return 1.0;
+    }
+    (zoom - LABEL_FADE_START) / (LABEL_FULL - LABEL_FADE_START)
+}
+
 /// The bounding box of a layout, as (min_x, min_y, max_x, max_y).
 /// Empty layouts give the unit square, so callers need no special case.
 pub fn bounds(nodes: &[GraphNode]) -> (f32, f32, f32, f32) {
@@ -624,6 +703,8 @@ mod tests {
                     vy: 0.0,
                     pinned: false,
                     degree: 2,
+                    folder: None,
+                    tag: None,
                 }
             })
             .collect();
@@ -713,6 +794,65 @@ mod tests {
     }
 
     #[test]
+    fn labels_fade_in_rather_than_snapping() {
+        assert_eq!(label_opacity(0.3), 0.0, "hidden when zoomed out");
+        assert_eq!(label_opacity(1.5), 1.0, "solid when zoomed in");
+        let mid = label_opacity((LABEL_FADE_START + LABEL_FULL) / 2.0);
+        assert!((mid - 0.5).abs() < 1e-5, "halfway through the fade: {mid}");
+        // Monotonic, so a slow zoom never flickers.
+        let mut last = -1.0;
+        for i in 0..=40 {
+            let o = label_opacity(i as f32 / 20.0);
+            assert!(o >= last, "opacity went backwards at zoom {}", i as f32 / 20.0);
+            last = o;
+        }
+    }
+
+    #[test]
+    fn folder_grouping_uses_the_top_level_folder() {
+        let root = Path::new("/v");
+        assert_eq!(
+            group_key(Path::new("/v/Guide/Editing.md"), root, &[], ColorBy::Folder).as_deref(),
+            Some("Guide")
+        );
+        assert_eq!(
+            group_key(Path::new("/v/Notes/Daily/x.md"), root, &[], ColorBy::Folder).as_deref(),
+            Some("Notes"),
+            "the top level, not the deepest"
+        );
+        assert_eq!(
+            group_key(Path::new("/v/README.md"), root, &[], ColorBy::Folder),
+            None,
+            "a note at the vault root is in no folder"
+        );
+    }
+
+    #[test]
+    fn tag_grouping_uses_the_first_tag() {
+        let root = Path::new("/v");
+        let tags = vec!["guide".to_string(), "links".to_string()];
+        assert_eq!(
+            group_key(Path::new("/v/a.md"), root, &tags, ColorBy::Tag).as_deref(),
+            Some("guide")
+        );
+        assert_eq!(group_key(Path::new("/v/a.md"), root, &[], ColorBy::Tag), None);
+        assert_eq!(group_key(Path::new("/v/a.md"), root, &tags, ColorBy::None), None);
+    }
+
+    /// Colours must be stable: the same vault paints the same way each
+    /// time, or the graph looks different on every open for no reason.
+    #[test]
+    fn colour_slots_are_stable_and_wrap() {
+        let keys: Vec<String> = ["Code", "Guide", "Notes"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(color_slot(Some("Guide"), &keys, 8), Some(1));
+        assert_eq!(color_slot(Some("Guide"), &keys, 8), Some(1), "same answer twice");
+        assert_eq!(color_slot(Some("Notes"), &keys, 2), Some(0), "wraps past the palette");
+        assert_eq!(color_slot(None, &keys, 8), None);
+        assert_eq!(color_slot(Some("Guide"), &keys, 0), None, "no palette, no colour");
+        assert_eq!(color_slot(Some("Unknown"), &keys, 8), None);
+    }
+
+    #[test]
     fn bounds_cover_every_node() {
         let (_d, index) = fixture();
         let (nodes, _) = build(&index);
@@ -754,6 +894,8 @@ mod tests {
             vy: 0.0,
             pinned: false,
             degree: 0,
+            folder: None,
+            tag: None,
         }];
         let (zoom, px_, py) = fit_to(&one, (800.0, 600.0), 40.0);
         assert!(zoom.is_finite() && px_.is_finite() && py.is_finite());
