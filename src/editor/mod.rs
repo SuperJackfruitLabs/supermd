@@ -160,6 +160,12 @@ pub struct Editor {
     toolbar_visible: bool,
     /// Settle timer; replacing it cancels the pending reveal.
     toolbar_task: Option<gpui::Task<()>>,
+    /// The link the pointer is resting on, the dwell task that will
+    /// open its popover, and what to draw once it does.
+    hover_link: Option<crate::knowledge::RawLink>,
+    hover_task: Option<gpui::Task<()>>,
+    hover_at: Option<gpui::Point<Pixels>>,
+    hover_preview: Option<crate::preview::Preview>,
 }
 
 /// Snapshot taken right after a paste lands, so a background enricher
@@ -315,6 +321,10 @@ impl Editor {
             completion: None,
             toolbar_visible: false,
             toolbar_task: None,
+            hover_link: None,
+            hover_task: None,
+            hover_at: None,
+            hover_preview: None,
         };
         editor.restyle(langs);
         editor.schedule_status(cx);
@@ -1933,13 +1943,14 @@ impl Editor {
     fn on_root_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.scrollbar_dragging {
             self.scrollbar_scrub(event.position, cx);
             return;
         }
+        self.hover_moved(event.position, window, cx);
         if self.dragging {
             if let Some(offset) = self.offset_at_point(event.position) {
                 // A press on a link left the caret alone. The moment the
@@ -1992,6 +2003,138 @@ impl Editor {
                 })
                 .ok();
             }));
+        }
+    }
+
+    /// The pointer moved. Starts, keeps, or cancels a link's dwell.
+    ///
+    /// Cheap by construction: the hit test is a binary search over the
+    /// link cache, and the common case — moving over prose, or moving
+    /// within the same link — does no work beyond that and starts no
+    /// task.
+    fn hover_moved(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_format() || self.dragging {
+            self.hover_left(cx);
+            return;
+        }
+        let link = self
+            .offset_at_point(position)
+            .and_then(|offset| self.link_at_offset(offset))
+            .cloned();
+        let Some(link) = link else {
+            self.hover_left(cx);
+            return;
+        };
+        // Still the same link: keep its dwell running rather than
+        // restarting it on every pixel, so sliding within a link opens
+        // the popover on time.
+        if self.hover_link.as_ref().is_some_and(|l| l.range == link.range) {
+            return;
+        }
+        self.hover_link = Some(link);
+        self.hover_at = Some(position);
+        self.hover_preview = None;
+        self.hover_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(crate::preview::DWELL).await;
+            this.update(cx, |editor, cx| {
+                editor.open_hover_preview(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// The pointer left the link. Closes at once and drops the dwell:
+    /// a popover that outlives the pointer is in the way.
+    fn hover_left(&mut self, cx: &mut Context<Self>) {
+        if self.hover_link.is_some() || self.hover_preview.is_some() {
+            self.hover_link = None;
+            self.hover_task = None;
+            self.hover_at = None;
+            self.hover_preview = None;
+            cx.notify();
+        }
+    }
+
+    /// The dwell elapsed: work out what to show.
+    fn open_hover_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(link) = self.hover_link.clone() else {
+            return;
+        };
+        self.hover_preview = Some(self.preview_for(&link, cx));
+        cx.notify();
+    }
+
+    /// What a link's popover should contain. Pure decisions live in
+    /// `crate::preview`; this supplies the filesystem and the index.
+    fn preview_for(
+        &self,
+        link: &crate::knowledge::RawLink,
+        cx: &App,
+    ) -> crate::preview::Preview {
+        use crate::knowledge::LinkTarget;
+        use crate::preview::{self as pv, Preview};
+
+        match crate::knowledge::classify(link) {
+            LinkTarget::External(url) => {
+                let grants = crate::settings::load(&crate::settings::config_dir())
+                    .plugin_grants
+                    .get("supermd")
+                    .cloned()
+                    .unwrap_or_default();
+                // The *visible* text, not `context` — that is the
+                // whole line, which never looks like a hostname and so
+                // would silently disable the mismatch warning.
+                let text = self.core.buffer.text();
+                let shown = pv::display_text(
+                    text.get(link.range.clone()).unwrap_or_default(),
+                );
+                pv::external_preview(&url, shown, &grants)
+            }
+            LinkTarget::Anchor(a) => {
+                let text = self.core.buffer.text();
+                match crate::knowledge::heading_offset(&text, &a) {
+                    Some(off) => Preview::Anchor {
+                        heading: text[off..].lines().next().unwrap_or("").trim_start_matches('#')
+                            .trim().to_string(),
+                        excerpt: pv::excerpt(&text[off..], 6),
+                    },
+                    None => Preview::Missing { name: format!("#{a}") },
+                }
+            }
+            LinkTarget::Wiki(name) | LinkTarget::Relative(name) => {
+                let resolved = cx
+                    .try_global::<crate::knowledge::KnowledgeState>()
+                    .and_then(|s| s.0.lock().unwrap().resolve(&self.path, link));
+                let Some(path) = resolved else {
+                    return Preview::Missing { name };
+                };
+                if crate::files::is_image_path(&path) {
+                    return Preview::Image { path };
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    return Preview::Missing { name };
+                };
+                let is_md = matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("md" | "markdown" | "mdown" | "mdx")
+                );
+                if is_md {
+                    Preview::Note {
+                        title: pv::title_of(&text, &path),
+                        excerpt: pv::excerpt(&text, 8),
+                    }
+                } else {
+                    Preview::Code {
+                        language: crate::reader::language_for_path(&path),
+                        excerpt: pv::excerpt(&text, 10),
+                    }
+                }
+            }
         }
     }
 
@@ -3208,6 +3351,116 @@ impl Render for Editor {
             ))
         });
 
+        // The link hover popover. Anchored where the pointer rested,
+        // and snapped into the window so a link near an edge still
+        // shows its preview rather than half of one.
+        let hover_popover = self.hover_preview.as_ref().zip(self.hover_at).map(|(pv, at)| {
+            use crate::preview::{Consent, Preview};
+            let body = |title: String, sub: Option<String>, text: String, t: &Theme| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg_strong)
+                            .child(SharedString::from(title)),
+                    )
+                    .children(sub.map(|s| {
+                        div()
+                            .text_size(px(t.ui_size - 1.))
+                            .text_color(t.fg_muted)
+                            .child(SharedString::from(s))
+                    }))
+                    .when(!text.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .mt_1()
+                                .text_size(px(t.ui_size - 1.))
+                                .text_color(t.fg)
+                                .child(SharedString::from(text)),
+                        )
+                    })
+            };
+            let inner = match pv {
+                Preview::Note { title, excerpt } => {
+                    body(title.clone(), None, excerpt.clone(), &t)
+                }
+                Preview::Code { language, excerpt } => body(
+                    language.clone().unwrap_or_else(|| "Text".into()),
+                    None,
+                    excerpt.clone(),
+                    &t,
+                ),
+                Preview::Anchor { heading, excerpt } => {
+                    body(heading.clone(), None, excerpt.clone(), &t)
+                }
+                Preview::Image { path } => body(
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    Some("Image".into()),
+                    String::new(),
+                    &t,
+                ),
+                Preview::Missing { name } => body(
+                    name.clone(),
+                    Some("Does not exist — click to create".into()),
+                    String::new(),
+                    &t,
+                ),
+                Preview::External { url, domain, mismatch, consent, fetched } => {
+                    let sub = match (consent, fetched) {
+                        (Consent::Granted, Some(m)) => m.description.clone(),
+                        (Consent::Ungranted, _) => {
+                            Some("Previews are off for this site".into())
+                        }
+                        (Consent::Denied, _) => Some("Previews refused for this site".into()),
+                        _ => None,
+                    };
+                    let title = match (consent, fetched) {
+                        (Consent::Granted, Some(m)) => m.title.clone(),
+                        _ if domain.is_empty() => url.clone(),
+                        _ => domain.clone(),
+                    };
+                    body(title, sub, url.clone(), &t).when(*mismatch, |d| {
+                        d.child(
+                            div()
+                                .mt_1()
+                                .text_size(px(t.ui_size - 1.))
+                                // The palette's red. A dedicated
+                                // `warning` colour would have to be
+                                // threaded through `Theme::map_colors`
+                                // and every theme TOML, or flux warming
+                                // would miss it — not worth it for one
+                                // line.
+                                .text_color(t.diff_deleted_fg)
+                                .child(SharedString::from(
+                                    "⚠ the link text names a different site",
+                                )),
+                        )
+                    })
+                }
+            };
+            deferred(
+                anchored()
+                    .position(at + gpui::point(px(0.), px(18.)))
+                    .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        div()
+                            .max_w(px(360.))
+                            .bg(t.panel_bg)
+                            .border_1()
+                            .border_color(t.border)
+                            .rounded_lg()
+                            .shadow_lg()
+                            .overflow_hidden()
+                            .p_3()
+                            .child(inner),
+                    ),
+            )
+        });
+
         let diffing = self.diff.is_some();
         let diff_header = self.diff.as_ref().map(|d| {
             div()
@@ -3499,6 +3752,7 @@ impl Render for Editor {
             )
                 .children(scrollbar)
                 .children(toolbar)
+                .children(hover_popover)
                 .children(completion_el)
                 .into_any_element()
             })
@@ -4758,6 +5012,63 @@ mod tests {
     /// cache that drifts from the authority is worse than no cache:
     /// clicks would follow links that are no longer there, or miss ones
     /// that are.
+    /// Hovering a note link previews the note it points at, without
+    /// opening anything.
+    #[gpui::test]
+    fn hovering_a_note_link_previews_the_note(cx: &mut TestAppContext) {
+        let fx = tempfile::tempdir().unwrap();
+        let target = fx.path().join("Target.md");
+        std::fs::write(&target, "# The Target\n\nFirst line of it.\n").unwrap();
+        let note = fx.path().join("n.md");
+        std::fs::write(&note, "see [[Target]] here\n").unwrap();
+        cx.update(|cx| {
+            cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
+                std::sync::Mutex::new(crate::knowledge::Index::scan(fx.path())),
+            )));
+        });
+        let (_backups, editor, cx) = open_editor_path(cx, &note);
+
+        let link = editor.update(cx, |ed, _| ed.link_at_offset(6).cloned().expect("on the link"));
+        let preview = cx.update(|_, app| editor.read(app).preview_for(&link, app));
+        let crate::preview::Preview::Note { title, excerpt } = preview else {
+            panic!("expected a note preview, got {preview:?}")
+        };
+        assert_eq!(title, "The Target");
+        assert!(excerpt.contains("First line of it."), "shows the note's opening: {excerpt}");
+    }
+
+    /// A wiki link with nothing behind it says so, rather than looking
+    /// like a failure — clicking it is what creates the note.
+    #[gpui::test]
+    fn hovering_an_unresolved_link_says_it_does_not_exist(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "see [[Nowhere]] here\n");
+        let link = editor.update(cx, |ed, _| ed.link_at_offset(6).cloned().expect("on the link"));
+        let preview = cx.update(|_, app| editor.read(app).preview_for(&link, app));
+        assert!(
+            matches!(preview, crate::preview::Preview::Missing { .. }),
+            "got {preview:?}"
+        );
+    }
+
+    /// The load-bearing privacy property: hovering an external link on
+    /// a domain the user has not enabled must not fetch anything. The
+    /// popover shows only what is knowable locally.
+    #[gpui::test]
+    fn hovering_an_external_link_fetches_nothing_without_consent(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "see [paypal.com](https://evil.example) here\n");
+        let link = editor.update(cx, |ed, _| ed.link_at_offset(6).cloned().expect("on the link"));
+        let preview = cx.update(|_, app| editor.read(app).preview_for(&link, app));
+        let crate::preview::Preview::External { domain, consent, fetched, mismatch, .. } = preview
+        else {
+            panic!("expected an external preview")
+        };
+        assert_eq!(domain, "evil.example");
+        assert_eq!(consent, crate::preview::Consent::Ungranted);
+        assert_eq!(fetched, None, "nothing is fetched before consent");
+        assert!(mismatch, "and the text naming another site is flagged");
+    }
+
     #[gpui::test]
     fn the_link_cache_agrees_with_a_fresh_scan(cx: &mut TestAppContext) {
         let doc = "[[Alpha]] and [b](c.md) and <https://x.dev> `[[not a link]]`\n\n                   ```\n[[fenced]]\n```\n\nlast [[Omega]]\n";

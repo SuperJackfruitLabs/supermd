@@ -96,6 +96,24 @@ fn same_site(a: &str, b: &str) -> bool {
         || b.to_ascii_lowercase().ends_with(&format!(".{}", a.to_ascii_lowercase()))
 }
 
+/// The visible text of a link, from its source slice.
+///
+/// `[the spec](https://x)` reads "the spec"; `[[Note|label]]` reads
+/// "label". Needed because `RawLink::context` is the whole containing
+/// line — useful for backlink display, useless for asking whether the
+/// text a reader sees names a different site than the destination.
+pub fn display_text(slice: &str) -> &str {
+    if let Some(inner) = slice.strip_prefix("[[").and_then(|r| r.strip_suffix("]]")) {
+        return inner.split('|').next_back().unwrap_or(inner).trim();
+    }
+    if slice.starts_with('[') {
+        if let Some(close) = slice.find("](") {
+            return slice[1..close].trim();
+        }
+    }
+    slice.trim()
+}
+
 /// Whether this domain may be contacted, from the stored grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consent {
@@ -279,6 +297,17 @@ mod tests {
         // Hostname-shaped text pointing somewhere non-https is worth
         // flagging on its own.
         assert!(text_target_mismatch("example.com", "notaurl"));
+    }
+
+    #[test]
+    fn display_text_is_what_the_reader_sees() {
+        assert_eq!(display_text("[the spec](https://x.dev)"), "the spec");
+        assert_eq!(display_text("[[Note]]"), "Note");
+        assert_eq!(display_text("[[Note|the label]]"), "the label");
+        assert_eq!(display_text("[paypal.com](https://evil.example)"), "paypal.com");
+        // Not link-shaped: the slice itself, so a caller never gets a
+        // surprise empty string.
+        assert_eq!(display_text("plain"), "plain");
     }
 
     #[test]
