@@ -2043,11 +2043,13 @@ impl Editor {
             self.hover_close_task = None;
             return;
         }
-        // Moving to a different link closes the old popover outright —
-        // the grace period exists for travel to the popover, not for
-        // sliding along a line of links.
+        // Moving to a different link does NOT tear the popover down.
+        // Reaching a popover means crossing whatever lies between, and
+        // in a list of links that is another link — closing on the
+        // first one crossed made the popover unreachable. The showing
+        // preview stays until the new link's dwell elapses and replaces
+        // it, so travel is free but a genuine pause still swaps.
         self.hover_close_task = None;
-        self.hover_held = false;
         self.hover_link = Some(link);
         self.hover_at = Some(position);
         self.hover_preview = None;
@@ -2108,6 +2110,13 @@ impl Editor {
         let Some(link) = self.hover_link.clone() else {
             return;
         };
+        // The pointer is inside the popover, not on the link any more:
+        // swapping its contents out from under the cursor would move
+        // the button the user is reaching for.
+        if self.hover_held {
+            return;
+        }
+        self.hover_at = self.link_anchor(link.range.start).or(self.hover_at);
         let preview = self.preview_for(&link, cx);
         // A granted domain we have not read yet: fetch once, in the
         // background. The task lives in `hover_task`, so moving the
@@ -2258,6 +2267,24 @@ impl Editor {
 
     /// Window point just above the selection start, if that line is
     /// currently laid out.
+    /// Where a link's popover should sit: just under the start of the
+    /// link itself, from the laid-out glyphs.
+    ///
+    /// Not the pointer position. Anchoring to the pointer put the
+    /// popover wherever the pointer happened to enter the link, which
+    /// in a tight list landed it below the *next* item — so reaching it
+    /// meant crossing another link.
+    fn link_anchor(&self, byte: usize) -> Option<Point<Pixels>> {
+        let line_ix = self.core.buffer.line_of_byte(byte);
+        let entry = self.layout_cache.get(&line_ix)?;
+        let disp = display::src_to_disp(&entry.display, byte);
+        let pos = entry.line.position_for_index(disp, entry.line_height)?;
+        Some(point(
+            entry.origin.x + pos.x,
+            entry.origin.y + pos.y + entry.line_height + px(4.),
+        ))
+    }
+
     fn toolbar_anchor(&self) -> Option<Point<Pixels>> {
         let start = self.core.selection.range().start;
         let line_ix = self.core.buffer.line_of_byte(start);
@@ -3581,7 +3608,7 @@ impl Render for Editor {
             };
             deferred(
                 anchored()
-                    .position(at + gpui::point(px(0.), px(18.)))
+                    .position(at)
                     .anchor(Corner::TopLeft)
                     .snap_to_window_with_margin(px(8.))
                     .child(
@@ -5190,6 +5217,57 @@ mod tests {
 
     /// A wiki link with nothing behind it says so, rather than looking
     /// like a failure — clicking it is what creates the note.
+    /// Reaching a popover means crossing whatever sits between it and
+    /// the link — in a bullet list of links, that is another link.
+    /// Closing on the first one crossed made the popover unreachable,
+    /// which is exactly what a list of external links looked like.
+    #[gpui::test]
+    fn crossing_another_link_does_not_tear_down_the_popover(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "- [[Alpha]]\n- [[Beta]]\n");
+        let (a, b) = editor.update(cx, |ed, _| {
+            let a = ed.link_at_offset(4).cloned().expect("alpha");
+            let b = ed.link_at_offset(16).cloned().expect("beta");
+            (a, b)
+        });
+        assert_ne!(a.target, b.target, "two distinct links");
+
+        editor.update(cx, |ed, cx| {
+            ed.hover_link = Some(a.clone());
+            ed.open_hover_preview(cx);
+            assert!(ed.hover_preview.is_some(), "the first link's popover is up");
+
+            // Travelling towards it crosses the second link.
+            ed.hover_link = Some(b.clone());
+            assert!(
+                ed.hover_preview.is_some(),
+                "crossing a link must not close the popover being walked to"
+            );
+        });
+    }
+
+    /// Once the pointer is inside the popover, a dwell that fires late
+    /// must not swap its contents — that moves the button out from
+    /// under the click.
+    #[gpui::test]
+    fn a_held_popover_is_not_replaced_underneath_the_pointer(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "n.md", "- [[Alpha]]\n- [[Beta]]\n");
+        editor.update(cx, |ed, cx| {
+            let a = ed.link_at_offset(4).cloned().expect("alpha");
+            let b = ed.link_at_offset(16).cloned().expect("beta");
+            ed.hover_link = Some(a);
+            ed.open_hover_preview(cx);
+            let shown = ed.hover_preview.clone();
+
+            // Pointer now inside the popover; a stale dwell fires.
+            ed.hover_held = true;
+            ed.hover_link = Some(b);
+            ed.open_hover_preview(cx);
+            assert_eq!(ed.hover_preview, shown, "the popover under the pointer is left alone");
+        });
+    }
+
     #[gpui::test]
     fn hovering_an_unresolved_link_says_it_does_not_exist(cx: &mut TestAppContext) {
         let (_fx, editor, cx) = open_editor(cx, "n.md", "see [[Nowhere]] here\n");
