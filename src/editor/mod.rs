@@ -117,6 +117,14 @@ pub struct Editor {
     spans: Vec<StyleSpan>,
     line_kinds: Vec<LineKind>,
     blocks: Vec<blocks::BlockInfo>,
+    /// Every followable link in the document, in document order.
+    ///
+    /// Recomputed in `restyle` — on open and on edit, never per frame —
+    /// because `extract_all_links` costs ~7.65 ms on a 1 MB document.
+    /// Hover hit-testing runs on every pointer move and could not
+    /// afford that; neither, really, could the click path, which paid
+    /// it once per press.
+    links: Vec<crate::knowledge::RawLink>,
     claims: Vec<(usize, projector::Claim)>,
     /// Inline-cache generation this editor last styled against.
     inline_gen: u64,
@@ -283,6 +291,7 @@ impl Editor {
             spans: Vec::new(),
             line_kinds: Vec::new(),
             blocks: Vec::new(),
+            links: Vec::new(),
             claims: Vec::new(),
             inline_gen: 0,
             projection: Vec::new(),
@@ -337,8 +346,36 @@ impl Editor {
             .into()
     }
 
+    /// The followable link containing `offset`, from the cache.
+    ///
+    /// `extract_all_links` returns links in document order, so the
+    /// ranges are sorted and disjoint and a binary search answers in
+    /// log time — cheap enough for a pointer-move handler.
+    pub(crate) fn link_at_offset(&self, offset: usize) -> Option<&crate::knowledge::RawLink> {
+        let ix = self
+            .links
+            .binary_search_by(|l| {
+                if l.range.end <= offset {
+                    std::cmp::Ordering::Less
+                } else if offset < l.range.start {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok()?;
+        self.links.get(ix)
+    }
+
     fn restyle(&mut self, langs: &Languages) {
         let text = self.core.buffer.text();
+        // Links only mean anything in a Markdown document; a code file's
+        // click path is gated on `can_format()` and never follows one.
+        self.links = if matches!(self.provider, Provider::Markdown) {
+            crate::knowledge::extract_all_links(&text)
+        } else {
+            Vec::new()
+        };
         self.spans = match &self.provider {
             Provider::Markdown => spans::markdown_spans_highlighted(&text, langs),
             Provider::Code(lang) => spans::code_spans(&text, lang.as_str(), langs),
@@ -1812,8 +1849,10 @@ impl Editor {
         self.pending_link = None;
         if !event.modifiers.shift {
             if let Some(offset) = self.offset_at_point(event.position) {
-                let text = self.core.buffer.text();
-                let link = crate::knowledge::Index::link_at(&text, offset);
+                // From the cache built in `restyle`, not a fresh scan:
+                // this runs on every press, and extracting links costs
+                // ~7.65 ms on a 1 MB document.
+                let link = self.link_at_offset(offset).cloned();
                 let on_link = link.is_some();
                 // "Revealed" is span overlap, not a shared line — the
                 // same rule display::revealed uses. A link merely on the
@@ -4715,6 +4754,46 @@ mod tests {
     /// heading. Anchors used to be classified as relative paths, joined
     /// onto a directory, resolved to nothing, and silently do nothing —
     /// so every link the `toc` plugin generates was dead.
+    /// The link cache must answer exactly what a fresh scan would. A
+    /// cache that drifts from the authority is worse than no cache:
+    /// clicks would follow links that are no longer there, or miss ones
+    /// that are.
+    #[gpui::test]
+    fn the_link_cache_agrees_with_a_fresh_scan(cx: &mut TestAppContext) {
+        let doc = "[[Alpha]] and [b](c.md) and <https://x.dev> `[[not a link]]`\n\n                   ```\n[[fenced]]\n```\n\nlast [[Omega]]\n";
+        let (_fx, editor, cx) = open_editor(cx, "n.md", doc);
+        editor.update(cx, |ed, _| {
+            let fresh = crate::knowledge::extract_all_links(&ed.core.buffer.text());
+            for offset in 0..doc.len() {
+                let cached = ed.link_at_offset(offset).map(|l| l.range.clone());
+                let expected =
+                    fresh.iter().find(|l| l.range.contains(&offset)).map(|l| l.range.clone());
+                assert_eq!(cached, expected, "offset {offset} disagrees");
+            }
+        });
+    }
+
+    /// An edit must invalidate the cache. `restyle` rebuilds it, and
+    /// this is the test that fails if a future edit path forgets to
+    /// call through it.
+    #[gpui::test]
+    fn editing_rebuilds_the_link_cache(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "no links here\n");
+        editor.update(cx, |ed, _| assert!(ed.link_at_offset(3).is_none()));
+
+        cx.simulate_input("[[Added]] ");
+        cx.run_until_parked();
+        editor.update(cx, |ed, _| {
+            let text = ed.core.buffer.text();
+            let at = text.find("Added").expect("typed");
+            assert_eq!(
+                ed.link_at_offset(at).map(|l| l.target.clone()),
+                Some("Added".to_string()),
+                "a link typed just now is in the cache"
+            );
+        });
+    }
+
     #[gpui::test]
     fn an_anchor_link_moves_the_cursor_to_its_heading(cx: &mut TestAppContext) {
         let doc = "# Top\n\n[jump](#the-target)\n\n## The target\n\ntail\n";

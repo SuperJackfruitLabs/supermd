@@ -797,6 +797,13 @@ impl Workspace {
             }
             PreviewPlan::ActivateExisting(_) => unreachable!(),
         }
+        // A single click is a look, not an edit: the tab opens read-only
+        // and rendered, whatever the file is. A double click goes
+        // through `open_path` and lands in Edit view. An image tab has
+        // no editable view to preview.
+        if matches!(self.tabs.get(self.active), Some(Tab::Editor { .. })) {
+            self.show_as_preview(self.active, window, cx);
+        }
         if let Some(tree) = &mut self.tree {
             tree.expand_to(path);
         }
@@ -843,9 +850,14 @@ impl Workspace {
             .iter()
             .position(|tab| tab.path(cx).as_deref() == Some(path))
         {
-            // A deliberate open pins the tab it lands on.
+            // A deliberate open pins the tab it lands on, and puts it
+            // in Edit view: a single click left it read-only, and the
+            // double click is the user asking to edit.
             if self.preview_tab == Some(ix) {
                 self.preview_tab = None;
+            }
+            if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(ix) {
+                *view = EditorView::Edit;
             }
             self.set_active(ix, window, cx);
             return;
@@ -1040,16 +1052,31 @@ impl Workspace {
     }
 
     fn toggle_preview(&mut self, _: &TogglePreview, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Tab::Editor { editor, view }) = self.tabs.get(self.active) else {
+        let Some(Tab::Editor { view, .. }) = self.tabs.get(self.active) else {
             return;
         };
-        let editor = editor.clone();
-        let showing = matches!(view, EditorView::Preview(_));
-        if showing {
+        if matches!(view, EditorView::Preview(_)) {
             if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
                 *view = EditorView::Edit;
             }
+            self.focus_active(window, cx);
+            cx.notify();
         } else {
+            self.show_as_preview(self.active, window, cx);
+            self.focus_active(window, cx);
+        }
+    }
+
+    /// Render `tab_ix` as a read-only preview. A viewer-claimed file
+    /// re-renders through its plugin; a Markdown file is parsed as
+    /// Markdown; anything else is wrapped as code, because handing
+    /// source to the CommonMark parser reflows it into prose.
+    fn show_as_preview(&mut self, tab_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Tab::Editor { editor, .. }) = self.tabs.get(tab_ix) else {
+            return;
+        };
+        let editor = editor.clone();
+        {
             editor.update(cx, |editor, cx| editor.flush(cx));
             // Viewer-claimed files re-render through the plugin so
             // edits show; everything else previews its own markdown.
@@ -1060,18 +1087,36 @@ impl Workspace {
                 .and_then(|e| e.to_str())
                 .and_then(crate::extensions::viewer_for_extension);
             if let Some(plugin) = viewer {
-                self.spawn_viewer_render(plugin, self.active, window, cx);
+                self.spawn_viewer_render(plugin, tab_ix, window, cx);
             } else {
                 let title = editor.read(cx).title();
                 let text = editor.read(cx).text();
+                let path = editor.read(cx).path().to_path_buf();
                 let langs = languages(cx);
-                let reader = cx.new(|cx| Reader::from_source(title, &text, &langs, cx));
-                if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(self.active) {
+                // Only a Markdown file is parsed as Markdown. Anything
+                // else is wrapped in a fence and rendered as the code it
+                // is: feeding Rust source to the CommonMark parser turned
+                // doc comments into paragraphs, reflowed the source, and
+                // made every 4-space-indented block an indented code
+                // block.
+                let source = if matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("md" | "markdown" | "mdown" | "mdx")
+                ) {
+                    text
+                } else {
+                    let lang = crate::reader::language_for_path(&path);
+                    crate::reader::source_as_document(&text, lang.as_deref())
+                };
+                let reader = cx.new(|cx| Reader::from_source(title, &source, &langs, cx));
+                if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(tab_ix) {
                     *view = EditorView::Preview(reader);
                 }
             }
         }
-        self.focus_active(window, cx);
+        // Focus is the caller's decision, not this method's: keyboard
+        // browsing previews each row it lands on while focus stays in
+        // the sidebar, so the arrows keep working.
         cx.notify();
     }
 
@@ -6043,6 +6088,85 @@ mod tests {
 
     // ── edit/preview flip, new file ─────────────────────────────────────
 
+    /// Previewing a code file must render it as code. It used to hand
+    /// the source to the CommonMark parser: doc comments became
+    /// paragraphs, the source was reflowed, and any four-space-indented
+    /// block turned into an indented code block, so a Rust file read as
+    /// mangled prose.
+    /// A single click is a look; a double click is an edit. Both give
+    /// a tab, but only the double click gives an editable one — and
+    /// this holds for every file type, not just Markdown.
+    #[gpui::test]
+    fn single_click_previews_and_double_click_edits(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let rs = root.path().join("code.rs");
+        std::fs::write(&rs, "fn main() {}\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // Single click: read-only, and non-sticky.
+        ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&rs, true, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(
+                matches!(
+                    w.tabs.get(w.active),
+                    Some(Tab::Editor { view: EditorView::Preview(_), .. })
+                ),
+                "a single click opens read-only, code included"
+            );
+            assert_eq!(w.preview_tab, Some(w.active), "and the tab stays non-sticky");
+        });
+
+        // Double click goes through `open_path`: editable, and pinned.
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&rs, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(
+                matches!(w.tabs.get(w.active), Some(Tab::Editor { view: EditorView::Edit, .. })),
+                "a double click opens for editing"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn previewing_a_code_file_renders_code_not_prose(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let rs = root.path().join("sample.rs");
+        // Every shape that the Markdown parser used to mangle.
+        std::fs::write(
+            &rs,
+            "//! Doc comment.\n\n#[derive(Debug)]\nstruct S;\n\n    fn indented() {}\n",
+        )
+        .unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&rs, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("expected a preview tab")
+            };
+            // One code block holding the whole file: nothing should
+            // have been parsed as a paragraph, a heading, or an
+            // indented code block.
+            let blocks = &reader.read(app).document.blocks;
+            assert_eq!(blocks.len(), 1, "the file renders as one block: {blocks:#?}");
+            let crate::markdown::Block::Code { lang, code, .. } = &blocks[0] else {
+                panic!("that block is code, not prose: {:?}", blocks[0])
+            };
+            assert_eq!(lang.as_deref(), Some("rust"), "highlighted as Rust");
+            assert!(code.contains("#[derive(Debug)]"), "the source survives verbatim");
+            assert!(code.contains("    fn indented() {}"), "indentation preserved");
+        });
+    }
+
     #[gpui::test]
     fn toggle_preview_flips_the_active_editor_tab(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -7164,12 +7288,22 @@ mod tests {
 
         ws.update_in(cx, |ws, window, cx| ws.open_path_preview(&a, true, window, cx));
         cx.run_until_parked();
-        cx.update(|_, app| assert_eq!(ws.read(app).preview_tab, Some(0)));
-
-        cx.simulate_input("edited ");
-        cx.run_until_parked(); // render notices the dirty preview and pins it
         cx.update(|_, app| {
-            assert_eq!(ws.read(app).preview_tab, None, "typing pins the preview tab")
+            let w = ws.read(app);
+            assert_eq!(w.preview_tab, Some(0));
+            assert!(
+                matches!(w.tabs.get(0), Some(Tab::Editor { view: EditorView::Preview(_), .. })),
+                "a single click opens read-only, so there is nothing to type into"
+            );
+        });
+
+        // Entering edit mode and typing is what pins it.
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        cx.simulate_input("edited ");
+        cx.run_until_parked(); // render notices the dirty buffer and pins it
+        cx.update(|_, app| {
+            assert_eq!(ws.read(app).preview_tab, None, "typing pins the tab")
         });
     }
 
