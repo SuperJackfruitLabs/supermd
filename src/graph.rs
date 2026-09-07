@@ -111,6 +111,177 @@ pub fn local(index: &Index, center: &Path) -> (Vec<GraphNode>, Vec<GraphEdge>) {
 
 /// Deterministic force layout over the unit square: springs along
 /// edges, repulsion between all pairs, `iterations` rounds.
+/// A quadtree over node positions, for approximating repulsion.
+///
+/// Exact repulsion compares every pair: 2,000 notes is two million
+/// comparisons *per tick*, and the simulation now ticks every frame.
+/// Barnes-Hut groups distant nodes into their centre of mass and
+/// treats each group as one body, which turns that into roughly
+/// n log n.
+struct QuadTree {
+    cells: Vec<Cell>,
+}
+
+#[derive(Clone, Copy)]
+struct Cell {
+    /// Bounds: origin and side length (always square).
+    x: f32,
+    y: f32,
+    size: f32,
+    /// Centre of mass and how many bodies are in it.
+    cx: f32,
+    cy: f32,
+    mass: f32,
+    /// A leaf holds one body; a branch holds four child cells.
+    body: Option<(f32, f32)>,
+    children: Option<[usize; 4]>,
+}
+
+/// Opening angle. A cell is treated as a single body when its size
+/// over its distance falls below this. 0.9 is d3-force's default:
+/// higher is faster and cruder, 0 degenerates to the exact sum.
+const THETA: f32 = 0.9;
+
+/// Below this, the exact all-pairs sum is cheaper than building a
+/// tree — and it keeps small graphs bit-identical to how they laid
+/// out before, so existing layouts do not shift.
+const BARNES_HUT_THRESHOLD: usize = 64;
+
+impl QuadTree {
+    fn build(points: &[(f32, f32)]) -> Self {
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max = f32::MIN;
+        for &(x, y) in points {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max = max.max(x).max(y);
+        }
+        let size = (max - min_x.min(min_y)).max(1e-3);
+        let mut tree = Self {
+            cells: vec![Cell {
+                x: min_x,
+                y: min_y,
+                size,
+                cx: 0.0,
+                cy: 0.0,
+                mass: 0.0,
+                body: None,
+                children: None,
+            }],
+        };
+        for &p in points {
+            tree.insert(0, p, 0);
+        }
+        tree
+    }
+
+    fn insert(&mut self, cell: usize, p: (f32, f32), depth: usize) {
+        // Coincident points would subdivide forever; past this depth
+        // they simply share a cell, which is harmless — the repulsion
+        // that pushes them apart is computed from the centre of mass.
+        const MAX_DEPTH: usize = 24;
+        self.cells[cell].mass += 1.0;
+        self.cells[cell].cx += p.0;
+        self.cells[cell].cy += p.1;
+        if depth >= MAX_DEPTH {
+            return;
+        }
+        match (self.cells[cell].body, self.cells[cell].children) {
+            // Empty leaf: it holds this body now.
+            (None, None) if self.cells[cell].mass <= 1.0 => {
+                self.cells[cell].body = Some(p);
+            }
+            // Occupied leaf: split, and push both bodies down.
+            (Some(existing), None) => {
+                self.cells[cell].body = None;
+                self.subdivide(cell);
+                self.push_down(cell, existing, depth);
+                self.push_down(cell, p, depth);
+            }
+            // Branch, or a leaf that filled at max depth.
+            _ => {
+                if self.cells[cell].children.is_none() {
+                    self.subdivide(cell);
+                }
+                self.push_down(cell, p, depth);
+            }
+        }
+    }
+
+    fn subdivide(&mut self, cell: usize) {
+        let c = self.cells[cell];
+        let h = c.size / 2.0;
+        let base = self.cells.len();
+        for (dx, dy) in [(0.0, 0.0), (h, 0.0), (0.0, h), (h, h)] {
+            self.cells.push(Cell {
+                x: c.x + dx,
+                y: c.y + dy,
+                size: h,
+                cx: 0.0,
+                cy: 0.0,
+                mass: 0.0,
+                body: None,
+                children: None,
+            });
+        }
+        self.cells[cell].children = Some([base, base + 1, base + 2, base + 3]);
+    }
+
+    fn push_down(&mut self, cell: usize, p: (f32, f32), depth: usize) {
+        let c = self.cells[cell];
+        let Some(children) = c.children else { return };
+        let h = c.size / 2.0;
+        let ix = usize::from(p.0 >= c.x + h) + 2 * usize::from(p.1 >= c.y + h);
+        self.insert(children[ix], p, depth + 1);
+    }
+
+    /// Repulsion on a point from every body in the tree.
+    fn force_on(&self, cell: usize, p: (f32, f32), repel: f32) -> (f32, f32) {
+        let c = self.cells[cell];
+        if c.mass == 0.0 {
+            return (0.0, 0.0);
+        }
+        let (mx, my) = (c.cx / c.mass, c.cy / c.mass);
+        let dx = p.0 - mx;
+        let dy = p.1 - my;
+        let d2 = dx * dx + dy * dy;
+        // A cell holding `p` is never approximated. With theta at 0.9 a
+        // containing cell *can* satisfy the opening criterion — its
+        // centre of mass may sit toward the far corner, far enough that
+        // size/d falls below theta — and lumping it in would have `p`
+        // repel itself. That produced errors larger than the forces.
+        let inside = p.0 >= c.x
+            && p.0 <= c.x + c.size
+            && p.1 >= c.y
+            && p.1 <= c.y + c.size;
+        // Far enough to treat the whole cell as one body — or a leaf,
+        // which already is one.
+        if !inside && (c.children.is_none() || c.size * c.size < THETA * THETA * d2) {
+            if d2 <= 1e-8 {
+                return (0.0, 0.0); // itself, or a coincident node
+            }
+            let d2 = d2.max(1e-4);
+            let d = d2.sqrt();
+            let f = repel * c.mass / d2;
+            return (f * dx / d, f * dy / d);
+        }
+        // A leaf containing p: its only body is p itself (or, at max
+        // depth, bodies coincident with it), so it exerts nothing.
+        let Some(children) = c.children else {
+            return (0.0, 0.0);
+        };
+        let mut fx = 0.0;
+        let mut fy = 0.0;
+        for &child in children.iter() {
+            let (cfx, cfy) = self.force_on(child, p, repel);
+            fx += cfx;
+            fy += cfy;
+        }
+        (fx, fy)
+    }
+}
+
 /// Tunable force strengths. Named after what a reader would call
 /// them, because these are meant to be exposed as settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -223,17 +394,34 @@ impl Simulation {
         let a = self.alpha;
         let f = self.forces;
 
-        for i in 0..n {
-            for j in i + 1..n {
-                let dx = self.nodes[i].x - self.nodes[j].x;
-                let dy = self.nodes[i].y - self.nodes[j].y;
-                let d2 = (dx * dx + dy * dy).max(1e-4);
-                let d = d2.sqrt();
-                let rep = f.repel / d2 * a;
-                self.nodes[i].vx += rep * dx / d;
-                self.nodes[i].vy += rep * dy / d;
-                self.nodes[j].vx -= rep * dx / d;
-                self.nodes[j].vy -= rep * dy / d;
+        if n >= BARNES_HUT_THRESHOLD {
+            // Approximate: group distant nodes by centre of mass. The
+            // exact sum below is O(n^2) per tick, and this now ticks
+            // every frame — 2,000 notes would not survive it.
+            let points: Vec<(f32, f32)> =
+                self.nodes.iter().map(|nd| (nd.x, nd.y)).collect();
+            let tree = QuadTree::build(&points);
+            let forces: Vec<(f32, f32)> = points
+                .iter()
+                .map(|&p| tree.force_on(0, p, f.repel * a))
+                .collect();
+            for (node, (fx, fy)) in self.nodes.iter_mut().zip(forces) {
+                node.vx += fx;
+                node.vy += fy;
+            }
+        } else {
+            for i in 0..n {
+                for j in i + 1..n {
+                    let dx = self.nodes[i].x - self.nodes[j].x;
+                    let dy = self.nodes[i].y - self.nodes[j].y;
+                    let d2 = (dx * dx + dy * dy).max(1e-4);
+                    let d = d2.sqrt();
+                    let rep = f.repel / d2 * a;
+                    self.nodes[i].vx += rep * dx / d;
+                    self.nodes[i].vy += rep * dy / d;
+                    self.nodes[j].vx -= rep * dx / d;
+                    self.nodes[j].vy -= rep * dy / d;
+                }
             }
         }
         for &(p, q) in &self.edges {
@@ -381,6 +569,107 @@ mod tests {
         let neighbor = &nodes[1];
         let d = ((neighbor.x - 0.5).powi(2) + (neighbor.y - 0.5).powi(2)).sqrt();
         assert!((0.1..0.5).contains(&d), "neighbor on the ring: {d}");
+    }
+
+    /// A synthetic graph of `n` notes in a chain, for scale tests.
+    fn chain(n: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+        let nodes = (0..n)
+            .map(|i| {
+                let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                GraphNode {
+                    path: PathBuf::from(format!("n{i}.md")),
+                    x: 0.5 + 0.35 * a.cos(),
+                    y: 0.5 + 0.35 * a.sin(),
+                    vx: 0.0,
+                    vy: 0.0,
+                    pinned: false,
+                    degree: 2,
+                }
+            })
+            .collect();
+        let edges = (0..n.saturating_sub(1)).map(|i| (i, i + 1)).collect();
+        (nodes, edges)
+    }
+
+    /// The approximation has to agree with the exact sum, or large
+    /// vaults would lay out differently from small ones for no reason
+    /// the reader could see.
+    /// Deterministic scatter. A ring will not do: on a symmetric layout
+    /// every node's repulsion nearly cancels, so error measured against
+    /// the surviving net is meaningless.
+    fn scatter(n: usize) -> Vec<(f32, f32)> {
+        let mut seed = 12345u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        (0..n).map(|_| (0.05 + 0.9 * next(), 0.05 + 0.9 * next())).collect()
+    }
+
+    #[test]
+    fn barnes_hut_approximates_the_exact_repulsion() {
+        let points = scatter(300);
+        let tree = QuadTree::build(&points);
+        let repel = 0.004;
+
+        let mut worst: f32 = 0.0;
+        let mut typical: f32 = 0.0;
+        for (i, &p) in points.iter().enumerate() {
+            // Exact: sum over every other body.
+            let (mut ex, mut ey) = (0.0f32, 0.0f32);
+            for (j, &q) in points.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let (dx, dy) = (p.0 - q.0, p.1 - q.1);
+                let d2 = (dx * dx + dy * dy).max(1e-4);
+                let d = d2.sqrt();
+                ex += repel / d2 * dx / d;
+                ey += repel / d2 * dy / d;
+            }
+            let (ax, ay) = tree.force_on(0, p, repel);
+            worst = worst.max(((ax - ex).powi(2) + (ay - ey).powi(2)).sqrt());
+            typical = typical.max((ex * ex + ey * ey).sqrt());
+        }
+        // Absolute error against the largest force in the system. A
+        // ratio against each node's own net is meaningless on a
+        // symmetric layout, where that net nearly cancels to zero.
+        assert!(
+            worst < typical * 0.15,
+            "worst error {worst} against a typical force of {typical}"
+        );
+    }
+
+    /// The tree must survive the shapes that break naive quadtrees:
+    /// every node in one place, and a single node.
+    #[test]
+    fn the_quadtree_handles_degenerate_layouts() {
+        let coincident = vec![(0.5, 0.5); 40];
+        let tree = QuadTree::build(&coincident);
+        let (fx, fy) = tree.force_on(0, (0.5, 0.5), 0.004);
+        assert!(fx.is_finite() && fy.is_finite(), "no NaN from coincident nodes");
+
+        let single = vec![(0.25, 0.75)];
+        let tree = QuadTree::build(&single);
+        let (fx, fy) = tree.force_on(0, (0.25, 0.75), 0.004);
+        assert_eq!((fx, fy), (0.0, 0.0), "a node does not repel itself");
+    }
+
+    /// The whole point: a vault far larger than the exact sum could
+    /// handle still steps, and still settles.
+    #[test]
+    fn a_large_graph_still_steps_and_settles() {
+        let (nodes, edges) = chain(1200);
+        let mut sim = Simulation::new(nodes, edges);
+        assert!(sim.nodes.len() >= BARNES_HUT_THRESHOLD, "uses the approximation");
+        for _ in 0..120 {
+            sim.step();
+        }
+        assert!(
+            sim.nodes.iter().all(|n| n.x.is_finite() && n.y.is_finite()),
+            "no node escaped to infinity"
+        );
+        assert!(sim.alpha() < 1.0, "it is cooling");
     }
 
     /// The simulation cools to rest on its own, so the shell knows
