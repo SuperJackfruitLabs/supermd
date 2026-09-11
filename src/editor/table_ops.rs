@@ -2,9 +2,23 @@
 
 use super::table_edit;
 
+/// Where a row asked for "after row `after`" actually lands. A row
+/// between the header and its separator would stop the block being a
+/// table at all, so anything above the separator inserts below it
+/// instead -- and the cursor has to follow the row, so the caller
+/// needs this index too.
+pub fn insert_row_index(block: &str, after: usize) -> usize {
+    let rs = table_edit::rows(block);
+    match rs.iter().position(|r| r.is_separator) {
+        Some(sep) if after < sep => sep,
+        _ => after,
+    }
+}
+
 /// A fresh empty row inserted immediately after row `after`, re-aligned
 /// so every pipe still lines up.
 pub fn insert_row(block: &str, after: usize) -> String {
+    let after = insert_row_index(block, after);
     let blank = table_edit::new_row(block);
     let rs = table_edit::rows(block);
     let out = match rs.get(after) {
@@ -15,14 +29,16 @@ pub fn insert_row(block: &str, after: usize) -> String {
 }
 
 /// Remove row `row`. Refuses (returns `None`) to delete the separator
-/// row — that line is structure, not data — or an out-of-range row.
+/// row or the header above it — those lines are structure, not data;
+/// a block that loses either stops being a table and every remaining
+/// row falls out of it — or an out-of-range row.
 ///
 /// No other row's content changes, so this does not re-align: the
 /// remaining lines, separator included, keep their exact text.
 pub fn delete_row(block: &str, row: usize) -> Option<String> {
     let rs = table_edit::rows(block);
     let r = rs.get(row)?;
-    if r.is_separator {
+    if r.is_separator || rs.iter().position(|r| r.is_separator).is_some_and(|sep| row < sep) {
         return None;
     }
     let out = if r.line.end < block.len() {
@@ -85,6 +101,52 @@ mod tests {
         assert_eq!(lines.len(), 5, "one more row: {out}");
         assert!(lines[3].starts_with('|') && lines[3].contains("  "), "blank cells: {:?}", lines[3]);
         assert_eq!(lines[4], "| 3 | 4 |", "the row below survives");
+    }
+
+    /// The most natural first use of the command: the cursor is still
+    /// in the header the user just typed. A row inserted literally
+    /// after row 0 lands between the header and its separator, which
+    /// stops the whole thing being a table at all.
+    #[test]
+    fn a_row_inserted_from_the_header_lands_below_the_separator() {
+        let out = insert_row(T, 0);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 5, "one more row: {out}");
+        assert_eq!(lines[0].replace(' ', ""), "|a|b|", "the header is still the header");
+        let rs = table_edit::rows(&out);
+        assert!(rs[1].is_separator, "the separator still follows it: {:?}", lines[1]);
+        assert!(lines[2].trim_matches(['|', ' ']).is_empty(), "blank row: {:?}", lines[2]);
+        assert_eq!(insert_row_index(T, 0), 1, "reported as row 1, where the cursor must go");
+        // And it is still a table to the block scanner.
+        assert_eq!(crate::editor::blocks::blocks(&out).len(), 1, "one table block: {out}");
+    }
+
+    /// From the separator itself, the new row is the first body row.
+    #[test]
+    fn a_row_inserted_from_the_separator_becomes_the_first_body_row() {
+        let out = insert_row(T, 1);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(table_edit::rows(&out)[1].is_separator, "separator untouched: {:?}", lines[1]);
+        assert!(lines[2].trim_matches(['|', ' ']).is_empty(), "blank row: {:?}", lines[2]);
+        assert_eq!(lines[3].replace(' ', ""), "|1|2|");
+        assert_eq!(insert_row_index(T, 1), 1);
+    }
+
+    /// A body row still inserts exactly where the cursor is.
+    #[test]
+    fn insert_row_index_leaves_body_rows_alone() {
+        assert_eq!(insert_row_index(T, 2), 2);
+        assert_eq!(insert_row_index(T, 3), 3);
+        // A pipe block with no separator is not a real table; nothing
+        // to protect, so the index passes straight through.
+        assert_eq!(insert_row_index("| a |\n| b |", 0), 0);
+    }
+
+    /// Deleting the header leaves a separator with nothing above it --
+    /// no longer a table, and the rest of the rows fall out with it.
+    #[test]
+    fn the_header_row_cannot_be_deleted() {
+        assert!(delete_row(T, 0).is_none(), "row 0 is the header");
     }
 
     /// The separator row is structure, not data.

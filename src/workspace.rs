@@ -364,6 +364,31 @@ pub fn repo_root_may_be_out_of_scope(workspace_root: &Path) -> bool {
 /// that can reach the user must surface the corruption here or lose
 /// the chance -- by the next line the preserved copy is the only
 /// record that anything was lost.
+/// Persist a single setting the user just changed, without clobbering
+/// whatever else has reached disk since launch.
+///
+/// `ThemeState.settings` is seeded once at startup and never refreshed,
+/// while recents, workspace bookmarks, plugin grants and net-domain
+/// grants are all read-modify-written straight against the file as the
+/// session runs. Saving the global back whole reverts every one of
+/// them -- and under the sandbox, dropping `recent_workspaces` drops
+/// the security-scoped bookmarks keyed off it, costing the user access
+/// to every folder opened this session.
+///
+/// So `edit` runs twice: once on the global, for the in-session readers
+/// of the field, and once on a copy loaded fresh from disk, which is
+/// the copy that gets saved. It must therefore set its field to an
+/// absolute value -- never flip one, or the two copies diverge.
+fn persist_setting(cx: &mut App, edit: impl Fn(&mut crate::settings::Settings)) {
+    edit(&mut cx.global_mut::<crate::theme::ThemeState>().settings);
+    let dir = crate::settings::config_dir();
+    let mut on_disk = crate::settings::load(&dir);
+    edit(&mut on_disk);
+    if let Err(err) = crate::settings::save(&dir, &on_disk) {
+        eprintln!("supermd: cannot save settings: {err}");
+    }
+}
+
 fn record_recent(root: &Path) -> Option<String> {
     let dir = crate::settings::config_dir();
     let (mut settings, corrupt) = crate::settings::load_reporting(&dir);
@@ -1365,11 +1390,7 @@ impl Workspace {
     /// -- a prompt that comes back is worse than no prompt.
     fn record_default_handler_answer(&mut self, cx: &mut Context<Self>) {
         self.show_default_handler_offer = false;
-        let state = cx.global_mut::<crate::theme::ThemeState>();
-        state.settings.default_handler_asked = true;
-        if let Err(err) = crate::settings::save(&crate::settings::config_dir(), &state.settings) {
-            eprintln!("supermd: cannot save settings: {err}");
-        }
+        persist_setting(cx, |s| s.default_handler_asked = true);
     }
 
     fn make_default_markdown_app(
@@ -2069,14 +2090,10 @@ impl Workspace {
     /// so the change is visible without waiting for the minute timer.
     fn toggle_flux(&mut self, _: &ToggleFlux, window: &mut Window, cx: &mut Context<Self>) {
         {
+            let on = !cx.global::<crate::theme::ThemeState>().settings.flux.enabled;
+            persist_setting(cx, move |s| s.flux.enabled = on);
             let state = cx.global_mut::<crate::theme::ThemeState>();
-            state.settings.flux.enabled = !state.settings.flux.enabled;
             state.flux_blend = crate::flux::current_blend(&state.settings.flux);
-            if let Err(err) =
-                crate::settings::save(&crate::settings::config_dir(), &state.settings)
-            {
-                eprintln!("supermd: cannot save settings: {err}");
-            }
         }
         crate::theme::refresh_active_theme(cx);
         window.refresh();
@@ -2953,18 +2970,15 @@ impl Workspace {
         };
         let ix = picker.order[picker.pos];
         {
-            let state = cx.global_mut::<crate::theme::ThemeState>();
-            let picked = &state.themes[ix];
-            if picked.theme.is_dark {
-                state.settings.dark_theme = picked.name.clone();
-            } else {
-                state.settings.light_theme = picked.name.clone();
-            }
-            if let Err(err) =
-                crate::settings::save(&crate::settings::config_dir(), &state.settings)
-            {
-                eprintln!("supermd: cannot save settings: {err}");
-            }
+            let picked = &cx.global::<crate::theme::ThemeState>().themes[ix];
+            let (name, is_dark) = (picked.name.clone(), picked.theme.is_dark);
+            persist_setting(cx, move |s| {
+                if is_dark {
+                    s.dark_theme = name.clone();
+                } else {
+                    s.light_theme = name.clone();
+                }
+            });
         }
         crate::theme::refresh_active_theme(cx);
         self.focus_active(window, cx);
@@ -7891,6 +7905,62 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(settings.contains(&picked_name), "picked theme persisted: {settings}");
+    }
+
+    /// Every persisted setting is a read-modify-write against *disk*.
+    /// The copy in the `ThemeState` global was seeded once at launch
+    /// and knows nothing of what has been written since -- recents (and
+    /// under the sandbox the security-scoped bookmarks that hang off
+    /// them), plugin grants, net-domain grants. Saving that whole
+    /// struct back silently reverts all of it; only the one field the
+    /// user just changed may travel to disk.
+    #[gpui::test]
+    fn saving_one_setting_keeps_what_disk_gained_since_launch(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let dir = crate::settings::config_dir();
+
+        // What a fresh-load writer (record_recent, resolve_consent,
+        // enable_previews_for_hovered_site) leaves behind mid-session.
+        let stamp = |dir: &Path| {
+            let mut s = crate::settings::load(dir);
+            s.recent_workspaces = vec!["/opened/after/launch".to_string()];
+            s.plugin_grants.insert("demo".into(), vec!["workspace-read".into()]);
+            crate::settings::save(dir, &s).unwrap();
+        };
+        let still_there = |dir: &Path, who: &str| {
+            let s = crate::settings::load(dir);
+            assert_eq!(s.recent_workspaces, ["/opened/after/launch"], "{who} wiped the recents");
+            assert!(s.plugin_grants.contains_key("demo"), "{who} wiped the plugin grants");
+        };
+
+        stamp(&dir);
+        ws.update_in(cx, |ws, _w, cx| ws.record_default_handler_answer(cx));
+        still_there(&dir, "the default-handler banner");
+        assert!(crate::settings::load(&dir).default_handler_asked, "its own field did persist");
+
+        stamp(&dir);
+        let was = cx.update(|_, app| app.global::<crate::theme::ThemeState>().settings.flux.enabled);
+        ws.update_in(cx, |ws, window, cx| ws.toggle_flux(&ToggleFlux, window, cx));
+        still_there(&dir, "the flux toggle");
+        assert_eq!(crate::settings::load(&dir).flux.enabled, !was, "its own field did persist");
+
+        stamp(&dir);
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| ws.theme_picker_down(&ThemePickerDown, window, cx));
+        let picked = cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker open");
+            app.global::<crate::theme::ThemeState>().themes[picker.order[picker.pos]].name.clone()
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        still_there(&dir, "the theme picker");
+        assert_eq!(crate::settings::load(&dir).light_theme, picked, "its own field did persist");
     }
 
     // ── edit/preview flip, new file ─────────────────────────────────────

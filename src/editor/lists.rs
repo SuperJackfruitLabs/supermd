@@ -67,16 +67,51 @@ pub fn list_item(line: &str) -> Option<ListItem> {
     Some(ListItem { indent, marker_len, content_empty, next_marker, indent_step })
 }
 
+/// Byte ranges of the *bodies* of the fenced code blocks in `text` --
+/// the lines between the delimiters, delimiters excluded. Numbers in
+/// there are the user's literal text, not a list: renumbering one
+/// would silently rewrite a file the user never edited.
+///
+/// The delimiter lines themselves stay ordinary non-list lines, so a
+/// fence still ends an ordered run at its own indent or shallower
+/// exactly as any other paragraph line does.
+fn fence_bodies(text: &str) -> Vec<std::ops::Range<usize>> {
+    super::blocks::blocks(text)
+        .into_iter()
+        .filter_map(|b| match b.kind {
+            super::blocks::BlockKind::Fence { open_line, close_line } => {
+                // An unclosed fence runs to the end of its block.
+                let end = close_line.map_or(b.range.end + 1, |c| c.start);
+                Some(open_line.end..end)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Rewrite the ordered-list numbers within `block` (a byte range of
 /// `text`) so each indent level counts sequentially, keeping the first
-/// number an author chose at each level. Unordered items and lines
-/// that aren't list items are left untouched. `None` means the block
-/// holds no ordered item at all — nothing to renumber.
+/// number an author chose at each level. Unordered items, lines inside
+/// a fenced code block, and lines that aren't list items are left
+/// untouched. `None` means the block holds no ordered item at all --
+/// nothing to renumber.
 ///
 /// Returns the whole of `text`, unchanged outside `block`.
 pub fn renumber(text: &str, block: std::ops::Range<usize>) -> Option<String> {
+    let new_block = renumber_block(text, block.clone())?;
     let mut out = String::with_capacity(text.len());
     out.push_str(&text[..block.start]);
+    out.push_str(&new_block);
+    out.push_str(&text[block.end..]);
+    Some(out)
+}
+
+/// The renumbered replacement for `block` alone -- what `renumber`
+/// splices back in. The editor replaces just this range, so one Enter
+/// costs one small undo entry instead of two copies of the document.
+pub fn renumber_block(text: &str, block: std::ops::Range<usize>) -> Option<String> {
+    let mut out = String::with_capacity(block.end - block.start);
+    let fences = fence_bodies(text);
 
     // Stack of (indent, current number) for the ordered runs in play.
     // A shallower or equal indent pops deeper entries (their scope
@@ -85,9 +120,22 @@ pub fn renumber(text: &str, block: std::ops::Range<usize>) -> Option<String> {
     let mut stack: Vec<(usize, u64)> = Vec::new();
     let mut found_any = false;
 
+    let mut line_start = block.start;
     let mut lines = text[block.clone()].split('\n').peekable();
     while let Some(line) = lines.next() {
         let is_last = lines.peek().is_none();
+        let at = line_start;
+        line_start += line.len() + 1;
+        if fences.iter().any(|f| f.contains(&at)) {
+            // Inside a fence: copy the line through untouched, and
+            // leave the surrounding run's count alone -- the list
+            // continues either side of the code block.
+            out.push_str(line);
+            if !is_last {
+                out.push('\n');
+            }
+            continue;
+        }
         let Some(item) = list_item(line) else {
             // A blank line ends every currently open run. A non-blank,
             // non-list line ends any run at its own indent or shallower
@@ -144,7 +192,6 @@ pub fn renumber(text: &str, block: std::ops::Range<usize>) -> Option<String> {
         }
     }
 
-    out.push_str(&text[block.end..]);
     if found_any {
         Some(out)
     } else {
@@ -255,6 +302,27 @@ mod tests {
         // Already correctly numbered, so unchanged (still Some: there
         // are ordered items to renumber, it's just a no-op on them).
         assert_eq!(out.as_deref(), Some(text), "both lists keep restarting correctly");
+    }
+
+    /// Numbers inside a fenced code block are the user's literal text,
+    /// not a list: renumbering must not touch a single byte of them.
+    #[test]
+    fn renumber_leaves_a_fenced_code_block_alone() {
+        let text = "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n2. Done\n";
+        let out = renumber(text, 0..text.len()).expect("an ordered list");
+        assert_eq!(out, text, "the fence body is verbatim and the outer list already counts right");
+    }
+
+    /// The outer list still renumbers across a fence it contains.
+    #[test]
+    fn renumber_counts_across_a_fence_inside_an_item() {
+        let text = "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n1. Done\n";
+        let out = renumber(text, 0..text.len()).expect("an ordered list");
+        assert_eq!(
+            out,
+            "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n2. Done\n",
+            "the item after the fence continues the run; the fence body is untouched"
+        );
     }
 
     /// Same, but with no blank line between the two lists (an ordinary

@@ -1533,8 +1533,11 @@ impl Editor {
         let Some((br, block, pos)) = self.table_cursor() else {
             return;
         };
+        // Not `pos.row + 1`: a row asked for from the header lands
+        // below the separator, and the cursor has to follow it there.
+        let at = table_ops::insert_row_index(&block, pos.row);
         let new_block = table_ops::insert_row(&block, pos.row);
-        self.apply_table_edit(br, &new_block, table_edit::CellPos { row: pos.row + 1, cell: 0 }, cx);
+        self.apply_table_edit(br, &new_block, table_edit::CellPos { row: at + 1, cell: 0 }, cx);
     }
 
     fn table_delete_row(&mut self, _: &TableDeleteRow, _: &mut Window, cx: &mut Context<Self>) {
@@ -6310,6 +6313,135 @@ mod tests {
         assert_eq!(buffer_text(&editor, cx), "let * = 1;");
     }
 
+    /// The single table block a text holds, exactly as the projection
+    /// scanner sees it -- the thing that decides whether a line renders
+    /// as part of the table or as a stray paragraph of pipes.
+    fn one_table(text: &str) -> String {
+        let blocks = crate::editor::blocks::blocks(text);
+        let tables: Vec<_> = blocks
+            .iter()
+            .filter(|b| b.kind == crate::editor::blocks::BlockKind::Table)
+            .collect();
+        assert_eq!(tables.len(), 1, "exactly one table block in {text:?}");
+        text[tables[0].range.clone()].to_string()
+    }
+
+    /// The most natural first use of a brand-new command is with the
+    /// cursor still in the header row. A row wedged between the header
+    /// and its separator drops the header out of the table entirely.
+    #[gpui::test]
+    fn insert_row_from_the_header_lands_below_the_separator(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "hdr.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(2); // inside the header cell "a"
+            cx.notify();
+        });
+        cx.dispatch_action(TableInsertRow);
+        let text = buffer_text(&editor, cx);
+        let table = one_table(&text);
+        assert_eq!(table.lines().count(), 4, "header, separator and two body rows: {table:?}");
+        assert!(table.lines().next().unwrap().contains('a'), "the header is still row 0: {table:?}");
+        assert!(table_edit::rows(&table)[1].is_separator, "separator still row 1: {table:?}");
+        // The cursor follows the new row, so typing lands in it.
+        cx.simulate_input("x");
+        let text = buffer_text(&editor, cx);
+        assert!(text.lines().nth(2).unwrap().contains('x'), "typed into the new row: {text:?}");
+        assert!(
+            crate::editor::blocks::is_separator_row(text.lines().nth(1).unwrap()),
+            "not into the separator: {text:?}"
+        );
+    }
+
+    /// The commands insert next to the *cursor*. Nothing else in the
+    /// suite pins that down: an insert hard-wired to the top of the
+    /// table passes every other table test.
+    #[gpui::test]
+    fn table_inserts_land_at_the_cursor(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n";
+
+        // A row, from the last body row: the new row goes below it.
+        let (_fx, editor, cx) = open_editor(cx, "ins.md", doc);
+        let at = doc.find('3').unwrap();
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(at));
+        cx.dispatch_action(TableInsertRow);
+        cx.simulate_input("z");
+        let text = buffer_text(&editor, cx);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[3].contains('3'), "the row below the cursor is still row 3: {text:?}");
+        assert!(lines[4].contains('z'), "the new row is row 4: {text:?}");
+
+        // A column, from the second column: the new column goes right.
+        let (_fx, editor, cx) = open_editor(cx, "ins2.md", doc);
+        let at = doc.find('b').unwrap();
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(at));
+        cx.dispatch_action(TableInsertColumn);
+        cx.simulate_input("z");
+        let text = buffer_text(&editor, cx);
+        assert_eq!(
+            text.lines().next().unwrap().replace(' ', ""),
+            "|a|b|z|",
+            "the new column follows the cursor's own: {text:?}"
+        );
+    }
+
+    /// The other three commands, from the header and from the separator
+    /// line: each must leave something the scanner still reads as one
+    /// whole table.
+    #[gpui::test]
+    fn table_commands_from_header_and_separator_keep_the_table_whole(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let sep_cell = doc.find("---").unwrap();
+
+        // Delete Row from the header: the header is structure too.
+        let (_fx, editor, cx) = open_editor(cx, "t1.md", doc);
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(2));
+        cx.dispatch_action(TableDeleteRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "the header cannot be deleted away");
+        // ... and from the separator, as before.
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(sep_cell));
+        cx.dispatch_action(TableDeleteRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "nor the separator");
+
+        // Insert Row from the separator line: the new row is the first
+        // body row, and the separator keeps its place.
+        let (_fx, editor, cx) = open_editor(cx, "t2.md", doc);
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(sep_cell));
+        cx.dispatch_action(TableInsertRow);
+        let text = buffer_text(&editor, cx);
+        let table = one_table(&text);
+        assert_eq!(table.lines().count(), 4, "{table:?}");
+        assert!(table_edit::rows(&table)[1].is_separator, "{table:?}");
+
+        // Insert Column, from the header and from the separator.
+        for (name, at) in [("t3.md", 2), ("t4.md", sep_cell)] {
+            let (_fx, editor, cx) = open_editor(cx, name, doc);
+            editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(at));
+            cx.dispatch_action(TableInsertColumn);
+            let text = buffer_text(&editor, cx);
+            let table = one_table(&text);
+            assert_eq!(table.lines().count(), 3, "{table:?}");
+            for line in table.lines() {
+                assert_eq!(line.matches('|').count(), 4, "three cells now: {line:?}");
+            }
+            assert!(table_edit::rows(&table)[1].is_separator, "{table:?}");
+        }
+
+        // Delete Column, from the header and from the separator.
+        for (name, at) in [("t5.md", 2), ("t6.md", sep_cell)] {
+            let (_fx, editor, cx) = open_editor(cx, name, doc);
+            editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(at));
+            cx.dispatch_action(TableDeleteColumn);
+            let text = buffer_text(&editor, cx);
+            let table = one_table(&text);
+            assert_eq!(table.lines().count(), 3, "{table:?}");
+            for line in table.lines() {
+                assert_eq!(line.matches('|').count(), 2, "one cell left: {line:?}");
+            }
+            assert!(table_edit::rows(&table)[1].is_separator, "{table:?}");
+        }
+    }
+
     #[gpui::test]
     fn table_command_on_a_pipe_line_in_a_code_file_is_a_no_op(cx: &mut TestAppContext) {
         // rustfmt's own style puts a leading `|` on an or-pattern arm —
@@ -6392,6 +6524,43 @@ mod tests {
         // One undo drops the appended row (single group per press).
         cx.dispatch_action(Undo);
         assert_eq!(buffer_text(&editor, cx), aligned);
+    }
+
+    /// Numbers inside a fenced code block are the user's literal text.
+    /// Enter-continuation in the list *around* a fence must not reach
+    /// inside it -- the file on disk is the source of truth, and this
+    /// rewrote lines the user never touched, with no indication.
+    #[gpui::test]
+    fn enter_in_a_list_does_not_renumber_inside_a_fence(cx: &mut TestAppContext) {
+        let doc = "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n2. Done\n";
+        let (_fx, editor, cx) = open_editor(cx, "fence.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(doc.find('\n').unwrap()); // end of "1. Steps:"
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "1. Steps:\n2. \n   ```text\n   1. alpha\n   1. beta\n   ```\n3. Done\n",
+            "the fence body is byte-for-byte what the user wrote"
+        );
+    }
+
+    /// Same for the explicit command, which renumbers without inserting.
+    #[gpui::test]
+    fn the_renumber_command_does_not_renumber_inside_a_fence(cx: &mut TestAppContext) {
+        let doc = "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n1. Done\n";
+        let (_fx, editor, cx) = open_editor(cx, "fence2.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(3); // inside "Steps:"
+            cx.notify();
+        });
+        cx.dispatch_action(RenumberList);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n2. Done\n",
+            "only the outer list renumbers"
+        );
     }
 
     #[gpui::test]

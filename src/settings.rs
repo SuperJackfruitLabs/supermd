@@ -141,18 +141,38 @@ fn preserve_corrupt(dir: &Path, path: &Path, reason: &str) -> String {
     // The source is already fully written by the time we get here (we
     // are reading it after the fact, not racing a writer), so a plain
     // copy keeps the exact original bytes -- unlike `save`, there is no
-    // concurrent writer for this to tear.
-    let _ = std::fs::copy(path, &kept);
-    let msg = format!(
-        "{} could not be read ({reason}); the previous file was kept at {}",
-        path.display(),
-        kept.display()
-    );
+    // concurrent writer for this to tear. It can still fail (the file
+    // may be the unreadable one that sent us here), and reporting a
+    // preservation that did not happen is worse than reporting none:
+    // it is the message the user reads before the next save.
+    let msg = match std::fs::copy(path, &kept) {
+        Ok(_) => format!(
+            "{} could not be read ({reason}); the previous file was kept at {}",
+            path.display(),
+            kept.display()
+        ),
+        Err(copy_err) => format!(
+            "{} could not be read ({reason}) and could not be copied aside either \
+             ({copy_err}); it was left exactly as it is and will not be overwritten",
+            path.display()
+        ),
+    };
     eprintln!("supermd: {msg}");
     msg
 }
 
 pub fn save(dir: &Path, settings: &Settings) -> std::io::Result<()> {
+    // Never replace a file we could not read. The atomic write below
+    // renames over the target, which needs only directory permission,
+    // so an unreadable settings.toml -- the one case `preserve_corrupt`
+    // cannot copy aside -- would be destroyed with no copy anywhere.
+    // A file that reads fine but parses badly is a different story: it
+    // has been preserved by then, and defaults may replace it.
+    if let Err(err) = std::fs::read(dir.join("settings.toml")) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(err);
+        }
+    }
     std::fs::create_dir_all(dir)?;
     let body = toml::to_string_pretty(settings)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -173,6 +193,60 @@ mod tests {
         assert_eq!(load(dir.path()), Settings::default());
         assert_eq!(Settings::default().light_theme, "Jackfruit Light");
         assert_eq!(Settings::default().dark_theme, "Jackfruit Dark");
+    }
+
+    /// A file that could not be *read* is the one case where the
+    /// preserving copy cannot work either -- and the atomic save that
+    /// follows needs only directory permission, so it would rename
+    /// defaults straight over bytes nothing ever kept a copy of.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_not_reported_as_preserved_nor_saved_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let original = "light_theme = \"Nord\"\n";
+        std::fs::write(&path, original).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // running as root: the mode proves nothing here
+        }
+
+        let (settings, msg) = load_reporting(dir.path());
+        assert_eq!(settings, Settings::default(), "unusable, so defaults");
+        let msg = msg.expect("an unreadable file is reported");
+        assert!(
+            !dir.path().join("settings.toml.corrupt").exists(),
+            "no copy was made -- the bytes could not be read"
+        );
+        assert!(
+            !msg.contains("kept at"),
+            "the message must not promise a copy that does not exist: {msg}"
+        );
+
+        assert!(
+            save(dir.path(), &Settings::default()).is_err(),
+            "the save that follows must refuse rather than replace it"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "every byte the user had is still on disk"
+        );
+    }
+
+    /// The readable-but-corrupt case still preserves, and says so.
+    #[test]
+    fn a_corrupt_file_is_copied_aside_and_the_message_names_the_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.toml"), "not [valid").unwrap();
+        let (_, msg) = load_reporting(dir.path());
+        let kept = dir.path().join("settings.toml.corrupt");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "not [valid");
+        assert!(msg.unwrap().contains(&kept.display().to_string()));
+        // Defaults may now be written over the unusable original.
+        save(dir.path(), &Settings::default()).unwrap();
     }
 
     #[test]
