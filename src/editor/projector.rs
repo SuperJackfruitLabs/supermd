@@ -372,7 +372,16 @@ impl Projector for PluginBlockProjector {
             .downcast_ref::<PluginBlockPayload>()
             .expect("plugin block payload");
         let t = ctx.theme;
-        let host = ctx.editor.read(ctx.cx).host.clone();
+        let (host, root) = {
+            let editor = ctx.editor.read(ctx.cx);
+            // A cheap read-lock on the shared root cell, never on the
+            // host: a plugin call can hold the host for up to 2s.
+            let root = editor
+                .host_root
+                .as_ref()
+                .and_then(|r| r.read().ok().map(|g| g.clone()));
+            (editor.host.clone(), root.flatten())
+        };
         let state = crate::diagram::plugin_diagram_state(
             &payload.plugin,
             &payload.version,
@@ -380,6 +389,7 @@ impl Projector for PluginBlockProjector {
             &payload.body,
             664.0,
             host,
+            root,
             ctx.cx,
         );
         let handle = ctx.editor.clone();

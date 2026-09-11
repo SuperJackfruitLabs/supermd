@@ -559,11 +559,22 @@ struct LoadedPlugin {
     instance: Option<Bound>,
 }
 
+/// The workspace root a host preopens for `workspace-read`, behind its
+/// own lock so the UI can read it *without* locking the host: a
+/// synchronous plugin call holds the host mutex for up to the epoch cap
+/// (2s), and the render path reads this root on every frame.
+pub type RootHandle = std::sync::Arc<std::sync::RwLock<Option<PathBuf>>>;
+
 pub struct ExtensionHost {
     engine: wasmtime::Engine,
     plugins: Vec<LoadedPlugin>,
     failures: Vec<(PathBuf, String)>,
-    workspace_root: Option<PathBuf>,
+    workspace_root: RootHandle,
+    /// True for the process-shared host (see [`ExtensionState`]): it
+    /// renders into caches every window shares, so it can never mount a
+    /// workspace, and a `workspace-read` plugin reaching it is refused
+    /// by name instead of being handed an empty filesystem.
+    shared_rootless: bool,
     grants: std::collections::BTreeMap<String, Vec<String>>,
     transport: FetchTransport,
 }
@@ -643,7 +654,8 @@ impl ExtensionHost {
             engine,
             plugins,
             failures,
-            workspace_root: None,
+            workspace_root: RootHandle::default(),
+            shared_rootless: false,
             grants: Default::default(),
             transport: ureq_transport(),
         }
@@ -658,14 +670,32 @@ impl ExtensionHost {
     }
 
     /// The folder this host's `workspace-read` preopen is rooted at.
-    pub fn workspace_root(&self) -> Option<&Path> {
-        self.workspace_root.as_deref()
+    pub fn workspace_root(&self) -> Option<PathBuf> {
+        self.workspace_root.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// A shared read handle on that root, for callers on the render
+    /// path — reading it must not mean locking the host itself.
+    pub fn root_handle(&self) -> RootHandle {
+        self.workspace_root.clone()
+    }
+
+    /// Mark this host as the process-shared, rootless one. See
+    /// [`ExtensionState`]; `ensure_bound` refuses `workspace-read`
+    /// plugins here rather than silently denying them a filesystem.
+    pub fn mark_shared_rootless(&mut self) {
+        self.shared_rootless = true;
     }
 
     /// Workspace root used for workspace-read preopens.
     pub fn set_workspace_root(&mut self, root: Option<PathBuf>) {
-        if self.workspace_root != root {
-            self.workspace_root = root;
+        let changed = {
+            let mut slot = self.workspace_root.write().unwrap_or_else(|e| e.into_inner());
+            let changed = *slot != root;
+            *slot = root;
+            changed
+        };
+        if changed {
             // Instances carry preopens; rebuild on next call.
             for p in &mut self.plugins {
                 p.instance = None;
@@ -738,8 +768,9 @@ impl ExtensionHost {
             transport: self.transport.clone(),
             fetches_used: 0,
         });
+        let root = self.workspace_root();
         if self.wants_workspace_read(plugin) && self.granted(plugin, "workspace-read") {
-            if let Some(root) = &self.workspace_root {
+            if let Some(root) = &root {
                 let mut builder = wasmtime_wasi::WasiCtxBuilder::new();
                 builder.inherit_stderr();
                 if builder
@@ -758,6 +789,18 @@ impl ExtensionHost {
     }
 
     fn ensure_bound(&mut self, plugin: &str) -> Result<&mut Bound, String> {
+        // The shared rootless host cannot deliver `workspace-read` — it
+        // has no workspace to mount and never will. Say so by name: the
+        // silent version asks the user for consent, takes the yes, and
+        // then hands the plugin an empty filesystem whose reads fail
+        // with NotFound and no explanation.
+        if self.shared_rootless && self.wants_workspace_read(plugin) {
+            return Err(format!(
+                "'{plugin}' declares workspace-read, which the inline surface \
+                 cannot provide: inline results are cached for every window, so \
+                 they render with no workspace mounted"
+            ));
+        }
         self.consent_gate(plugin)?;
         // A fresh store per instantiation attempt; a failed try may
         // leave partial state behind.
@@ -1535,12 +1578,15 @@ pub fn start_inline_drainer(cx: &mut gpui::App) {
                 .spawn(async move {
                     let mut out = Vec::new();
                     for key in batch {
-                        let result = host
-                            .lock()
-                            .unwrap()
-                            .render_inline(&key.0, &key.1, &key.2)
-                            .ok();
-                        out.push((key, result));
+                        let result = host.lock().unwrap().render_inline(&key.0, &key.1, &key.2);
+                        // Once per key: the failure is cached as
+                        // permanent, so this cannot spam. Silence here
+                        // is how a plugin author ends up staring at a
+                        // marker that never renders and no reason why.
+                        if let Err(e) = &result {
+                            eprintln!("supermd: inline render failed ({}): {e}", key.0);
+                        }
+                        out.push((key, result.ok()));
                     }
                     out
                 })
@@ -1965,7 +2011,10 @@ mod host_tests {
     /// instances, since it is the instance that carries the preopen.
     #[test]
     fn the_preopen_root_is_per_host_and_follows_a_reroot() {
-        let Some(dir) = fixtures_dir() else { eprintln!("SKIP"); return; };
+        let Some(dir) = fixtures_dir() else {
+            eprintln!("SKIP: fixtures not built (scripts/build_plugins.sh --fixtures)");
+            return;
+        };
         let a = tempfile::tempdir().unwrap();
         std::fs::write(a.path().join("probe.txt"), "alpha vault").unwrap();
         let b = tempfile::tempdir().unwrap();
@@ -2002,6 +2051,43 @@ mod host_tests {
             !after.contains("alpha vault"),
             "a stale instance kept the old preopen alive: {after}"
         );
+    }
+
+    /// The shared rootless host cannot mount a workspace, so a
+    /// `workspace-read` plugin reaching it is refused *by name*.
+    ///
+    /// The silent version is the bad one: `consent_gate` only checks
+    /// declared-and-granted, so the banner fires, the user says yes,
+    /// and then `state_for` quietly falls through to `zero_grant_state`
+    /// because there is no root — the plugin's reads come back
+    /// NotFound and nothing anywhere says why.
+    #[test]
+    fn the_shared_rootless_host_refuses_workspace_read_by_name() {
+        let Some(dir) = fixtures_dir() else {
+            eprintln!("SKIP: fixtures not built (scripts/build_plugins.sh --fixtures)");
+            return;
+        };
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("probe.txt"), "workspace contents").unwrap();
+        let mut grants = std::collections::BTreeMap::new();
+        grants.insert("reader".to_string(), vec!["workspace-read".to_string()]);
+
+        let mut shared = ExtensionHost::load(&dir);
+        shared.set_grants(grants.clone());
+        shared.mark_shared_rootless();
+        let e = shared.format_document("reader", "x").unwrap_err();
+        assert!(e.contains("reader"), "the error names the plugin: {e}");
+        assert!(e.contains("workspace-read"), "and the capability: {e}");
+        assert!(e.contains("inline"), "and why it cannot be served: {e}");
+
+        // The contrast: the same plugin, the same grant, on a window's
+        // own rooted host, still works. The refusal is about *this*
+        // host, not about the capability.
+        let mut rooted = ExtensionHost::load(&dir);
+        rooted.set_workspace_root(Some(ws.path().to_path_buf()));
+        rooted.set_grants(grants);
+        let body = rooted.format_document("reader", "x").unwrap();
+        assert!(body.contains("workspace contents"), "{body}");
     }
 
     fn mock_transport(

@@ -46,7 +46,6 @@ use std::sync::Arc;
 use gpui::{actions, App, Application, KeyBinding, Menu, MenuItem, SystemMenuType};
 
 use theme::{apply_system_appearance, ActiveTheme};
-use workspace::Workspace;
 
 actions!(app, [Quit]);
 
@@ -395,7 +394,11 @@ fn main() {
             // Deliberately no workspace root: this is the shared
             // rootless host (see `extensions::ExtensionState`). Each
             // window's `Workspace` owns the rooted host that decides
-            // what a `workspace-read` plugin may open.
+            // what a `workspace-read` plugin may open. Marking it says
+            // so out loud: a workspace-read plugin reaching this host
+            // is refused by name instead of silently getting an empty
+            // filesystem after the user has already granted consent.
+            host.mark_shared_rootless();
             cx.set_global(extensions::ExtensionState(Arc::new(std::sync::Mutex::new(host))));
         }
         cx.set_global(editor::SessionBackups(Arc::new(std::sync::Mutex::new(
@@ -421,27 +424,18 @@ fn main() {
             .expect("the first window opens");
 
         // Flush every dirty editor in *every* window before the app
-        // exits. With one window this was a single handle; a second
-        // window's unsaved edits must not be the price of ⌘Q.
+        // exits.
         cx.on_app_quit(move |cx| {
-            for handle in cx.windows() {
-                if let Some(handle) = handle.downcast::<Workspace>() {
-                    handle
-                        .update(cx, |workspace, _window, cx| workspace.flush_all(cx))
-                        .ok();
-                }
-            }
+            workspace::flush_all_windows(cx);
             async {}
         })
         .detach();
 
-        // External opens (Finder, `supermd://`) land in the window the
-        // app started with.
-        window
-            .update(cx, |workspace, window, cx| {
-                workspace.watch_external_opens(pending_opens.clone(), window, cx);
-            })
-            .unwrap();
+        // External opens (Finder, `supermd://`) are routed at app
+        // level into whichever window is alive -- not bound to the one
+        // opened here, which the user may close while others stay up.
+        let _ = &window;
+        workspace::watch_external_opens(pending_opens.clone(), cx);
     });
 }
 

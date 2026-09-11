@@ -169,6 +169,8 @@
 <p>Unknown capability names reject the plugin at load, so older SuperMD versions fail your plugin clearly instead of running it half-working.</p>
 <h2><code>workspace-read</code></h2>
 <p>After a one-time consent banner, the user's open workspace is mounted <strong>read-only</strong> at <code>/workspace</code> inside your sandbox. Standard file APIs work under that path; everything else stays invisible. Until consent is granted, your plugin's calls return a consent-shaped error and SuperMD shows the banner — after granting, the user retries the action.</p>
+<p><strong>Not on the inline surface.</strong> <code>render_inline</code> runs on a process-shared host whose results are cached across every open window, so it has no single workspace to mount — each window has its own. A plugin that declares <code>workspace-read</code> is refused on that surface with a named error rather than being handed an empty <code>/workspace</code>. Every other surface (blocks, commands, formatters, paste, save hooks, viewers, templates, exports) runs on the window's own host and gets the mount. If your plugin needs workspace files <em>and</em> inline rendering, split it: do the reading in a block or command surface.</p>
+<p>Which folder is mounted is per window. Two windows open on two folders are two sandboxes; a plugin invoked from one never sees the other's files.</p>
 <h2><code>net</code></h2>
 <p>Declaring <code>net</code> gives you a host <code>fetch</code> function — your plugin never opens a socket. The host enforces:</p>
 <ul>

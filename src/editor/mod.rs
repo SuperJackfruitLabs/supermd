@@ -182,6 +182,12 @@ pub struct Editor {
     /// folders have two indexes and two plugin sandbox roots.
     knowledge: Option<crate::knowledge::KnowledgeHandle>,
     host: Option<crate::extensions::HostHandle>,
+    /// The host's preopen root, on a handle of its own. Block widgets
+    /// read it every frame to key the diagram cache, and locking the
+    /// host for that would stall the UI behind a running plugin call.
+    /// It is the *same* cell the host writes, so a re-root is visible
+    /// here immediately.
+    host_root: Option<crate::extensions::RootHandle>,
     /// Registered once, lazily, from the first render: a press belongs
     /// to the document that was on screen when it happened, and
     /// neither it nor the hover it started should outlive this editor
@@ -364,6 +370,9 @@ impl Editor {
             hover_held: false,
             hover_close_task: None,
             knowledge,
+            host_root: host
+                .as_ref()
+                .map(|h| h.lock().unwrap_or_else(|e| e.into_inner()).root_handle()),
             host,
             blur_subscription: None,
         };
@@ -4418,6 +4427,9 @@ mod tests {
                     editor.knowledge = knowledge;
                 }
                 if host.is_some() {
+                    editor.host_root = host
+                        .as_ref()
+                        .map(|h| h.lock().unwrap_or_else(|e| e.into_inner()).root_handle());
                     editor.host = host;
                     // A workspace-built editor has its host at
                     // construction, so `from_text_in` already scheduled

@@ -182,6 +182,112 @@ pub fn open_folders_in_new_windows(paths: Vec<PathBuf>, cx: &mut App) -> usize {
         .count()
 }
 
+/// Flush every dirty editor in every open window. The app-quit hook's
+/// whole job, extracted so it is a function with a test rather than a
+/// closure inside `main`.
+///
+/// Returns how many windows it flushed. With one window this used to
+/// be a single captured handle; a second window's unsaved edits must
+/// not be the price of ⌘Q.
+pub fn flush_all_windows(cx: &mut App) -> usize {
+    let mut flushed = 0;
+    for handle in cx.windows() {
+        let Some(handle) = handle.downcast::<Workspace>() else {
+            continue;
+        };
+        if handle
+            .update(cx, |workspace, _window, cx| workspace.flush_all(cx))
+            .is_ok()
+        {
+            flushed += 1;
+        }
+    }
+    flushed
+}
+
+/// Hand one drained batch of external opens to a live window: the
+/// active one if it is a workspace, otherwise any surviving workspace
+/// window. Returns the batch back when *no* window could take it, so
+/// the caller requeues instead of dropping what it just drained.
+///
+/// Window-agnostic on purpose. This used to be a per-window task
+/// wired only to the window `main()` opened, which was fine while that
+/// was the only window there could be: once ⌘⇧N exists, closing the
+/// first window would have killed Finder opens, "Open With", and every
+/// `supermd://` link for the rest of the session.
+pub fn deliver_external_opens(
+    queued: Vec<crate::PendingOpen>,
+    cx: &mut App,
+) -> Option<Vec<crate::PendingOpen>> {
+    let mut paths = Vec::new();
+    let mut installs = Vec::new();
+    for item in &queued {
+        match item {
+            crate::PendingOpen::Path(p) => paths.push(p.clone()),
+            crate::PendingOpen::InstallPlugin(name) => installs.push(name.clone()),
+        }
+    }
+    // The window the user is looking at first; then any other, so a
+    // batch that arrives while nothing is focused still lands.
+    let active = cx.active_window().into_iter();
+    for handle in active.chain(cx.windows()) {
+        let Some(handle) = handle.downcast::<Workspace>() else {
+            continue;
+        };
+        let delivered = handle
+            .update(cx, |workspace, window, cx| {
+                if !paths.is_empty() {
+                    workspace.open_external_paths(std::mem::take(&mut paths), window, cx);
+                }
+                for name in std::mem::take(&mut installs) {
+                    workspace.request_plugin_install(name, window, cx);
+                }
+            })
+            .is_ok();
+        if delivered {
+            return None;
+        }
+    }
+    Some(queued)
+}
+
+/// Poll the shared open-event queue (fed by `on_open_urls`) and route
+/// each batch into a live window. App-level, and it never exits while
+/// the app is alive: windows come and go under it.
+pub fn watch_external_opens(
+    pending: std::sync::Arc<std::sync::Mutex<Vec<crate::PendingOpen>>>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            let queued: Vec<crate::PendingOpen> = {
+                let mut guard = pending.lock().unwrap_or_else(|e| e.into_inner());
+                std::mem::take(&mut *guard)
+            };
+            if queued.is_empty() {
+                continue;
+            }
+            // `cx.update` failing means the app itself is gone, which
+            // is the only reason to stop polling.
+            let Ok(undelivered) = cx.update(|cx| deliver_external_opens(queued, cx)) else {
+                break;
+            };
+            // No window took it (none open yet, or all closing): put it
+            // back at the front rather than losing a Finder open.
+            if let Some(batch) = undelivered {
+                let mut guard = pending.lock().unwrap_or_else(|e| e.into_inner());
+                let rest = std::mem::take(&mut *guard);
+                guard.extend(batch);
+                guard.extend(rest);
+            }
+        }
+    })
+    .detach();
+}
+
 /// The welcome tour must be editable (it promises clickable checkboxes),
 /// so it lives as a real file the user owns. Written once; never
 /// clobbers user edits.
@@ -987,48 +1093,6 @@ impl Workspace {
         }
     }
 
-    /// Poll the shared open-event queue (fed by `on_open_urls`).
-    pub fn watch_external_opens(
-        &mut self,
-        pending: std::sync::Arc<std::sync::Mutex<Vec<crate::PendingOpen>>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(300))
-                    .await;
-                let queued: Vec<crate::PendingOpen> =
-                    std::mem::take(&mut *pending.lock().unwrap());
-                if queued.is_empty() {
-                    continue;
-                }
-                let mut paths = Vec::new();
-                let mut installs = Vec::new();
-                for item in queued {
-                    match item {
-                        crate::PendingOpen::Path(p) => paths.push(p),
-                        crate::PendingOpen::InstallPlugin(name) => installs.push(name),
-                    }
-                }
-                let live = this
-                    .update_in(cx, |workspace, window, cx| {
-                        if !paths.is_empty() {
-                            workspace.open_external_paths(paths, window, cx);
-                        }
-                        for name in installs {
-                            workspace.request_plugin_install(name, window, cx);
-                        }
-                    })
-                    .is_ok();
-                if !live {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
 
     fn close_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.tabs.len() {
@@ -1336,7 +1400,11 @@ impl Workspace {
 
     /// A second window on nothing in particular.
     fn new_window(&mut self, _: &NewWindow, _window: &mut Window, cx: &mut Context<Self>) {
-        open_in_new_window(None, cx);
+        if open_in_new_window(None, cx).is_none() {
+            // Rare (the platform refused a window), but ⌘⇧N doing
+            // nothing at all with no message is the worse answer.
+            self.show_command_error("Could not open a new window".to_string(), cx);
+        }
     }
 
     /// Pick a folder and open it *beside* this window rather than
@@ -1660,9 +1728,8 @@ impl Workspace {
             self.dismiss_palette(window, cx);
             return;
         }
-        let (entries, failures) = match Some(&self.host) {
-            Some(state) => {
-                let host = state.lock().unwrap();
+        let (entries, failures) = {
+            let host = self.host.lock().unwrap();
                 let mut entries = host
                     .plugins()
                     .iter()
@@ -1707,9 +1774,7 @@ impl Workspace {
                     .iter()
                     .map(|(dir, e)| format!("{}: {e}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
                     .collect();
-                (entries, failures)
-            }
-            None => (Vec::new(), Vec::new()),
+            (entries, failures)
         };
         // App-level commands exist with or without plugins.
         let mut entries = entries;
@@ -2233,6 +2298,7 @@ impl Workspace {
         if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
             let mut shared = crate::extensions::ExtensionHost::load(&plugins_dir);
             shared.set_grants(settings.plugin_grants.clone());
+            shared.mark_shared_rootless();
             *state.0.lock().unwrap() = shared;
         }
         if cx.try_global::<crate::diagram::DiagramCache>().is_some() {
@@ -5973,10 +6039,9 @@ pub(crate) mod tests {
 
     /// Like `open_workspace`, but takes the raw launch argument so tests
     /// can exercise the single-file / welcome-document startup paths.
-    fn open_arg(
-        cx: &mut TestAppContext,
-        arg: Option<PathBuf>,
-    ) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
+    /// The globals a workspace needs before it can be built or drawn.
+    /// Call under `temp_home()` -- the backup registry roots under it.
+    pub(crate) fn install_test_globals(cx: &mut TestAppContext) {
         cx.update(|cx| {
             cx.set_global(crate::theme::ActiveTheme(Arc::new(
                 crate::theme::Theme::dark(),
@@ -5998,6 +6063,13 @@ pub(crate) mod tests {
                 flux_blend: 0.0,
             });
         });
+    }
+
+    fn open_arg(
+        cx: &mut TestAppContext,
+        arg: Option<PathBuf>,
+    ) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
+        install_test_globals(cx);
         let (ws, vcx) = cx.add_window_view(|_, cx| Workspace::new(arg, cx));
         // The fixture host `with_plugins` loaded stands in for the one
         // a real workspace builds from ~/.supermd/plugins. Production
@@ -6076,8 +6148,8 @@ pub(crate) mod tests {
         cx.run_until_parked();
 
         cx.update(|_, app| {
-            let root_a = ws_a.read(app).host.lock().unwrap().workspace_root().map(Path::to_path_buf);
-            let root_b = ws_b.read(app).host.lock().unwrap().workspace_root().map(Path::to_path_buf);
+            let root_a = ws_a.read(app).host.lock().unwrap().workspace_root();
+            let root_b = ws_b.read(app).host.lock().unwrap().workspace_root();
             assert_eq!(root_a.as_deref(), Some(a.path()));
             assert_eq!(root_b.as_deref(), Some(b.path()));
             assert_ne!(root_a, root_b, "one host for both windows is the leak");
@@ -6106,6 +6178,55 @@ pub(crate) mod tests {
         cx.run_until_parked();
         assert_eq!(opened, 1, "the folder opened, the file did not");
         assert_eq!(cx.update(|_, app| app.windows().len()), before + 1);
+    }
+
+    /// ⌘Q must flush unsaved edits in *every* window, not only the one
+    /// the app started in. With a single window that distinction did
+    /// not exist; ⌘⇧N is what made it a way to lose work.
+    #[gpui::test]
+    fn quitting_flushes_dirty_editors_in_every_window(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = a_dir.path().join("a.md");
+        let b = b_dir.path().join("b.md");
+        std::fs::write(&a, "a on disk\n").unwrap();
+        std::fs::write(&b, "b on disk\n").unwrap();
+        install_test_globals(cx);
+
+        let first = cx
+            .update(|app| open_in_new_window(Some(a_dir.path().to_path_buf()), app))
+            .expect("first window");
+        let second = cx
+            .update(|app| open_in_new_window(Some(b_dir.path().to_path_buf()), app))
+            .expect("second window");
+        cx.run_until_parked();
+
+        // A dirty, unwritten buffer in each window.
+        for (handle, path, typed) in [(&first, &a, "AA"), (&second, &b, "BB")] {
+            cx.update(|app| {
+                handle.update(app, |ws, window, cx| ws.open_path(path, window, cx)).unwrap();
+            });
+            cx.run_until_parked();
+            cx.simulate_input((*handle).into(), typed);
+            cx.update(|app| {
+                let ws = handle.read(app).expect("window alive");
+                let Some(Tab::Editor { editor, .. }) = ws.tabs.get(ws.active) else {
+                    panic!("expected an editor tab");
+                };
+                assert!(editor.read(app).save.is_dirty(), "{typed} is unsaved");
+            });
+        }
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a on disk\n", "not yet written");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "b on disk\n");
+
+        let flushed = cx.update(flush_all_windows);
+        assert_eq!(flushed, 2, "both windows flushed");
+        assert!(std::fs::read_to_string(&a).unwrap().contains("AA"));
+        assert!(
+            std::fs::read_to_string(&b).unwrap().contains("BB"),
+            "the second window's edits survive the quit too"
+        );
     }
 
     #[test]
@@ -6154,7 +6275,7 @@ pub(crate) mod tests {
                 "the new window has its own index: {names_b:?}"
             );
             assert_eq!(
-                ws_b.host.lock().unwrap().workspace_root(),
+                ws_b.host.lock().unwrap().workspace_root().as_deref(),
                 Some(b.path()),
                 "and its own plugin sandbox root"
             );
@@ -8141,9 +8262,7 @@ pub(crate) mod tests {
         let (ws, cx) = open_workspace(cx, root.path());
 
         let pending: Arc<Mutex<Vec<crate::PendingOpen>>> = Arc::new(Mutex::new(Vec::new()));
-        ws.update_in(cx, |ws, window, cx| {
-            ws.watch_external_opens(pending.clone(), window, cx)
-        });
+        cx.update(|_, app| watch_external_opens(pending.clone(), app));
         // First poll finds an empty queue and keeps looping.
         cx.background_executor
             .advance_clock(std::time::Duration::from_millis(350));
@@ -8171,6 +8290,79 @@ pub(crate) mod tests {
             assert_eq!(tab_paths(w, app), vec![Some(a.clone())], "file opened; missing filtered");
             assert_eq!(w.preview_tab, None, "external opens are permanent tabs");
         });
+    }
+
+    /// Closing the window an external-open watcher was armed on must
+    /// not silence Finder opens, "Open With → SuperMD", or
+    /// `supermd://` links for the rest of the session. That is exactly
+    /// what happened while the watcher was a per-window task: with one
+    /// window it could never be observed, and ⌘⇧N made it reachable.
+    #[gpui::test]
+    fn external_opens_survive_the_window_they_were_armed_on(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let second_root = tempfile::tempdir().unwrap();
+        install_test_globals(cx);
+
+        let first = cx
+            .update(|app| open_in_new_window(Some(root.path().to_path_buf()), app))
+            .expect("first window");
+        let second = cx
+            .update(|app| open_in_new_window(Some(second_root.path().to_path_buf()), app))
+            .expect("second window");
+        let pending: Arc<Mutex<Vec<crate::PendingOpen>>> = Arc::new(Mutex::new(Vec::new()));
+        cx.update(|app| watch_external_opens(pending.clone(), app));
+        cx.run_until_parked();
+
+        // Close the window the app started in.
+        cx.update(|app| {
+            first.update(app, |_, window, _| window.remove_window()).ok();
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|app| first.read(app).is_err()), "the first window is gone");
+
+        pending
+            .lock()
+            .unwrap()
+            .push(crate::PendingOpen::Path(a.clone()));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(350));
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            let ws = second.read(app).expect("second window alive");
+            assert!(
+                tab_paths(ws, app).iter().flatten().any(|p| p == &a),
+                "the open landed in the surviving window: {:?}",
+                tab_paths(ws, app)
+            );
+        });
+        assert!(
+            pending.lock().unwrap().is_empty(),
+            "a delivered batch is not requeued"
+        );
+    }
+
+    /// A batch that reaches no window is handed back, not dropped --
+    /// the old loop took the queue and then threw the contents away if
+    /// the update failed.
+    #[gpui::test]
+    fn an_undeliverable_batch_comes_back_rather_than_vanishing(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        install_test_globals(cx);
+        let only = cx
+            .update(|app| open_in_new_window(Some(root.path().to_path_buf()), app))
+            .expect("window");
+        cx.update(|app| {
+            only.update(app, |_, window, _| window.remove_window()).ok();
+        });
+        cx.run_until_parked();
+
+        let batch = vec![crate::PendingOpen::Path(a.clone())];
+        let back = cx.update(|app| deliver_external_opens(batch, app));
+        let back = back.expect("no window could take it, so it comes back");
+        assert!(matches!(back.as_slice(), [crate::PendingOpen::Path(p)] if *p == a));
     }
 
     // ── diff view (⌘⇧D) ─────────────────────────────────────────────────
@@ -8307,22 +8499,21 @@ pub(crate) mod tests {
         cx.update(|_, app| assert!(ws.read(app)._watcher.is_none()));
     }
 
+    /// The *watcher's* drain loop is per-workspace and must exit with
+    /// it. (The external-open drain is deliberately not: it is
+    /// app-level now, and outlives any one window — see
+    /// `external_opens_survive_the_window_they_were_armed_on`.)
     #[gpui::test]
     fn drain_loops_exit_when_the_workspace_goes_away(cx: &mut TestAppContext) {
         let _home = temp_home();
-        let (root, a, _b) = workspace_fixture();
+        let (root, _a, _b) = workspace_fixture();
         let root_canon = root.path().canonicalize().unwrap();
         let (ws, cx) = open_workspace(cx, &root_canon);
 
-        let pending: Arc<Mutex<Vec<crate::PendingOpen>>> =
-            Arc::new(Mutex::new(vec![crate::PendingOpen::Path(a.clone())]));
-        ws.update_in(cx, |ws, window, cx| {
-            ws.setup_watcher(cx);
-            ws.watch_external_opens(pending.clone(), window, cx);
-        });
+        ws.update_in(cx, |ws, _, cx| ws.setup_watcher(cx));
 
         // Queue a real fs event, then tear the window (and workspace)
-        // down; both drain loops must notice and exit rather than spin.
+        // down; the drain loop must notice and exit rather than spin.
         std::fs::write(root_canon.join("late.md"), "# late\n").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
         cx.update(|window, _| window.remove_window());

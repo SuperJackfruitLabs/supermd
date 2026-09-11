@@ -156,6 +156,14 @@ commands! {
     // this table, which is the only reason the sidebar binding is still
     // reachable. `new_window_yields_cmd_shift_n_to_a_focused_sidebar`
     // asserts both halves; do not reorder without re-running it.
+    //
+    // It also holds only while "Sidebar" is the *deepest* key_context
+    // under sidebar focus. Nest another `key_context` anywhere in the
+    // sidebar subtree -- "SidebarEdit" already does exactly that while
+    // a row is being renamed -- and `depth_of("Sidebar")` drops below
+    // `contexts.len()`, the context-free binding outranks it outright,
+    // and declaration order cannot save it. A new context in that
+    // subtree needs its own ⌘⇧N binding, or this one moves.
     ws::NewWindow => { id: "new_window", label: "New Window",
         keys: ["cmd-shift-n"], ctx: None, menu: Some((File, 0)), help: Some(General) },
     ws::OpenDialog => { id: "open", label: "Open…", keys: ["cmd-o"],

@@ -42,7 +42,12 @@ Declared in the manifest, granted by the user:
 
 - *(none)* — pure compute; installs silently.
 - `capabilities = ["workspace-read"]` — the workspace root appears
-  read-only at `/workspace` after a one-time consent.
+  read-only at `/workspace` after a one-time consent. Per window: two
+  windows on two folders are two sandboxes. NOT available to
+  `render_inline`, whose results are cached across every window and so
+  have no single workspace to mount — declaring it makes inline calls
+  fail with a named error. Read files from a block or command surface
+  instead.
 - `capabilities = ["net"]` — enables `host_api::fetch` (https only,
   5 s / 2 MB / 4 fetches per call). Grants nothing by itself: every
   domain prompts its own one-time consent banner on first fetch.
