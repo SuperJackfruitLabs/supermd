@@ -317,6 +317,7 @@ pub fn plugin_diagram_state(
     lang: &str,
     source: &str,
     width: f32,
+    host: Option<crate::extensions::HostHandle>,
     cx: &mut gpui::App,
 ) -> DiagramState {
     let theme = DiagramTheme::from_theme(&crate::theme::theme(cx));
@@ -331,10 +332,10 @@ pub fn plugin_diagram_state(
     if let Some(state) = cx.global::<DiagramCache>().get(&key) {
         return state.clone();
     }
-    let Some(host) = cx
-        .try_global::<crate::extensions::ExtensionState>()
-        .map(|s| s.0.clone())
-    else {
+    // The host belongs to the workspace that owns the editor drawing
+    // this block, never to the process: its preopen root is that
+    // window's folder.
+    let Some(host) = host else {
         return DiagramState::Failed("extensions not initialized".to_string());
     };
     cx.global_mut::<DiagramCache>().insert(key.clone(), DiagramState::Pending);

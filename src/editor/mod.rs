@@ -175,6 +175,13 @@ pub struct Editor {
     /// The pointer is inside the popover itself, so it must not close.
     hover_held: bool,
     hover_close_task: Option<gpui::Task<()>>,
+    /// The owning workspace's knowledge index and plugin host, handed
+    /// over when the workspace builds the editor. An editor does not
+    /// know *which* workspace owns it, so it is given what it needs
+    /// rather than reaching for a process global — two windows on two
+    /// folders have two indexes and two plugin sandbox roots.
+    knowledge: Option<crate::knowledge::KnowledgeHandle>,
+    host: Option<crate::extensions::HostHandle>,
     /// Registered once, lazily, from the first render: a press belongs
     /// to the document that was on screen when it happened, and
     /// neither it nor the hover it started should outlive this editor
@@ -289,6 +296,19 @@ impl Editor {
     }
 
     pub fn from_text(path: &Path, text: String, langs: &Languages, cx: &mut Context<Self>) -> Self {
+        Self::from_text_in(path, text, langs, None, None, cx)
+    }
+
+    /// The workspace's constructor: the same editor, plus the handles
+    /// to the index and plugin host that own it.
+    pub fn from_text_in(
+        path: &Path,
+        text: String,
+        langs: &Languages,
+        knowledge: Option<crate::knowledge::KnowledgeHandle>,
+        host: Option<crate::extensions::HostHandle>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let provider = if is_markdown(path) {
             Provider::Markdown
         } else if let Some(lang) = language_for_path(path) {
@@ -343,6 +363,8 @@ impl Editor {
             hover_preview: None,
             hover_held: false,
             hover_close_task: None,
+            knowledge,
+            host,
             blur_subscription: None,
         };
         editor.restyle(langs);
@@ -462,10 +484,12 @@ impl Editor {
 
     /// The "repository is out of scope" hint for the empty-diff message,
     /// asked of the open workspace root. No workspace, no hint.
-    fn git_scope_hint(&self, cx: &App) -> Option<&'static str> {
-        let root = cx
-            .try_global::<crate::knowledge::KnowledgeState>()
-            .and_then(|s| s.0.lock().ok().map(|ix| ix.root.clone()))?;
+    fn git_scope_hint(&self) -> Option<&'static str> {
+        let root = self
+            .knowledge
+            .as_ref()
+            .and_then(|k| k.lock().ok().map(|ix| ix.root.clone()))
+            .filter(|root| !root.as_os_str().is_empty())?;
         crate::workspace::git_scope_hint(
             false,
             crate::workspace::repo_root_may_be_out_of_scope(&root),
@@ -713,12 +737,12 @@ impl Editor {
         }
         self.reveal_cursor();
         self.schedule_status(cx);
-        self.refresh_completion(cx);
+        self.refresh_completion();
         cx.notify();
     }
 
     /// Rebuild the `[[` completion for the text left of the cursor.
-    fn refresh_completion(&mut self, cx: &Context<Self>) {
+    fn refresh_completion(&mut self) {
         self.completion = None;
         if !self.can_format() || !self.core.selection.is_cursor() {
             return;
@@ -735,12 +759,11 @@ impl Editor {
         if query.contains(']') || query.contains('[') || query.contains('|') {
             return;
         }
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
+        let Some(state) = self.knowledge.clone() else {
             return;
         };
         let q = query.to_lowercase();
         let mut matches: Vec<(String, PathBuf)> = state
-            .0
             .lock()
             .unwrap()
             .note_names()
@@ -842,10 +865,10 @@ impl Editor {
             }
             _ => {}
         }
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
+        let Some(state) = self.knowledge.clone() else {
             return false;
         };
-        let resolved = state.0.lock().unwrap().resolve(&self.path, link);
+        let resolved = state.lock().unwrap().resolve(&self.path, link);
         let target = match resolved {
             Some(path) => path,
             None if link.wiki => {
@@ -853,7 +876,7 @@ impl Editor {
                 let Some(dir) = self.path.parent() else {
                     return false;
                 };
-                let root = state.0.lock().unwrap().root.clone();
+                let root = state.lock().unwrap().root.clone();
                 // `link.target` is unsanitised text from between the
                 // brackets: contain it before anything touches the disk.
                 let Some(path) = crate::knowledge::creatable_note_path(&root, dir, &link.target)
@@ -873,7 +896,7 @@ impl Editor {
                 // buffer. `AlreadyExists` (a file we did not see, or one
                 // that appeared in between) is the same answer: open it.
                 match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                    Ok(_) => state.0.lock().unwrap().update_file(&path, ""),
+                    Ok(_) => state.lock().unwrap().update_file(&path, ""),
                     Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                         if std::fs::symlink_metadata(&path)
                             .is_ok_and(|m| m.file_type().is_symlink())
@@ -918,10 +941,9 @@ impl Editor {
         if crate::extensions::widget_plugins().is_empty() {
             return;
         }
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+        let Some(host) = self.host.clone() else {
             return;
         };
-        let host = state.0.clone();
         self.status_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(500))
@@ -998,11 +1020,11 @@ impl Editor {
         let Some(plugin) = plugins.first() else {
             return;
         };
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+        let Some(host) = self.host.clone() else {
             return;
         };
         let snapshot = self.core.buffer.text();
-        let result = state.0.lock().unwrap().format_document(plugin, &snapshot);
+        let result = host.lock().unwrap().format_document(plugin, &snapshot);
         if let Ok(formatted) = result {
             if formatted != snapshot {
                 self.apply_command_output(
@@ -1022,13 +1044,13 @@ impl Editor {
         if plugins.is_empty() {
             return;
         }
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+        let Some(host) = self.host.clone() else {
             return;
         };
         let snapshot = self.core.buffer.text();
         let path = self.path.to_string_lossy().into_owned();
         let result = chain_save_hooks(snapshot.clone(), &path, &plugins, |p, path, doc| {
-            state.0.lock().unwrap().on_save(p, path, doc)
+            host.lock().unwrap().on_save(p, path, doc)
         });
         if result != snapshot {
             self.apply_command_output(
@@ -1747,8 +1769,8 @@ impl Editor {
             let mut out = text.clone();
             let paste_plugins = crate::extensions::paste_plugins();
             if !paste_plugins.is_empty() {
-                if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
-                    let mut host = state.0.lock().unwrap();
+                if let Some(state) = self.host.clone() {
+                    let mut host = state.lock().unwrap();
                     for plugin in &paste_plugins {
                         if let Ok(Some(replaced)) = host.process_paste(plugin, &text) {
                             out = replaced;
@@ -1805,10 +1827,9 @@ impl Editor {
         let Some(pending) = self.pending_enrich.as_ref() else {
             return;
         };
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+        let Some(host) = self.host.clone() else {
             return;
         };
-        let host = state.0.clone();
         let text = pending.pasted.clone();
         let task = cx.background_executor().spawn(async move {
             let mut consent: Option<(String, String)> = None;
@@ -2575,9 +2596,10 @@ impl Editor {
                 }
             }
             LinkTarget::Wiki(name) | LinkTarget::Relative(name) => {
-                let resolved = cx
-                    .try_global::<crate::knowledge::KnowledgeState>()
-                    .and_then(|s| s.0.lock().unwrap().resolve(&self.path, link));
+                let resolved = self
+                    .knowledge
+                    .as_ref()
+                    .and_then(|k| k.lock().unwrap().resolve(&self.path, link));
                 let Some(path) = resolved else {
                     return Preview::Missing { name };
                 };
@@ -4027,7 +4049,7 @@ impl Render for Editor {
                 )
                 .child(div().text_color(t.fg_muted).child("esc to close"))
         });
-        let scope_hint = self.git_scope_hint(cx);
+        let scope_hint = self.git_scope_hint();
         let diff_empty: Option<String> = self.diff.as_ref().and_then(|d| {
             use crate::git::Baseline;
             match &d.missing {
@@ -4375,8 +4397,35 @@ mod tests {
             let handle = editor.read(app).focus_handle.clone();
             window.focus(&handle);
         });
+        attach_workspace_handles(&editor, cx);
         cx.run_until_parked();
         (Fixture { _files: files, backups, path }, editor, cx)
+    }
+
+    /// Hand the editor the index and host a workspace would give it.
+    /// The test globals stand in for the workspace that does not exist
+    /// here; production wiring is `Workspace::make_editor`.
+    fn attach_workspace_handles(editor: &Entity<Editor>, cx: &mut VisualTestContext) {
+        cx.update(|_, app| {
+            let knowledge = app
+                .try_global::<crate::knowledge::KnowledgeState>()
+                .map(|s| s.0.clone());
+            let host = app
+                .try_global::<crate::extensions::ExtensionState>()
+                .map(|s| s.0.clone());
+            editor.update(app, |editor, cx| {
+                if knowledge.is_some() {
+                    editor.knowledge = knowledge;
+                }
+                if host.is_some() {
+                    editor.host = host;
+                    // A workspace-built editor has its host at
+                    // construction, so `from_text_in` already scheduled
+                    // the status widgets against it; re-run that here.
+                    editor.schedule_status(cx);
+                }
+            });
+        });
     }
 
     fn buffer_text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
@@ -5263,6 +5312,7 @@ mod tests {
             let handle = editor.read(app).focus_handle.clone();
             window.focus(&handle);
         });
+        attach_workspace_handles(&editor, cx);
         cx.run_until_parked();
         (backups, editor, cx)
     }

@@ -372,12 +372,14 @@ impl Projector for PluginBlockProjector {
             .downcast_ref::<PluginBlockPayload>()
             .expect("plugin block payload");
         let t = ctx.theme;
+        let host = ctx.editor.read(ctx.cx).host.clone();
         let state = crate::diagram::plugin_diagram_state(
             &payload.plugin,
             &payload.version,
             &payload.lang,
             &payload.body,
             664.0,
+            host,
             ctx.cx,
         );
         let handle = ctx.editor.clone();

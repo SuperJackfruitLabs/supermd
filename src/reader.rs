@@ -50,6 +50,10 @@ pub struct Reader {
     pub document: std::sync::Arc<Document>,
     pub toc: Vec<TocEntry>,
     pub list_state: ListState,
+    /// The owning workspace's knowledge index, for resolving a link's
+    /// hover preview. None when no workspace handed one over — the
+    /// index is per-workspace state, never a process global.
+    knowledge: Option<crate::knowledge::KnowledgeHandle>,
     focus_handle: FocusHandle,
     scroll_anim: Option<gpui::Task<()>>,
 }
@@ -143,9 +147,16 @@ impl Reader {
             document,
             toc,
             list_state,
+            knowledge: None,
             focus_handle: cx.focus_handle(),
             scroll_anim: None,
         }
+    }
+
+    /// Hand the reader its workspace's index (the workspace does this
+    /// right after building it).
+    pub fn set_knowledge(&mut self, knowledge: crate::knowledge::KnowledgeHandle) {
+        self.knowledge = Some(knowledge);
     }
 
     pub fn scroll_to_block(&mut self, block_ix: usize, cx: &mut Context<Self>) {
@@ -265,7 +276,12 @@ impl gpui::EventEmitter<ReaderEvent> for Reader {}
 /// so it can be tested directly, the way `Editor::preview_for` is —
 /// including that it reads `PreviewState`'s cached grants rather than
 /// settings off disk (see the module doc on `PreviewState::grants`).
-fn describe_link(base: Option<&Path>, dest: &str, cx: &App) -> Option<crate::preview::Preview> {
+fn describe_link(
+    base: Option<&Path>,
+    dest: &str,
+    knowledge: Option<&crate::knowledge::KnowledgeHandle>,
+    cx: &App,
+) -> Option<crate::preview::Preview> {
     let base = base?;
     // Same marker the click path reads: a wiki destination resolves
     // by stem, not as a path, or every `[[Wiki]]` previewed as "does
@@ -280,8 +296,7 @@ fn describe_link(base: Option<&Path>, dest: &str, cx: &App) -> Option<crate::pre
         .map(|s| s.grants())
         .unwrap_or_default();
     Some(crate::preview::preview_for_link(&link, dest, &grants, |l| {
-        cx.try_global::<crate::knowledge::KnowledgeState>()
-            .and_then(|s| s.0.lock().unwrap().resolve(base, l))
+        knowledge.and_then(|k| k.lock().unwrap().resolve(base, l))
     }))
 }
 
@@ -317,9 +332,10 @@ impl Render for Reader {
                         })
                     };
                     let base = reader.read(cx).path.clone();
+                    let knowledge = reader.read(cx).knowledge.clone();
                     let describe: view::Describe = std::rc::Rc::new(
                         move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
-                            describe_link(base.as_deref(), dest, cx)
+                            describe_link(base.as_deref(), dest, knowledge.as_ref(), cx)
                         },
                     );
                     view::list_item(&document, ix, &t, cx, Some(&follow), Some(&describe))
@@ -621,7 +637,7 @@ mod tests {
     ) -> crate::preview::Consent {
         cx.update(|app| {
             let Some(crate::preview::Preview::External { consent, .. }) =
-                describe_link(Some(base), dest, app)
+                describe_link(Some(base), dest, None, app)
             else {
                 panic!("expected an external preview")
             };

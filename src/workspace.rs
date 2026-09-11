@@ -242,6 +242,15 @@ enum OutlineTarget {
 
 pub struct Workspace {
     pub tree: Option<FileTree>,
+    /// This window's knowledge index. Per-workspace, never a process
+    /// global: two windows on two folders must not see each other's
+    /// notes in backlinks, completion or the graph.
+    pub knowledge: crate::knowledge::KnowledgeHandle,
+    /// This window's plugin host. One host per workspace, because the
+    /// host carries the `workspace-read` preopen root: a shared host
+    /// would let a plugin invoked from this window read another
+    /// window's folder.
+    pub host: crate::extensions::HostHandle,
     tabs: Vec<Tab>,
     active: usize,
     show_sidebar: bool,
@@ -407,9 +416,14 @@ fn make_editor(
     path: &Path,
     text: String,
     langs: &crate::highlight::Languages,
+    knowledge: &crate::knowledge::KnowledgeHandle,
+    host: &crate::extensions::HostHandle,
     cx: &mut Context<Workspace>,
 ) -> Entity<Editor> {
-    let editor = cx.new(|cx| Editor::from_text(path, text, langs, cx));
+    let (knowledge, host) = (knowledge.clone(), host.clone());
+    let editor = cx.new(|cx| {
+        Editor::from_text_in(path, text, langs, Some(knowledge), Some(host), cx)
+    });
     cx.subscribe(&editor, |this, _editor, event, cx| match event {
         EditorEvent::ConsentNeeded { plugin, cap } => {
             this.consent_request = Some((plugin.clone(), cap.clone()));
@@ -435,9 +449,15 @@ fn make_reader(
     title: SharedString,
     source: &str,
     langs: &crate::highlight::Languages,
+    knowledge: &crate::knowledge::KnowledgeHandle,
     cx: &mut Context<Workspace>,
 ) -> Entity<Reader> {
-    let reader = cx.new(|cx| Reader::from_source_at(path, title, source, langs, cx));
+    let knowledge = knowledge.clone();
+    let reader = cx.new(|cx| {
+        let mut reader = Reader::from_source_at(path, title, source, langs, cx);
+        reader.set_knowledge(knowledge);
+        reader
+    });
     cx.subscribe(&reader, |this, _reader, event, cx| {
         let crate::reader::ReaderEvent::Follow(dest) = event;
         this.follow_from_reader(dest, cx);
@@ -474,9 +494,7 @@ impl Workspace {
                 let Some(base) = self.tabs.get(self.active).and_then(|t| t.path(cx)) else {
                     return;
                 };
-                let resolved = cx
-                    .try_global::<crate::knowledge::KnowledgeState>()
-                    .and_then(|s| s.0.lock().unwrap().resolve(&base, &link));
+                let resolved = self.knowledge.lock().unwrap().resolve(&base, &link);
                 if let Some(path) = resolved {
                     self.pending_link_opens.push(path);
                     cx.notify();
@@ -495,19 +513,27 @@ impl Workspace {
         // preserved copy with defaults, so this must be captured at the
         // point of loading, not re-derived afterward.
         let mut settings_corrupt: Option<String> = None;
+        // Both handles belong to this workspace alone. Their
+        // *contents* are replaced when the folder changes, so editors
+        // and readers holding a clone never go stale.
+        let knowledge = crate::knowledge::KnowledgeHandle::default();
+        let host: crate::extensions::HostHandle = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::extensions::ExtensionHost::load(
+                &crate::settings::config_dir().join("plugins"),
+            ),
+        ));
 
         match arg {
             Some(path) if path.is_dir() => {
                 settings_corrupt = record_recent(&path);
-                cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
-                    std::sync::Mutex::new(crate::knowledge::Index::scan(&path)),
-                )));
+                *knowledge.lock().unwrap() = crate::knowledge::Index::scan(&path);
+                host.lock().unwrap().set_workspace_root(Some(path.clone()));
                 tree = Some(FileTree::new(path));
             }
             Some(path) => match Editor::read_file(&path) {
                 Ok(text) => {
                     let langs = languages(cx);
-                    let editor = make_editor(&path, text, &langs, cx);
+                    let editor = make_editor(&path, text, &langs, &knowledge, &host, cx);
                     tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 }
                 Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
@@ -520,7 +546,7 @@ impl Workspace {
                 match Editor::read_file(&path) {
                     Ok(text) => {
                         let langs = languages(cx);
-                        let editor = make_editor(&path, text, &langs, cx);
+                        let editor = make_editor(&path, text, &langs, &knowledge, &host, cx);
                         tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                     }
                     Err(_) => {
@@ -540,9 +566,12 @@ impl Workspace {
         let (startup_settings, startup_corrupt) =
             crate::settings::load_reporting(&crate::settings::config_dir());
         settings_corrupt = settings_corrupt.or(startup_corrupt);
+        host.lock().unwrap().set_grants(startup_settings.plugin_grants.clone());
 
         let mut workspace = Self {
             tree,
+            knowledge,
+            host,
             tabs,
             active: 0,
             show_sidebar: true,
@@ -721,8 +750,8 @@ impl Workspace {
         }
         self.refresh_git_status();
         // Keep the knowledge index warm: saves re-index, deletions drop.
-        if let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() {
-            let mut index = state.0.lock().unwrap();
+        {
+            let mut index = self.knowledge.lock().unwrap();
             for path in paths {
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
                     continue;
@@ -972,7 +1001,8 @@ impl Workspace {
                 Ok(text) => {
                     let langs = languages(cx);
                     let path_buf = path.to_path_buf();
-                    let editor = make_editor(&path_buf, text, &langs, cx);
+                    let (k, h) = (self.knowledge.clone(), self.host.clone());
+                    let editor = make_editor(&path_buf, text, &langs, &k, &h, cx);
                     Tab::Editor { editor, view: EditorView::Edit }
                 }
                 Err(err) => {
@@ -1035,12 +1065,8 @@ impl Workspace {
             if let Some(msg) = record_recent(path) {
                 self.show_command_error(msg, cx);
             }
-            if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
-                state.0.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
-            }
-            cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
-                std::sync::Mutex::new(crate::knowledge::Index::scan(path)),
-            )));
+            self.host.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
+            *self.knowledge.lock().unwrap() = crate::knowledge::Index::scan(path);
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
@@ -1089,7 +1115,8 @@ impl Workspace {
                 }
                 let langs = languages(cx);
                 let path = path.to_path_buf();
-                let editor = make_editor(&path, text, &langs, cx);
+                let (k, h) = (self.knowledge.clone(), self.host.clone());
+                let editor = make_editor(&path, text, &langs, &k, &h, cx);
                 self.tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 self.active = self.tabs.len() - 1;
                 if let Some(viewer) = path
@@ -1269,10 +1296,7 @@ impl Workspace {
             return;
         };
         let editor = editor.clone();
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
-            return;
-        };
-        let host = state.0.clone();
+        let host = self.host.clone();
         let filename = editor.read(cx).title().to_string();
         let content = editor.read(cx).text();
         let run = cx.background_executor().spawn(async move {
@@ -1284,7 +1308,8 @@ impl Workspace {
                 this.update_in(cx, |this, window, cx| {
                     let langs = languages(cx);
                     let title = editor.read(cx).title();
-                    let reader = make_reader(Some(editor.read(cx).path().to_path_buf()), title, &markdown, &langs, cx);
+                    let k = this.knowledge.clone();
+                    let reader = make_reader(Some(editor.read(cx).path().to_path_buf()), title, &markdown, &langs, &k, cx);
                     // Only swap if that tab still shows this editor in
                     // Edit view (the user may have toggled or closed).
                     if let Some(Tab::Editor { editor: e, view }) = this.tabs.get_mut(tab_ix) {
@@ -1371,7 +1396,8 @@ impl Workspace {
                     let lang = crate::reader::language_for_path(&path);
                     crate::reader::source_as_document(&text, lang.as_deref())
                 };
-                let reader = make_reader(Some(path.clone()), title, &source, &langs, cx);
+                let k = self.knowledge.clone();
+                let reader = make_reader(Some(path.clone()), title, &source, &langs, &k, cx);
                 if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(tab_ix) {
                     *view = EditorView::Preview(reader);
                 }
@@ -1519,9 +1545,9 @@ impl Workspace {
             self.dismiss_palette(window, cx);
             return;
         }
-        let (entries, failures) = match cx.try_global::<crate::extensions::ExtensionState>() {
+        let (entries, failures) = match Some(&self.host) {
             Some(state) => {
-                let host = state.0.lock().unwrap();
+                let host = state.lock().unwrap();
                 let mut entries = host
                     .plugins()
                     .iter()
@@ -1846,10 +1872,7 @@ impl Workspace {
                 self.show_command_error("Open a folder to use templates".to_string(), cx);
                 return;
             };
-            let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
-                return;
-            };
-            let host = state.0.clone();
+            let host = self.host.clone();
             let ctx_data = crate::extensions::template_context(
                 &root
                     .file_name()
@@ -1888,10 +1911,7 @@ impl Workspace {
             return;
         };
         let editor = editor.clone();
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
-            return;
-        };
-        let host = state.0.clone();
+        let host = self.host.clone();
         let (document, selection) = editor.read(cx).command_snapshot();
         if id == "__format" {
             let snapshot = document.clone();
@@ -1936,8 +1956,7 @@ impl Workspace {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "export".to_string());
-            let extension = state
-                .0
+            let extension = host
                 .lock()
                 .unwrap()
                 .plugins()
@@ -2057,6 +2076,9 @@ impl Workspace {
         let grant = if allow { cap.clone() } else { format!("denied:{cap}") };
         settings.plugin_grants.entry(plugin).or_default().push(grant);
         let _ = crate::settings::save(&dir, &settings);
+        self.host.lock().unwrap().set_grants(settings.plugin_grants.clone());
+        // The shared rootless host renders inline plugin output for
+        // every window; it needs the same grants (never a root).
         if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
             state.0.lock().unwrap().set_grants(settings.plugin_grants.clone());
         }
@@ -2090,8 +2112,13 @@ impl Workspace {
             eprintln!("supermd: plugin failed: {}: {err}", dir.display());
         }
         let count = host.plugins().len();
+        *self.host.lock().unwrap() = host;
+        // Rebuild the shared rootless host too, so inline rendering
+        // sees the new plugin set. It never gets a workspace root.
         if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
-            *state.0.lock().unwrap() = host;
+            let mut shared = crate::extensions::ExtensionHost::load(&plugins_dir);
+            shared.set_grants(settings.plugin_grants.clone());
+            *state.0.lock().unwrap() = shared;
         }
         if cx.try_global::<crate::diagram::DiagramCache>().is_some() {
             cx.global_mut::<crate::diagram::DiagramCache>().clear();
@@ -2431,9 +2458,7 @@ impl Workspace {
     /// Milestone-2 half of a rename/move: every note pointing at the
     /// moved path gets its links rewritten, on disk and in open tabs.
     fn rewrite_knowledge_links(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
-            return;
-        };
+        let state = self.knowledge.clone();
         // Disk is the rewrite source: flush dirty buffers first.
         for tab in &self.tabs {
             if let Tab::Editor { editor, .. } = tab {
@@ -2442,7 +2467,7 @@ impl Workspace {
                 }
             }
         }
-        let mut index = state.0.lock().unwrap();
+        let mut index = state.lock().unwrap();
         // A moved folder renames every note under it.
         let moved: Vec<(PathBuf, PathBuf)> = if new.is_dir() {
             index
@@ -4011,12 +4036,12 @@ impl Workspace {
 
     /// Build, lay out, and show the full-workspace graph.
     fn open_graph_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
+        if self.tree.is_none() {
             self.show_command_error("Open a folder to see its graph".to_string(), cx);
             return;
-        };
+        }
         let (mut nodes, mut edges) = {
-            let index = state.0.lock().unwrap();
+            let index = self.knowledge.lock().unwrap();
             let (mut n, mut e) = crate::graph::build(&index);
             // Notes the vault refers to but does not have. They are the
             // to-write list, and the graph is where they are visible.
@@ -4243,10 +4268,10 @@ impl Workspace {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let root = cx
-                .try_global::<crate::knowledge::KnowledgeState>()
-                .map(|s| s.0.lock().unwrap().root.clone());
-            let Some(root) = root else { return };
+            let root = self.knowledge.lock().unwrap().root.clone();
+            if root.as_os_str().is_empty() {
+                return;
+            }
             // The same containment the editor applies before creating a
             // note from a link.
             let Some(path) = crate::knowledge::creatable_note_path(&root, dir, &name) else {
@@ -4701,18 +4726,13 @@ impl Workspace {
         let Some(path) = self.tabs.get(self.active).and_then(|t| t.path(cx)) else {
             return Vec::new();
         };
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
-            return Vec::new();
-        };
-        let index = state.0.lock().unwrap();
+        let index = self.knowledge.lock().unwrap();
         index.backlinks(&path)
     }
 
     /// All workspace tags with counts, for the knowledge panel.
-    fn all_tags(&self, cx: &App) -> Vec<(String, usize)> {
-        cx.try_global::<crate::knowledge::KnowledgeState>()
-            .map(|state| state.0.lock().unwrap().tags())
-            .unwrap_or_default()
+    fn all_tags(&self) -> Vec<(String, usize)> {
+        self.knowledge.lock().unwrap().tags()
     }
 
     fn render_knowledge(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -4721,7 +4741,7 @@ impl Workspace {
         }
         let t = theme(cx);
         let backlinks = self.active_backlinks(cx);
-        let tags = self.all_tags(cx);
+        let tags = self.all_tags();
 
         let section = |title: &'static str| {
             div()
@@ -4748,8 +4768,7 @@ impl Workspace {
             .tabs
             .get(self.active)
             .and_then(|tab| tab.path(cx))
-            .zip(cx.try_global::<crate::knowledge::KnowledgeState>())
-            .map(|(path, state)| crate::graph::local(&state.0.lock().unwrap(), &path))
+            .map(|path| crate::graph::local(&self.knowledge.lock().unwrap(), &path))
             .filter(|(nodes, _)| nodes.len() > 1);
         if let Some((nodes, edges)) = local {
             let (w, h) = (216.0f32, 140.0f32);
@@ -5862,7 +5881,22 @@ pub(crate) mod tests {
                 flux_blend: 0.0,
             });
         });
-        cx.add_window_view(|_, cx| Workspace::new(arg, cx))
+        let (ws, vcx) = cx.add_window_view(|_, cx| Workspace::new(arg, cx));
+        // The fixture host `with_plugins` loaded stands in for the one
+        // a real workspace builds from ~/.supermd/plugins. Production
+        // never adopts the shared global -- see `ExtensionState`.
+        vcx.update(|_, app| {
+            if let Some(state) = app.try_global::<crate::extensions::ExtensionState>() {
+                let handle = state.0.clone();
+                ws.update(app, |ws, _| {
+                    if let Some(tree) = &ws.tree {
+                        handle.lock().unwrap().set_workspace_root(Some(tree.root.clone()));
+                    }
+                    ws.host = handle;
+                });
+            }
+        });
+        (ws, vcx)
     }
 
     fn tab_paths(ws: &Workspace, cx: &App) -> Vec<Option<PathBuf>> {
@@ -5910,6 +5944,58 @@ pub(crate) mod tests {
         assert_eq!(log, "Daily [note](Vision.md) link.\n");
     }
 
+    /// The plugin sandbox root is per window too. It decides which
+    /// directory a `workspace-read` plugin may preopen, so a host
+    /// shared between windows would let a plugin invoked from one
+    /// window read the other window's folder.
+    #[gpui::test]
+    fn two_workspaces_keep_separate_plugin_sandbox_roots(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+
+        let (ws_a, cx) = open_workspace(cx, a.path());
+        let (ws_b, cx) = open_workspace(cx, b.path());
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let root_a = ws_a.read(app).host.lock().unwrap().workspace_root().map(Path::to_path_buf);
+            let root_b = ws_b.read(app).host.lock().unwrap().workspace_root().map(Path::to_path_buf);
+            assert_eq!(root_a.as_deref(), Some(a.path()));
+            assert_eq!(root_b.as_deref(), Some(b.path()));
+            assert_ne!(root_a, root_b, "one host for both windows is the leak");
+        });
+    }
+
+    /// Two windows, two folders, two indexes. A process-wide
+    /// KnowledgeState meant the second workspace's backlinks and graph
+    /// showed the first workspace's notes.
+    #[gpui::test]
+    fn two_workspaces_keep_separate_indexes(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let a = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("Alpha.md"), "# Alpha\n").unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(b.path().join("Beta.md"), "# Beta\n").unwrap();
+
+        let (ws_a, cx) = open_workspace(cx, a.path());
+        let (ws_b, cx) = open_workspace(cx, b.path());
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let names_a: Vec<String> = ws_a.read(app).knowledge.lock().unwrap()
+                .note_names().iter().map(|(n, _)| n.clone()).collect();
+            let names_b: Vec<String> = ws_b.read(app).knowledge.lock().unwrap()
+                .note_names().iter().map(|(n, _)| n.clone()).collect();
+            assert!(names_a.iter().any(|n| n.eq_ignore_ascii_case("alpha")));
+            assert!(!names_a.iter().any(|n| n.eq_ignore_ascii_case("beta")),
+                "window A does not see window B's notes: {names_a:?}");
+            assert!(names_b.iter().any(|n| n.eq_ignore_ascii_case("beta")));
+            assert!(!names_b.iter().any(|n| n.eq_ignore_ascii_case("alpha")),
+                "and the reverse: {names_b:?}");
+        });
+    }
+
     #[gpui::test]
     fn knowledge_index_tracks_saves_through_the_watcher(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -5924,8 +6010,7 @@ pub(crate) mod tests {
         ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&b), cx));
         cx.run_until_parked();
         cx.update(|_, app| {
-            let state = app.global::<crate::knowledge::KnowledgeState>();
-            let index = state.0.lock().unwrap();
+            let index = ws.read(app).knowledge.lock().unwrap();
             let back = index.backlinks(&root.path().join("A.md"));
             assert!(
                 back.iter().any(|(p, _)| p.ends_with("B.md")),
@@ -5954,8 +6039,7 @@ pub(crate) mod tests {
         ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&leak), cx));
         cx.run_until_parked();
         cx.update(|_, app| {
-            let state = app.global::<crate::knowledge::KnowledgeState>();
-            let index = state.0.lock().unwrap();
+            let index = ws.read(app).knowledge.lock().unwrap();
             let back = index.backlinks(&root.path().join("A.md"));
             assert!(
                 !back.iter().any(|(p, _)| p.ends_with("leak.md")),
@@ -5982,8 +6066,7 @@ pub(crate) mod tests {
         ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[a.clone(), hidden.clone()], cx));
         cx.run_until_parked();
         cx.update(|_, app| {
-            let state = app.global::<crate::knowledge::KnowledgeState>();
-            let index = state.0.lock().unwrap();
+            let index = ws.read(app).knowledge.lock().unwrap();
             let back = index.backlinks(&a);
             assert!(
                 !back.iter().any(|(p, _)| p.ends_with("HIDDEN.md")),
@@ -6035,7 +6118,7 @@ pub(crate) mod tests {
         let (ws, cx) = open_workspace(cx, root.path());
 
         cx.update(|_, app| {
-            let tags = ws.read(app).all_tags(app);
+            let tags = ws.read(app).all_tags();
             assert_eq!(tags[0], ("planning".to_string(), 2));
             assert!(tags.contains(&("q3".to_string(), 1)));
         });
@@ -8984,9 +9067,15 @@ pub(crate) mod tests {
         assert!(installed.exists(), "plugin landed in the plugins dir");
         cx.update(|_, app| {
             assert!(ws.read(app).install_overlay.is_none(), "overlay closed");
-            let state = app.global::<crate::extensions::ExtensionState>();
-            let names: Vec<String> =
-                state.0.lock().unwrap().plugins().iter().map(|p| p.name.clone()).collect();
+            let names: Vec<String> = ws
+                .read(app)
+                .host
+                .lock()
+                .unwrap()
+                .plugins()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
             assert_eq!(names, ["demo"], "host reloaded with the new plugin");
         });
     }
@@ -9071,9 +9160,15 @@ pub(crate) mod tests {
         });
         cx.run_until_parked();
         cx.update(|_, app| {
-            let state = app.global::<crate::extensions::ExtensionState>();
-            let names: Vec<String> =
-                state.0.lock().unwrap().plugins().iter().map(|p| p.name.clone()).collect();
+            let names: Vec<String> = ws
+                .read(app)
+                .host
+                .lock()
+                .unwrap()
+                .plugins()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
             assert_eq!(names, ["echo"], "reload swapped to the temp-HOME plugin set");
         });
         let _ = ws;

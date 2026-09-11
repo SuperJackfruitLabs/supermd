@@ -576,6 +576,44 @@ pub fn wasm_target() -> Option<&'static str> {
     cfg!(feature = "mas").then_some("pulley64")
 }
 
+/// Engines are shared per compilation target. A host exists per
+/// workspace (the `workspace-read` preopen root is per-window state),
+/// and each one used to bring its own engine *and* its own forever
+/// epoch-ticker thread with it; one engine per target keeps a second
+/// window from costing a second thread. `Engine` is `Sync` and is
+/// designed to be shared -- only the compiled `Component`s and the
+/// stores built from them are per host.
+fn engine_for(target: Option<&str>) -> wasmtime::Engine {
+    static ENGINES: std::sync::Mutex<
+        Option<std::collections::BTreeMap<String, wasmtime::Engine>>,
+    > = std::sync::Mutex::new(None);
+    let key = target.unwrap_or("").to_string();
+    let mut guard = ENGINES.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(Default::default);
+    if let Some(engine) = map.get(&key) {
+        return engine.clone();
+    }
+    let mut config = wasmtime::Config::new();
+    config.epoch_interruption(true);
+    if let Some(t) = target {
+        config.target(t).expect("wasm target");
+    }
+    let engine = wasmtime::Engine::new(&config).expect("wasmtime engine");
+    // Tick the epoch forever; deadlines are per-call offsets.
+    {
+        let engine = engine.clone();
+        std::thread::Builder::new()
+            .name("supermd-wasm-epoch".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(EPOCH_TICK_MS));
+                engine.increment_epoch();
+            })
+            .expect("epoch thread");
+    }
+    map.insert(key, engine.clone());
+    engine
+}
+
 impl ExtensionHost {
     pub fn load(plugins_dir: &Path) -> Self {
         Self::load_with_target(plugins_dir, wasm_target())
@@ -585,24 +623,7 @@ impl ExtensionHost {
     /// compiles to Pulley bytecode and interprets it (no executable
     /// pages). None = native codegen.
     pub fn load_with_target(plugins_dir: &Path, target: Option<&str>) -> Self {
-        let mut config = wasmtime::Config::new();
-        config.epoch_interruption(true);
-        if let Some(t) = target {
-            config.target(t).expect("wasm target");
-        }
-        let engine = wasmtime::Engine::new(&config).expect("wasmtime engine");
-        // Tick the epoch forever; deadlines are per-call offsets.
-        {
-            let engine = engine.clone();
-            std::thread::Builder::new()
-                .name("supermd-wasm-epoch".into())
-                .spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_millis(EPOCH_TICK_MS));
-                    engine.increment_epoch();
-                })
-                .expect("epoch thread");
-        }
-
+        let engine = engine_for(target);
         let (metas, mut failures) = discover(plugins_dir);
         let mut plugins = Vec::new();
         for meta in metas {
@@ -634,6 +655,11 @@ impl ExtensionHost {
         for p in &mut self.plugins {
             p.instance = None;
         }
+    }
+
+    /// The folder this host's `workspace-read` preopen is rooted at.
+    pub fn workspace_root(&self) -> Option<&Path> {
+        self.workspace_root.as_deref()
     }
 
     /// Workspace root used for workspace-read preopens.
@@ -1220,8 +1246,24 @@ pub(crate) fn table_test_guard() -> std::sync::MutexGuard<'static, ()> {
     TABLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Global handle; plugin calls lock briefly on the background executor.
-pub struct ExtensionState(pub std::sync::Arc<std::sync::Mutex<ExtensionHost>>);
+/// One workspace's plugin host, shared with the editors it owns.
+pub type HostHandle = std::sync::Arc<std::sync::Mutex<ExtensionHost>>;
+
+/// The process-wide **rootless** host.
+///
+/// `ExtensionHost::set_workspace_root` is the `workspace-read` sandbox
+/// boundary: it decides which directory a granted plugin may preopen.
+/// That makes it per-window state, so every `Workspace` owns its own
+/// host (`Workspace::host`) rooted at its own folder.
+///
+/// This one exists only for the surfaces whose *results* are cached
+/// process-wide and therefore belong to no single window -- inline
+/// rendering, drained by `start_inline_drainer`. It is never given a
+/// workspace root, so `state_for` falls through to `zero_grant_state`
+/// and a `workspace-read` plugin rendering inline gets no filesystem at
+/// all. That is deliberate: a rooted shared host would render window
+/// B's inline spans with window A's folder open to it.
+pub struct ExtensionState(pub HostHandle);
 
 impl gpui::Global for ExtensionState {}
 
@@ -1913,6 +1955,53 @@ mod host_tests {
             Ok(s) => assert!(!s.contains("secret"), "preopen escape leaked: {s}"),
             Err(_) => {} // denied is the expected shape
         }
+    }
+
+    /// The `workspace-read` preopen is *per host* and it *follows* the
+    /// root. Both halves matter once there is a window per workspace:
+    /// each window's host must open only its own folder, and a host
+    /// re-rooted at a new folder must stop seeing the old one — which
+    /// only holds because `set_workspace_root` drops the cached
+    /// instances, since it is the instance that carries the preopen.
+    #[test]
+    fn the_preopen_root_is_per_host_and_follows_a_reroot() {
+        let Some(dir) = fixtures_dir() else { eprintln!("SKIP"); return; };
+        let a = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("probe.txt"), "alpha vault").unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(b.path().join("probe.txt"), "beta vault").unwrap();
+        let mut grants = std::collections::BTreeMap::new();
+        grants.insert("reader".to_string(), vec!["workspace-read".to_string()]);
+
+        let rooted = |root: &Path| {
+            let mut host = ExtensionHost::load(&dir);
+            host.set_workspace_root(Some(root.to_path_buf()));
+            host.set_grants(grants.clone());
+            host
+        };
+        let mut host_a = rooted(a.path());
+        let mut host_b = rooted(b.path());
+
+        // Two windows, two vaults: neither host can read the other's.
+        let read_a = host_a.format_document("reader", "x").unwrap();
+        let read_b = host_b.format_document("reader", "x").unwrap();
+        assert!(read_a.contains("alpha vault"), "{read_a}");
+        assert!(!read_a.contains("beta vault"), "window A read window B's folder: {read_a}");
+        assert!(read_b.contains("beta vault"), "{read_b}");
+        assert!(!read_b.contains("alpha vault"), "window B read window A's folder: {read_b}");
+        // Interleaved, after both have live instances.
+        let again = host_a.format_document("reader", "x").unwrap();
+        assert!(!again.contains("beta vault"), "A still reads only A: {again}");
+
+        // Re-rooting one host (Open Folder in this window) moves the
+        // boundary with it.
+        host_a.set_workspace_root(Some(b.path().to_path_buf()));
+        let after = host_a.format_document("reader", "x").unwrap();
+        assert!(after.contains("beta vault"), "the preopen followed the new root: {after}");
+        assert!(
+            !after.contains("alpha vault"),
+            "a stale instance kept the old preopen alive: {after}"
+        );
     }
 
     fn mock_transport(

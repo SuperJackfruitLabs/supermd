@@ -70,9 +70,21 @@ pub struct Index {
     notes: BTreeMap<PathBuf, NoteData>,
 }
 
-/// The workspace's shared index. Absent until a folder is open.
+/// One workspace's index, shared between the workspace entity and the
+/// editors and readers it owns. Every window has its own; the handle is
+/// created once per workspace and its *contents* are replaced when the
+/// folder changes, so anything holding a clone stays current.
+pub type KnowledgeHandle = std::sync::Arc<std::sync::Mutex<Index>>;
+
+/// Test-only carrier for a [`KnowledgeHandle`]: the editor and reader
+/// test helpers install one so they can hand an editor the same handle
+/// a workspace would. **Never a production global** -- the index is
+/// per-workspace state (`Workspace::knowledge`), and a process-wide one
+/// is exactly the bug that made a second window show the first
+/// window's backlinks. The `cfg(test)` gate is what keeps it that way.
+#[cfg(test)]
 #[derive(Clone)]
-pub struct KnowledgeState(pub std::sync::Arc<std::sync::Mutex<Index>>);
+pub struct KnowledgeState(pub KnowledgeHandle);
 /// GitHub's heading slug: alphanumerics lowercased, spaces and hyphens
 /// become hyphens, everything else is dropped. Must match the `toc`
 /// plugin's `slug`, since that is what writes the anchors people click.
@@ -119,6 +131,7 @@ pub fn heading_offset(text: &str, anchor: &str) -> Option<usize> {
     None
 }
 
+#[cfg(test)]
 impl gpui::Global for KnowledgeState {}
 
 /// Extract wiki + markdown links. Fenced code blocks and inline code
