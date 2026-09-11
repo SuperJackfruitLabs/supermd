@@ -1753,10 +1753,14 @@ impl Editor {
 
     /// First press reveals the replace field (and focuses it) without
     /// touching the buffer; the field is "shown only once the user
-    /// asks for it". A second press performs the replacement.
+    /// asks for it".
     ///
     /// Returns `true` when the field was just revealed, so the caller
-    /// stops there instead of also replacing.
+    /// stops there instead of also replacing. This is visibility only
+    /// -- it says nothing about which action asked, or what is in the
+    /// field -- so callers must not treat a `false` return as
+    /// permission to fire; that was the bug (see `replace_next` /
+    /// `replace_all`'s own content gate below).
     fn reveal_replace_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.ensure_find(cx);
         let state = self.find.as_mut().expect("just ensured");
@@ -1773,10 +1777,23 @@ impl Editor {
         if self.reveal_replace_field(window, cx) {
             return;
         }
-        let Some((at, with)) = self.find.as_ref().and_then(|s| {
-            let at = s.matches.get(s.active)?.clone();
-            Some((at, s.replace_input.read(cx).content.to_string()))
-        }) else {
+        let Some(state) = self.find.as_ref() else {
+            return;
+        };
+        let with = state.replace_input.read(cx).content.to_string();
+        // An empty replacement field never fires, no matter how many
+        // times a replace shortcut is pressed, and regardless of
+        // which one revealed the field. Silently wiping a match
+        // because a *different* shortcut was pressed while the field
+        // sat empty is exactly the bug this guard exists to prevent;
+        // requiring the field to be non-empty removes the ambiguity
+        // instead of trying to track "which action asked" across
+        // presses. A deliberate "delete every match" is not supported
+        // this way -- type a replacement, don't rely on repetition.
+        if with.is_empty() {
+            return;
+        }
+        let Some(at) = state.matches.get(state.active).cloned() else {
             return;
         };
         let text = self.core.buffer.text();
@@ -1788,13 +1805,19 @@ impl Editor {
         if self.reveal_replace_field(window, cx) {
             return;
         }
-        let Some((query, with)) = self
-            .find
-            .as_ref()
-            .map(|s| (s.input.read(cx).content.to_string(), s.replace_input.read(cx).content.to_string()))
-        else {
+        let Some(state) = self.find.as_ref() else {
             return;
         };
+        let query = state.input.read(cx).content.to_string();
+        let with = state.replace_input.read(cx).content.to_string();
+        // Same guard as `replace_next`, and just as load-bearing here:
+        // an empty replacement must never fire Replace All, or one
+        // stray press (from either replace shortcut) wipes every
+        // match in the document. See `replace_next` for the full
+        // rationale.
+        if with.is_empty() {
+            return;
+        }
         let text = self.core.buffer.text();
         let Some(edit) = replace::replace_all(&text, &query, &with) else {
             return;
@@ -4726,6 +4749,90 @@ mod tests {
                 ed.core.buffer.text(),
                 "a cat b cat c cat\n",
                 "one undo takes back the whole Replace All"
+            );
+        });
+    }
+
+    /// A different replace action must not piggyback on a field that
+    /// another action revealed: ReplaceNext reveals the field, then
+    /// ReplaceAll (with nothing typed) must not fire -- the shared
+    /// "is the field visible" flag is not permission to act.
+    #[gpui::test]
+    fn replace_next_then_replace_all_with_an_empty_field_is_a_no_op(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceNext); // reveals the field, no edit
+        cx.dispatch_action(ReplaceAll); // must not fire: field is empty
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.buffer.text(),
+                "a cat b cat c cat\n",
+                "an empty replace field must never wipe every match"
+            );
+        });
+    }
+
+    /// Same bug, other order: ReplaceAll reveals the field, then
+    /// ReplaceNext (with nothing typed) must not fire.
+    #[gpui::test]
+    fn replace_all_then_replace_next_with_an_empty_field_is_a_no_op(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceAll); // reveals the field, no edit
+        cx.dispatch_action(ReplaceNext); // must not fire: field is empty
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.buffer.text(),
+                "a cat b cat c cat\n",
+                "an empty replace field must never wipe a match"
+            );
+        });
+    }
+
+    /// Pressing the very same replace action twice with the field
+    /// left empty is deliberately still a no-op: this codebase does
+    /// not treat "asked twice" as consent to delete every match.
+    /// Typing an actual (even empty-after-edit) intent is the only
+    /// way to confirm a replacement -- see the comment on
+    /// `replace_next`/`replace_all`'s content gate.
+    #[gpui::test]
+    fn the_same_replace_action_twice_with_an_empty_field_stays_a_no_op(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceAll); // reveals the field, no edit
+        cx.dispatch_action(ReplaceAll); // still empty: still no edit
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.buffer.text(),
+                "a cat b cat c cat\n",
+                "repeating the same shortcut on an empty field is not consent to delete"
             );
         });
     }
