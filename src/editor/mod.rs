@@ -1254,16 +1254,17 @@ impl Editor {
             self.after_edit(cx);
             return;
         }
+        // Enter always starts a fresh undo group, independent of
+        // whatever coalescing window the preceding typing left open —
+        // whether the cursor is collapsed or Enter is replacing a
+        // selection. Without this, typing right up against Enter (no
+        // pause, no explicit break) could merge into the same group as
+        // the newline — and, once the ordered-list renumber stopped
+        // breaking the group on its own side (so one Enter costs one
+        // Undo, not two), that merge would reach all the way back into
+        // the user's typing on Undo.
+        self.core.break_undo_group();
         if self.core.selection.is_cursor() {
-            // Enter always starts a fresh undo group, independent of
-            // whatever coalescing window the preceding typing left
-            // open. Without this, a completed word right before Enter
-            // (no pause, no explicit break) could merge into the same
-            // group as the newline — and, once the ordered-list
-            // renumber stopped breaking the group on its own side (so
-            // one Enter costs one Undo, not two), that merge would
-            // reach all the way back into the user's typing on Undo.
-            self.core.break_undo_group();
             let head = self.core.selection.head;
             // Enter inside a table: tidy the block first, keeping the
             // cursor at its row boundary so the row stays whole.
@@ -6205,6 +6206,32 @@ mod tests {
             buffer_text(&editor, cx),
             "1. one!!!\n2. two\n",
             "the typing survives — only the Enter and its renumber are undone"
+        );
+    }
+
+    /// A third side of the same bug: Enter *replacing a selection*
+    /// (not just continuing after a collapsed cursor) must also start
+    /// its own undo group, or it coalesces with whatever typing is
+    /// still in its coalescing window. The selection is set directly
+    /// (not via the `SelectAll` action, whose own handler already
+    /// calls `break_undo_group()` and would mask the gap this covers)
+    /// so this exercises exactly the fallthrough path `newline()` takes
+    /// when the selection isn't a collapsed cursor.
+    #[gpui::test]
+    fn enter_replacing_a_selection_does_not_undo_prior_typing(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "");
+        cx.simulate_input("hello");
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.selection = Selection { anchor: 0, head: 5 };
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "\n");
+        cx.dispatch_action(Undo);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "hello",
+            "the typed text survives — Enter alone is undone, not the whole document"
         );
     }
 
