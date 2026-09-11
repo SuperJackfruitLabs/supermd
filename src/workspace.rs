@@ -120,15 +120,21 @@ pub fn repo_root_may_be_out_of_scope(workspace_root: &Path) -> bool {
     crate::bookmarks::needs_scope() && !workspace_root.join(".git").exists()
 }
 
-/// Persist a just-opened workspace root into the recents list.
-fn record_recent(root: &Path) {
+/// Persist a just-opened workspace root into the recents list. Returns
+/// a message when the on-disk settings could not be read: this
+/// function immediately saves over whatever it loaded, so a caller
+/// that can reach the user must surface the corruption here or lose
+/// the chance -- by the next line the preserved copy is the only
+/// record that anything was lost.
+fn record_recent(root: &Path) -> Option<String> {
     let dir = crate::settings::config_dir();
-    let mut settings = crate::settings::load(&dir);
+    let (mut settings, corrupt) = crate::settings::load_reporting(&dir);
     let blob = crate::bookmarks::create(root);
     settings.note_workspace(root, blob);
     if let Err(err) = crate::settings::save(&dir, &settings) {
         eprintln!("supermd: cannot save settings: {err}");
     }
+    corrupt
 }
 
 /// How an editor tab presents its buffer.
@@ -442,10 +448,17 @@ impl Workspace {
     pub fn new(arg: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut tree = None;
         let mut tabs = Vec::new();
+        // Set the first time any settings::load call during startup
+        // finds a file it could not use, so it can be surfaced once
+        // the workspace exists to show it -- by then a load-mutate-save
+        // elsewhere in this function may already have overwritten the
+        // preserved copy with defaults, so this must be captured at the
+        // point of loading, not re-derived afterward.
+        let mut settings_corrupt: Option<String> = None;
 
         match arg {
             Some(path) if path.is_dir() => {
-                record_recent(&path);
+                settings_corrupt = record_recent(&path);
                 cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
                     std::sync::Mutex::new(crate::knowledge::Index::scan(&path)),
                 )));
@@ -479,6 +492,15 @@ impl Workspace {
             }
         }
 
+        // Whichever branch above ran, its `settings::load*` call was
+        // this startup's only chance to observe a corrupt file before
+        // it might get silently overwritten with defaults; the field
+        // below reads the same file again after that has possibly
+        // already happened. `or` keeps whichever call actually saw it.
+        let (startup_settings, startup_corrupt) =
+            crate::settings::load_reporting(&crate::settings::config_dir());
+        settings_corrupt = settings_corrupt.or(startup_corrupt);
+
         let mut workspace = Self {
             tree,
             tabs,
@@ -497,7 +519,7 @@ impl Workspace {
             install_request: None,
             preview_tab: None,
             update_available: None,
-            startup_recents: crate::settings::load(&crate::settings::config_dir())
+            startup_recents: startup_settings
                 .recent_workspaces
                 .iter()
                 .map(PathBuf::from)
@@ -531,6 +553,14 @@ impl Workspace {
             navigating: false,
         };
         workspace.refresh_git_status();
+
+        if let Some(msg) = settings_corrupt {
+            // A console eprintln! reaches nobody in a packaged app with
+            // no console -- and the very next settings save (a theme
+            // change, a plugin grant) would otherwise overwrite the
+            // preserved copy with defaults for good.
+            workspace.show_command_error(msg, cx);
+        }
 
         // One quiet update check per launch; failures are silent. The
         // App Store build ships no checker, so it spawns no task either.
@@ -944,7 +974,9 @@ impl Workspace {
             // that is no longer open, and under the App Store sandbox
             // they are outside the active security-scoped bookmark.
             self.history.clear();
-            record_recent(path);
+            if let Some(msg) = record_recent(path) {
+                self.show_command_error(msg, cx);
+            }
             if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
                 state.0.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
             }
@@ -7188,6 +7220,32 @@ mod tests {
         std::fs::write(home._dir.path().join(".supermd"), "block").unwrap();
         let ws_dir = tempfile::tempdir().unwrap();
         record_recent(ws_dir.path());
+    }
+
+    /// A corrupt settings.toml must reach the user, not just an
+    /// eprintln! nobody sees in a packaged app -- and it has to happen
+    /// on this same startup, because record_recent's load-mutate-save
+    /// (triggered by opening this very workspace) is what overwrites
+    /// the preserved copy with defaults right afterward.
+    #[gpui::test]
+    fn corrupt_settings_file_surfaces_a_command_error_at_startup(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let config = crate::settings::config_dir();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("settings.toml"), "this is not = valid toml [[[").unwrap();
+
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let msg = w.command_error.clone().expect("the corruption must surface, not just print");
+            assert!(msg.contains("settings.toml.corrupt"), "message should name the recovery file: {msg}");
+        });
+        assert!(
+            config.join("settings.toml.corrupt").exists(),
+            "and the original bytes are actually kept on disk"
+        );
     }
 
     // ── startup argument variants ───────────────────────────────────────
