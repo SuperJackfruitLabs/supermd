@@ -78,6 +78,172 @@ pub fn body_font() -> &'static str {
     }
 }
 
+/// SuperMD's bundle identifier, hand-kept in step with the plist
+/// templates in `scripts/bundle_macos.sh` and `scripts/bundle_mas.sh`
+/// (this binary cannot read either at compile time).
+#[cfg(target_os = "macos")]
+const BUNDLE_ID: &str = "com.superjackfruit.supermd";
+
+/// The Uniform Type Identifier both bundle scripts declare
+/// `LSHandlerRank: Owner` for.
+#[cfg(target_os = "macos")]
+const MARKDOWN_UTI: &str = "net.daringfireball.markdown";
+
+/// Whether SuperMD is currently registered with LaunchServices as the
+/// Editor-role default for Markdown files. Read-only query.
+#[cfg(target_os = "macos")]
+pub fn is_default_markdown_handler() -> bool {
+    launch_services::current_editor(MARKDOWN_UTI).as_deref() == Some(BUNDLE_ID)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_default_markdown_handler() -> bool {
+    false
+}
+
+/// Ask LaunchServices to make SuperMD the default handler for Markdown
+/// files.
+///
+/// SPIKE FINDING (2026-09-11, task 6): `LSSetDefaultRoleHandlerForContentType`
+/// is refused under the App Sandbox. Verified empirically against a
+/// build signed with the `com.apple.security.app-sandbox` entitlement
+/// (not the DMG build, and not by reading documentation): the call
+/// returns OSStatus -54 (`permErr`) and the LaunchServices database is
+/// left untouched, reproducibly, while the identical call from an
+/// unsandboxed build returns 0 and the database updates.
+/// `NSWorkspace.setDefaultApplication(at:toOpen:)` (macOS 14+) was
+/// refused the same way (NSOSStatusErrorDomain -54) in the same test.
+/// So: the LaunchServices call is always attempted -- it is correct for
+/// the unsandboxed DMG build, and costs nothing to also try from the
+/// Mac App Store build in case a future OS stops refusing it -- and a
+/// `permErr` is translated into the one thing an App Store user can
+/// actually do about it today: the Finder "Open with" / "Change All…"
+/// steps this command exists to save most people from finding on their
+/// own.
+#[cfg(target_os = "macos")]
+pub fn request_default_markdown_handler() -> Result<(), String> {
+    let status = launch_services::set_default_editor(MARKDOWN_UTI, BUNDLE_ID);
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(describe_default_handler_status(status))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_default_markdown_handler() -> Result<(), String> {
+    Err("not supported".into())
+}
+
+/// Turn a nonzero LaunchServices `OSStatus` into a message the user can
+/// act on. Pure and platform-independent so it is directly testable
+/// everywhere; its only caller is macOS-only.
+fn describe_default_handler_status(status: i32) -> String {
+    if status == -54 {
+        "SuperMD can't set itself as the default automatically here -- \
+         the App Sandbox blocks that for Mac App Store apps. In Finder, \
+         right-click a Markdown file, choose Get Info, pick SuperMD \
+         under \"Open with\", then click \"Change All…\"."
+            .to_string()
+    } else {
+        format!("LaunchServices refused the request (status {status})")
+    }
+}
+
+/// Minimal LaunchServices/CoreServices FFI: no crate on crates.io
+/// wraps `LSCopyDefaultRoleHandlerForContentType` /
+/// `LSSetDefaultRoleHandlerForContentType`, so this hand-declares the
+/// two functions rather than adding a dependency for them. String
+/// marshaling reuses `objc2_foundation::NSString`, already a
+/// dependency: NSString and CFString are toll-free bridged, so a live
+/// `NSString*` is a valid `CFStringRef`.
+#[cfg(target_os = "macos")]
+mod launch_services {
+    use objc2_foundation::NSString;
+    use std::ffi::{c_char, c_void, CStr};
+
+    type CFStringRef = *const c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringGetCStringPtr(the_string: CFStringRef, encoding: u32) -> *const c_char;
+        fn CFStringGetCString(
+            the_string: CFStringRef,
+            buffer: *mut c_char,
+            buffer_size: isize,
+            encoding: u32,
+        ) -> u8;
+        fn CFRelease(cf: CFStringRef);
+    }
+
+    #[link(name = "CoreServices", kind = "framework")]
+    extern "C" {
+        fn LSCopyDefaultRoleHandlerForContentType(content_type: CFStringRef, role: u32) -> CFStringRef;
+        fn LSSetDefaultRoleHandlerForContentType(
+            content_type: CFStringRef,
+            role: u32,
+            handler_bundle_id: CFStringRef,
+        ) -> i32;
+    }
+
+    /// `kLSRolesEditor`, from `LaunchServices/LSInfo.h`.
+    const ROLE_EDITOR: u32 = 0x0000_0004;
+    /// `kCFStringEncodingUTF8`, from `CoreFoundation/CFString.h`.
+    const UTF8: u32 = 0x0800_0100;
+
+    fn as_cfstring_ref(s: &NSString) -> CFStringRef {
+        (s as *const NSString).cast()
+    }
+
+    fn cfstring_to_owned(s: CFStringRef) -> Option<String> {
+        unsafe {
+            let ptr = CFStringGetCStringPtr(s, UTF8);
+            if !ptr.is_null() {
+                return Some(CStr::from_ptr(ptr).to_string_lossy().into_owned());
+            }
+            // No fast-path pointer for this string's internal encoding;
+            // CFStringGetCString always works, just with a copy.
+            let mut buf = vec![0i8; 512];
+            if CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as isize, UTF8) != 0 {
+                Some(CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        }
+    }
+
+    /// The bundle identifier LaunchServices has registered as the
+    /// Editor-role default for `content_type`, if any.
+    pub fn current_editor(content_type: &str) -> Option<String> {
+        let content_type = NSString::from_str(content_type);
+        unsafe {
+            let raw = LSCopyDefaultRoleHandlerForContentType(as_cfstring_ref(&content_type), ROLE_EDITOR);
+            if raw.is_null() {
+                return None;
+            }
+            // LSCopy* follows the Create Rule: this call owns the
+            // returned reference and must release it.
+            let owned = cfstring_to_owned(raw);
+            CFRelease(raw);
+            owned
+        }
+    }
+
+    /// Ask LaunchServices to make `bundle_id` the Editor-role default
+    /// for `content_type`. Returns the raw OSStatus; 0 is success.
+    pub fn set_default_editor(content_type: &str, bundle_id: &str) -> i32 {
+        let content_type = NSString::from_str(content_type);
+        let bundle_id = NSString::from_str(bundle_id);
+        unsafe {
+            LSSetDefaultRoleHandlerForContentType(
+                as_cfstring_ref(&content_type),
+                ROLE_EDITOR,
+                as_cfstring_ref(&bundle_id),
+            )
+        }
+    }
+}
+
 pub fn mono_font() -> &'static str {
     if cfg!(target_os = "macos") {
         "Menlo"
@@ -151,6 +317,28 @@ mod tests {
         );
         assert_eq!(home_dir(), expected);
         assert!(!home_dir().as_os_str().is_empty());
+    }
+
+    /// Never true off macOS, and never panics anywhere.
+    #[test]
+    fn the_default_handler_query_is_safe_on_every_platform() {
+        let answer = is_default_markdown_handler();
+        if !MACOS {
+            assert!(!answer, "only macOS has a Markdown handler to be");
+        }
+    }
+
+    #[test]
+    fn permission_error_becomes_finder_instructions() {
+        let msg = describe_default_handler_status(-54);
+        assert!(msg.contains("Get Info"), "got {msg}");
+        assert!(msg.contains("Change All"), "got {msg}");
+    }
+
+    #[test]
+    fn other_ls_errors_include_the_status_code() {
+        let msg = describe_default_handler_status(-43);
+        assert!(msg.contains("-43"), "got {msg}");
     }
 
     #[test]

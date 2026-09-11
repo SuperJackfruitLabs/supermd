@@ -233,6 +233,12 @@ commands! {
         keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
     ws::ReloadPlugins => { id: "reload_plugins", label: "Reload Plugins",
         keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
+    // No keystroke: reached from the offer banner after the third
+    // Markdown file, or here for anyone who said no and changed their
+    // mind.
+    ws::MakeDefaultMarkdownApp => { id: "make_default_app",
+        label: "Use SuperMD for Markdown Files", keys: [],
+        ctx: None, menu: Some((Tools, 4)), help: None },
 
     // ── Help ───────────────────────────────────────────────────────────
     ws::ToggleShortcuts => { id: "shortcuts", label: "Keyboard Shortcuts",

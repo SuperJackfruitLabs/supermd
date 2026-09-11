@@ -23,6 +23,11 @@ pub struct Settings {
     pub plugin_grants: std::collections::BTreeMap<String, Vec<String>>,
     /// Time-of-day theme adaptation (off unless enabled).
     pub flux: FluxSettings,
+    /// Whether the user has already been offered (and answered, yes or
+    /// no) "make SuperMD the default Markdown app". A refusal is
+    /// remembered forever -- a prompt that comes back is worse than no
+    /// prompt.
+    pub default_handler_asked: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
@@ -66,6 +71,7 @@ impl Default for Settings {
             format_on_save: false,
             plugin_grants: Default::default(),
             flux: FluxSettings::default(),
+            default_handler_asked: false,
         }
     }
 }
@@ -184,6 +190,18 @@ mod tests {
     #[test]
     fn format_on_save_defaults_off() {
         assert!(!Settings::default().format_on_save);
+    }
+
+    /// A refusal is remembered forever. A prompt that comes back is
+    /// worse than no prompt.
+    #[test]
+    fn the_default_handler_answer_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        assert!(!s.default_handler_asked, "not asked on a fresh install");
+        s.default_handler_asked = true;
+        save(dir.path(), &s).unwrap();
+        assert!(load(dir.path()).default_handler_asked);
     }
 
     #[test]

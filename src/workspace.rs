@@ -44,6 +44,7 @@ actions!(
         ToggleGraph,
         ToggleFlux,
         InstallPlugins,
+        MakeDefaultMarkdownApp,
         GraphDismiss,
         GraphFit,
         GraphColorBy,
@@ -196,6 +197,18 @@ pub(crate) fn preview_plan(preview: Option<usize>, existing_ix: Option<usize>) -
     }
 }
 
+/// The third Markdown file opened this session is the trigger for the
+/// "make SuperMD the default" offer -- not the first (an app demanding
+/// to be the default before it has been used is the behaviour people
+/// resent), and not every one after the third (a prompt that keeps
+/// reappearing before the user has even answered it is worse than one
+/// that waits). The caller only calls this once `default_handler_asked`
+/// is already known false; a fourth or later open is a no-op that
+/// leaves an already-open banner alone rather than reopening it.
+pub(crate) fn should_offer_default_handler(markdown_opens_this_session: u32) -> bool {
+    markdown_opens_this_session == 3
+}
+
 /// Seti's 12 palette variables mapped onto our theme so icons read well
 /// in both appearances.
 pub(crate) fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
@@ -258,6 +271,17 @@ pub struct Workspace {
     startup_recents: Vec<PathBuf>,
     /// Move-to-Applications offer (Some = banner visible with message).
     install_banner: Option<SharedString>,
+    /// Markdown files opened so far this session. Counted only to
+    /// decide when to show the "make SuperMD the default" offer --
+    /// never on first launch, an app demanding to be the default before
+    /// it has been used is the behaviour people resent.
+    markdown_opens: u32,
+    /// "Make SuperMD the default Markdown app" offer banner.
+    show_default_handler_offer: bool,
+    /// Result of the most recent `MakeDefaultMarkdownApp` command,
+    /// shown once then cleared -- covers both the banner's Yes and the
+    /// Tools-menu command reached after an earlier no.
+    default_handler_result: Option<SharedString>,
     /// ☰ popover on platforms without a global menu bar.
     app_menu_open: bool,
     focus_handle: FocusHandle,
@@ -538,6 +562,9 @@ impl Workspace {
                 .ok()
                 .filter(|exe| crate::install::needs_install(exe))
                 .map(|_| "SuperMD is running from the disk image.".into()),
+            markdown_opens: 0,
+            show_default_handler_offer: false,
+            default_handler_result: None,
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
@@ -1050,11 +1077,63 @@ impl Workspace {
                 {
                     self.spawn_viewer_render(viewer, self.tabs.len() - 1, window, cx);
                 }
+                self.note_markdown_open(&path, cx);
                 self.focus_active(window, cx);
                 cx.notify();
             }
             Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
         }
+    }
+
+    /// Counts Markdown files opened this session, and on the third one
+    /// -- never on the first, an app demanding to be the default before
+    /// it has been used is the behaviour people resent -- offers to
+    /// make SuperMD the default Markdown app, unless the user has
+    /// already answered that offer (yes or no).
+    fn note_markdown_open(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if !crate::platform::MACOS {
+            return;
+        }
+        if !matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("md" | "markdown" | "mdown" | "mdx")
+        ) {
+            return;
+        }
+        if cx.global::<crate::theme::ThemeState>().settings.default_handler_asked {
+            return;
+        }
+        self.markdown_opens += 1;
+        if should_offer_default_handler(self.markdown_opens) {
+            self.show_default_handler_offer = true;
+        }
+    }
+
+    /// Persist the user's answer (yes or no) so the offer never returns
+    /// -- a prompt that comes back is worse than no prompt.
+    fn record_default_handler_answer(&mut self, cx: &mut Context<Self>) {
+        self.show_default_handler_offer = false;
+        let state = cx.global_mut::<crate::theme::ThemeState>();
+        state.settings.default_handler_asked = true;
+        if let Err(err) = crate::settings::save(&crate::settings::config_dir(), &state.settings) {
+            eprintln!("supermd: cannot save settings: {err}");
+        }
+    }
+
+    fn make_default_markdown_app(
+        &mut self,
+        _: &MakeDefaultMarkdownApp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.record_default_handler_answer(cx);
+        self.default_handler_result = Some(
+            match crate::platform::request_default_markdown_handler() {
+                Ok(()) => "SuperMD is now the default app for Markdown files.".into(),
+                Err(err) => err.into(),
+            },
+        );
+        cx.notify();
     }
 
     fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
@@ -5012,6 +5091,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reveal_settings_folder))
             .on_action(cx.listener(Self::import_plugin))
             .on_action(cx.listener(Self::reload_plugins))
+            .on_action(cx.listener(Self::make_default_markdown_app))
             .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent_ix(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent_ix(1, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent2, w, cx| this.open_recent_ix(2, w, cx)))
@@ -5113,6 +5193,87 @@ impl Render for Workspace {
                                     .child("Not now")
                                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                                         this.install_banner = None;
+                                        cx.notify();
+                                    })),
+                            )
+                    }))
+                    .children(self.show_default_handler_offer.then(|| {
+                        div()
+                            .w_full()
+                            .flex_none()
+                            .px_3()
+                            .py(px(6.))
+                            .bg(t.panel_bg)
+                            .border_b_1()
+                            .border_color(t.border)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .text_size(px(12.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_color(t.fg)
+                                    .child("Make SuperMD your default app for Markdown files?"),
+                            )
+                            .child(
+                                div()
+                                    .id("default-handler-yes")
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .bg(t.accent)
+                                    .text_color(t.bg)
+                                    .cursor_pointer()
+                                    .child("Use SuperMD for Markdown Files")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
+                                        this.make_default_markdown_app(&MakeDefaultMarkdownApp, w, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("default-handler-no")
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_color(t.fg_muted)
+                                    .hover(|s| s.bg(t.hover_bg))
+                                    .child("Not now")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                        this.record_default_handler_answer(cx);
+                                        cx.notify();
+                                    })),
+                            )
+                    }))
+                    .children(self.default_handler_result.clone().map(|message| {
+                        div()
+                            .w_full()
+                            .flex_none()
+                            .px_3()
+                            .py(px(6.))
+                            .bg(t.panel_bg)
+                            .border_b_1()
+                            .border_color(t.border)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .text_size(px(12.))
+                            .child(div().flex_1().text_color(t.fg).child(message))
+                            .child(
+                                div()
+                                    .id("default-handler-dismiss")
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_color(t.fg_muted)
+                                    .hover(|s| s.bg(t.hover_bg))
+                                    .child("Dismiss")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                        this.default_handler_result = None;
                                         cx.notify();
                                     })),
                             )
@@ -8342,6 +8503,79 @@ mod tests {
         }
         assert!(dismissed, "the Not-now button cleared the banner");
         assert!(move_failed, "the Move button reported the expected failure");
+    }
+
+    #[test]
+    fn should_offer_default_handler_only_on_the_third_open() {
+        assert!(!should_offer_default_handler(1));
+        assert!(!should_offer_default_handler(2));
+        assert!(should_offer_default_handler(3));
+        // A fourth-or-later open must not re-arm an already-answered or
+        // already-dismissed offer: the caller only reaches this once
+        // per session, but the pure rule itself stays a hard `== 3`.
+        assert!(!should_offer_default_handler(4));
+    }
+
+    /// Never on the first two Markdown files opened this session --
+    /// that is the "demanding to be the default before you've been
+    /// used" behaviour the brief calls out by name -- and never at all
+    /// off macOS, which has no Markdown handler to become.
+    #[gpui::test]
+    fn third_markdown_open_triggers_the_default_handler_offer(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, _w, cx| {
+            ws.note_markdown_open(&a, cx);
+            ws.note_markdown_open(&a, cx);
+            assert!(!ws.show_default_handler_offer, "not on the first two opens");
+            ws.note_markdown_open(&a, cx);
+            assert_eq!(
+                ws.show_default_handler_offer,
+                crate::platform::MACOS,
+                "the third open offers it, but only where there is a handler to become"
+            );
+        });
+    }
+
+    /// A refusal (or an acceptance) is remembered permanently: once
+    /// `default_handler_asked` is set, opening more Markdown files must
+    /// never bring the offer back.
+    #[gpui::test]
+    fn the_offer_never_returns_once_already_asked(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, _w, cx| {
+            cx.global_mut::<crate::theme::ThemeState>().settings.default_handler_asked = true;
+            for _ in 0..5 {
+                ws.note_markdown_open(&a, cx);
+            }
+            assert!(!ws.show_default_handler_offer, "an answered offer must not come back");
+        });
+    }
+
+    /// Answering hides the banner and persists the answer to disk, so a
+    /// restart does not ask again.
+    #[gpui::test]
+    fn recording_the_answer_hides_the_banner_and_survives_a_reload(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, _w, cx| {
+            ws.note_markdown_open(&a, cx);
+            ws.note_markdown_open(&a, cx);
+            ws.note_markdown_open(&a, cx);
+            ws.record_default_handler_answer(cx);
+            assert!(!ws.show_default_handler_offer, "answering dismisses the banner");
+            assert!(cx.global::<crate::theme::ThemeState>().settings.default_handler_asked);
+        });
+
+        let reloaded = crate::settings::load(&crate::settings::config_dir());
+        assert!(reloaded.default_handler_asked, "the answer survives a restart");
     }
 
     // ── plugin shell: palette commands, templates, exports, consent,
