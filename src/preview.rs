@@ -680,8 +680,11 @@ mod tests {
     /// itself has, minus a file read and a TOML parse on every hover.
     #[test]
     fn grants_are_read_once_and_refreshed_on_demand() {
-        let home = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", home.path()) };
+        // HOME is process-wide: share the crate's one lock-guarded
+        // helper rather than swapping it unguarded, or a test in
+        // another file racing the same env var reads this test's
+        // tempdir (or vice versa).
+        let _home = crate::workspace::tests::temp_home();
 
         // A grant already exists on disk before the state is built.
         let dir = crate::settings::config_dir();

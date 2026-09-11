@@ -5993,9 +5993,10 @@ mod tests {
     /// through an injected transport, so no test touches the network.
     #[gpui::test]
     fn enabling_a_site_is_what_triggers_the_first_fetch(cx: &mut TestAppContext) {
-        let home = tempfile::tempdir().unwrap();
-        // Settings are written by the grant, so redirect HOME.
-        unsafe { std::env::set_var("HOME", home.path()) };
+        // Settings are written by the grant, so redirect HOME -- through
+        // the crate's one lock-guarded helper, since HOME is process-wide
+        // and another test file swapping it concurrently would race.
+        let _home = crate::workspace::tests::temp_home();
 
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let c = calls.clone();

@@ -5732,7 +5732,7 @@ impl Render for Workspace {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -5793,13 +5793,16 @@ mod tests {
     /// env var; point it at a tempdir (serialized — env is process-wide).
     static HOME_LOCK: Mutex<()> = Mutex::new(());
 
-    struct TempHome {
+    pub(crate) struct TempHome {
         _dir: tempfile::TempDir,
         prev: Option<std::ffi::OsString>,
         _guard: MutexGuard<'static, ()>,
     }
 
-    fn temp_home() -> TempHome {
+    /// Serialized against every other caller of this helper across the
+    /// crate (env is process-wide, so two tests swapping HOME at once
+    /// race) -- not just within this file's own tests.
+    pub(crate) fn temp_home() -> TempHome {
         let guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("HOME");
