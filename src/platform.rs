@@ -39,6 +39,12 @@ fn translate_glyphs(mac: &str) -> String {
 /// carrying a `cfg!()` of its own.
 pub const ABOUT_IN_APP_MENU: bool = MACOS;
 
+/// SuperMD can only ever be a LaunchServices default handler on macOS
+/// -- LaunchServices itself is a macOS-only concept. The "Use SuperMD
+/// for Markdown Files" command asks here rather than carrying a
+/// `cfg!()` of its own, exactly like `ABOUT_IN_APP_MENU` above.
+pub const HAS_MARKDOWN_DEFAULT_HANDLER: bool = MACOS;
+
 /// Always the non-macOS rendering, for generating cross-platform docs.
 /// (`shortcut_glyphs` returns the macOS form when built on macOS; the
 /// docs need both columns whatever the host.)
@@ -132,7 +138,7 @@ pub fn request_default_markdown_handler() -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn request_default_markdown_handler() -> Result<(), String> {
-    Err("not supported".into())
+    Err("Setting a default app for Markdown files is a macOS feature.".into())
 }
 
 /// Turn a nonzero LaunchServices `OSStatus` into a message the user can

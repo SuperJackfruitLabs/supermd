@@ -390,15 +390,33 @@ pub fn menu_title(id: MenuId) -> &'static str {
     }
 }
 
-/// Commands in one menu, in declaration order — which the table keeps
-/// grouped, so group indices come out ascending.
-pub fn items_for(id: MenuId) -> Vec<&'static Command> {
+/// Platform-independent core of `items_for` (testable everywhere):
+/// About is filtered out here when it lives in the app menu instead,
+/// and `make_default_app` is filtered out wherever there is no
+/// Markdown-default-handler concept to reach for -- it would otherwise
+/// sit in the Tools menu as a dead command that always answers "not
+/// supported".
+fn items_for_platform(
+    id: MenuId,
+    about_in_app_menu: bool,
+    has_markdown_handler: bool,
+) -> Vec<&'static Command> {
     COMMANDS
         .iter()
         .filter(|c| matches!(c.menu, Some((m, _)) if m == id))
-        // About is a macOS app-menu item there, and a Help item elsewhere.
-        .filter(|c| !(c.id == "about" && crate::platform::ABOUT_IN_APP_MENU))
+        .filter(|c| !(c.id == "about" && about_in_app_menu))
+        .filter(|c| !(c.id == "make_default_app" && !has_markdown_handler))
         .collect()
+}
+
+/// Commands in one menu, in declaration order — which the table keeps
+/// grouped, so group indices come out ascending.
+pub fn items_for(id: MenuId) -> Vec<&'static Command> {
+    items_for_platform(
+        id,
+        crate::platform::ABOUT_IN_APP_MENU,
+        crate::platform::HAS_MARKDOWN_DEFAULT_HANDLER,
+    )
 }
 
 /// The About command, for the macOS app menu.
@@ -620,6 +638,27 @@ mod tests {
         let mut sorted = groups.clone();
         sorted.sort_unstable();
         assert_eq!(groups, sorted, "entries are grouped in order");
+    }
+
+    /// SuperMD can only ever be a LaunchServices default handler on
+    /// macOS; showing this elsewhere would be a dead menu item that
+    /// always answers "not supported". Exercised on the platform-
+    /// independent core so both branches are checked on any host,
+    /// not only whichever OS happens to run this test.
+    #[test]
+    fn make_default_app_only_appears_when_the_platform_has_a_handler() {
+        let with = items_for_platform(MenuId::Tools, true, true);
+        assert!(with.iter().any(|c| c.id == "make_default_app"), "present when the platform has one");
+        let without = items_for_platform(MenuId::Tools, true, false);
+        assert!(!without.iter().any(|c| c.id == "make_default_app"), "absent otherwise");
+    }
+
+    /// And the real, wired-up `items_for` agrees with whatever this
+    /// host actually is.
+    #[test]
+    fn make_default_app_is_macos_only() {
+        let present = items_for(MenuId::Tools).iter().any(|c| c.id == "make_default_app");
+        assert_eq!(present, crate::platform::MACOS, "needs a handler concept to reach");
     }
 
     #[test]

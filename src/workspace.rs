@@ -281,6 +281,14 @@ pub struct Workspace {
     /// Result of the most recent `MakeDefaultMarkdownApp` command,
     /// shown once then cleared -- covers both the banner's Yes and the
     /// Tools-menu command reached after an earlier no.
+    ///
+    /// This deliberately does not reuse `command_error`/
+    /// `show_command_error`: that mechanism auto-dismisses after 4
+    /// seconds, which is fine for a short one-line status but would
+    /// cut off the sandboxed-refusal message before a user finishes
+    /// reading the multi-sentence Finder "Open with -> Change All…"
+    /// instructions in `describe_default_handler_status`. This banner
+    /// instead stays up until the user dismisses it.
     default_handler_result: Option<SharedString>,
     /// ☰ popover on platforms without a global menu bar.
     app_menu_open: bool,
@@ -5261,6 +5269,10 @@ impl Render for Workspace {
                                     })),
                             )
                     }))
+                    // Deliberately its own banner, not `command_error`'s
+                    // 4s auto-dismissing one: the sandboxed-refusal
+                    // message is multi-sentence Finder instructions
+                    // that a 4s timer would cut off mid-read.
                     .children(self.default_handler_result.clone().map(|message| {
                         div()
                             .w_full()
