@@ -8,27 +8,44 @@
 
 use crate::commands::COMMANDS;
 
-/// Where a right-click happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Surface {
-    SidebarFile,
-    SidebarFolder,
-    Tab,
-    GraphNode,
-    GraphGhost,
-    Editor,
+/// Declares `Surface` and `Surface::ALL` from one variant list, so a
+/// variant cannot be added to the enum without also landing in `ALL`
+/// — there is no second place to forget it. Before this, `ALL` was a
+/// hand-written array beside the enum: adding a variant only forced a
+/// `command_ids` match arm (the match is exhaustive over `Surface`),
+/// nothing forced the variant into `ALL`, and every test that walks
+/// `Surface::ALL` — including `every_menu_item_names_a_real_command`
+/// — would have silently skipped it. Fusing the two removes the
+/// second list rather than merely testing that it stayed in sync.
+macro_rules! surfaces {
+    ($(#[$doc:meta])* pub enum Surface { $($variant:ident),* $(,)? }) => {
+        $(#[$doc])*
+        pub enum Surface {
+            $($variant),*
+        }
+
+        impl Surface {
+            /// Every surface, in declaration order. Derived from the
+            /// same variant list as the enum above — see `surfaces!`.
+            pub const ALL: &'static [Surface] = &[$(Surface::$variant),*];
+        }
+    };
+}
+
+surfaces! {
+    /// Where a right-click happened.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Surface {
+        SidebarFile,
+        SidebarFolder,
+        Tab,
+        GraphNode,
+        GraphGhost,
+        Editor,
+    }
 }
 
 impl Surface {
-    pub const ALL: &'static [Surface] = &[
-        Surface::SidebarFile,
-        Surface::SidebarFolder,
-        Surface::Tab,
-        Surface::GraphNode,
-        Surface::GraphGhost,
-        Surface::Editor,
-    ];
-
     /// Command ids this surface offers, in the order they appear.
     fn command_ids(self) -> &'static [&'static str] {
         match self {
@@ -65,13 +82,17 @@ pub struct MenuItem {
 }
 
 /// The menu for a surface, resolved against the command table. An id
-/// with no matching command is dropped rather than shown as a dead row
-/// — deliberately kept even though `every_menu_item_names_a_real_command`
-/// now catches a bad id at the source (`command_ids`): the filter is
-/// runtime insurance against every *other* way a mismatch could reach
-/// production (a command removed later, a future caller of this
-/// function that skips the test), so a typo here never renders a menu
-/// row that does nothing when clicked.
+/// with no matching command is dropped rather than shown as a dead row.
+///
+/// Belt-and-braces, not a gap-filler: `every_menu_item_names_a_real_command`
+/// walks every `command_ids()` id for every `Surface::ALL` entry, and
+/// `Surface::ALL` is now derived from the same variant list as the enum
+/// (`surfaces!`, above), so there is no id and no surface this function
+/// can be called with that the test does not already check on every
+/// `cargo test`. The filter has no live failure mode left to catch — it
+/// stays because a `String`-vs-`&'static str` id match costs nothing at
+/// this size, and "an unrecognised id renders nothing" is a cheaper
+/// invariant to keep true by construction than to keep re-justifying.
 pub fn items_for(surface: Surface) -> Vec<MenuItem> {
     surface
         .command_ids()
