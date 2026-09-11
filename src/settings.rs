@@ -96,17 +96,37 @@ pub fn themes_dir() -> PathBuf {
 }
 
 pub fn load(dir: &Path) -> Settings {
-    std::fs::read_to_string(dir.join("settings.toml"))
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default()
+    let path = dir.join("settings.toml");
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        // No file is the ordinary first-run case, not a problem.
+        return Settings::default();
+    };
+    match toml::from_str(&body) {
+        Ok(settings) => settings,
+        Err(err) => {
+            // Defaulting is right for a missing file and wrong for a
+            // corrupt one: the user's themes, recents, bookmarks and
+            // every plugin permission grant live here. Keep the bytes
+            // so they can be recovered, and say so.
+            let kept = dir.join("settings.toml.corrupt");
+            let _ = std::fs::write(&kept, &body);
+            eprintln!(
+                "supermd: {} could not be read ({err}); the previous file was kept at {}",
+                path.display(),
+                kept.display()
+            );
+            Settings::default()
+        }
+    }
 }
 
 pub fn save(dir: &Path, settings: &Settings) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let body = toml::to_string_pretty(settings)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(dir.join("settings.toml"), body)
+    // Temp file plus rename, as documents already do: an interrupted
+    // write leaves the old file intact rather than a truncated one.
+    crate::editor::autosave::atomic_write(&dir.join("settings.toml"), &body)
 }
 
 #[cfg(test)]
@@ -266,5 +286,55 @@ mod tests {
         let s = load(dir.path());
         assert_eq!(s.light_theme, "Jackfruit Light");
         assert_eq!(s.dark_theme, "Nord");
+    }
+
+    /// A torn write must not cost the user their settings. `save` was a
+    /// plain `fs::write`, so an interrupted one truncated the file and
+    /// `load` silently returned defaults -- discarding themes, recents,
+    /// bookmarks and every plugin permission grant with no message.
+    #[test]
+    fn a_corrupt_settings_file_is_preserved_not_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.toml"), "this is not = valid toml [[[").unwrap();
+
+        let loaded = load(dir.path());
+        assert_eq!(loaded, Settings::default(), "unreadable settings fall back");
+        assert!(
+            dir.path().join("settings.toml.corrupt").exists(),
+            "and the unreadable file is kept, not thrown away"
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("settings.toml.corrupt"))
+                .unwrap()
+                .contains("not = valid"),
+            "the preserved copy is the original bytes"
+        );
+    }
+
+    /// A missing file is not a corrupt one: first run must not leave a
+    /// `.corrupt` file lying beside the settings.
+    #[test]
+    fn a_missing_settings_file_leaves_no_corrupt_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load(dir.path()), Settings::default());
+        assert!(!dir.path().join("settings.toml.corrupt").exists());
+    }
+
+    /// Writes go through a temp file and a rename, so a reader never
+    /// observes a half-written file.
+    #[test]
+    fn save_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        s.format_on_save = true;
+        save(dir.path(), &s).unwrap();
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["settings.toml".to_string()], "one file, no scratch: {names:?}");
+        assert!(load(dir.path()).format_on_save, "and it round-trips");
     }
 }
