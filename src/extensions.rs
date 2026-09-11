@@ -680,6 +680,24 @@ impl ExtensionHost {
         self.workspace_root.clone()
     }
 
+    /// Adopt an existing root cell, carrying this host's current root
+    /// into it.
+    ///
+    /// `load` mints a fresh cell, so *replacing* a host — which is what
+    /// Reload Plugins does, in place inside the `HostHandle` mutex —
+    /// would otherwise orphan the cell every editor built before it is
+    /// holding. Those editors would then key their diagram renders
+    /// under a root that had stopped tracking the host: a later Open…
+    /// in the same window re-roots the host but not them, and the
+    /// cross-vault cache leak `DiagramKey::root_hash` exists to close
+    /// comes straight back. The swap must hand the new host the old
+    /// cell, not the other way round.
+    pub fn adopt_root_handle(&mut self, handle: RootHandle) {
+        let current = self.workspace_root();
+        *handle.write().unwrap_or_else(|e| e.into_inner()) = current;
+        self.workspace_root = handle;
+    }
+
     /// Mark this host as the process-shared, rootless one. See
     /// [`ExtensionState`]; `ensure_bound` refuses `workspace-read`
     /// plugins here rather than silently denying them a filesystem.
@@ -1579,20 +1597,31 @@ pub fn start_inline_drainer(cx: &mut gpui::App) {
                     let mut out = Vec::new();
                     for key in batch {
                         let result = host.lock().unwrap().render_inline(&key.0, &key.1, &key.2);
-                        // Once per key: the failure is cached as
-                        // permanent, so this cannot spam. Silence here
-                        // is how a plugin author ends up staring at a
-                        // marker that never renders and no reason why.
-                        if let Err(e) = &result {
-                            eprintln!("supermd: inline render failed ({}): {e}", key.0);
-                        }
-                        out.push((key, result.ok()));
+                        out.push((key, result));
                     }
                     out
                 })
                 .await;
+            // Once per key: the failure is cached as permanent, so this
+            // cannot repeat. Silence here is how a plugin author ends
+            // up staring at a marker that never renders and no reason
+            // why -- and stderr is not enough, since a Finder- or
+            // Dock-launched app sends it to Console.app where nobody
+            // is looking. Say it in the window.
+            let mut said = std::collections::BTreeSet::new();
             for (key, value) in resolved {
-                inline_insert(key, value);
+                if let Err(e) = &value {
+                    eprintln!("supermd: inline render failed ({}): {e}", key.0);
+                    let message = format!("{}: {e}", key.0);
+                    if said.insert(message.clone())
+                        && cx
+                            .update(|cx| crate::workspace::report_plugin_error(message, cx))
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
+                inline_insert(key, value.ok());
             }
             if cx.update(|cx| cx.refresh_windows()).is_err() {
                 break;

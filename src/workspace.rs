@@ -205,6 +205,32 @@ pub fn flush_all_windows(cx: &mut App) -> usize {
     flushed
 }
 
+/// Put a one-line plugin error in front of the user, in whichever
+/// window is in front. Returns whether a window took it.
+///
+/// The background plugin surfaces have no window of their own — inline
+/// rendering is drained by a process-level task — so `eprintln!` was
+/// the only report they made, and a Finder- or Dock-launched app sends
+/// that to Console.app where the plugin author who needs it never
+/// looks.
+pub fn report_plugin_error(message: String, cx: &mut App) -> bool {
+    let active = cx.active_window().into_iter();
+    for handle in active.chain(cx.windows()) {
+        let Some(handle) = handle.downcast::<Workspace>() else {
+            continue;
+        };
+        if handle
+            .update(cx, |workspace, _window, cx| {
+                workspace.show_command_error(message.clone(), cx)
+            })
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Hand one drained batch of external opens to a live window: the
 /// active one if it is a workspace, otherwise any surviving workspace
 /// window. Returns the batch back when *no* window could take it, so
@@ -1421,9 +1447,28 @@ impl Workspace {
             multiple: false,
             prompt: None,
         });
-        cx.spawn_in(window, async move |_this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
-            cx.update(|_, cx| open_folders_in_new_windows(paths, cx)).ok();
+            let wanted = paths.len();
+            let Ok(opened) = cx.update(|_, cx| open_folders_in_new_windows(paths, cx)) else {
+                return;
+            };
+            // Silently doing nothing is the failure mode this whole
+            // command class keeps falling into: a path that is not a
+            // directory, or a platform that refused the window.
+            if opened < wanted {
+                this.update(cx, |this, cx| {
+                    this.show_command_error(
+                        if opened == 0 {
+                            "Could not open that folder in a new window".to_string()
+                        } else {
+                            format!("Opened {opened} of {wanted} folders")
+                        },
+                        cx,
+                    );
+                })
+                .ok();
+            }
         })
         .detach();
     }
@@ -2292,7 +2337,14 @@ impl Workspace {
             eprintln!("supermd: plugin failed: {}: {err}", dir.display());
         }
         let count = host.plugins().len();
-        *self.host.lock().unwrap() = host;
+        {
+            let mut slot = self.host.lock().unwrap_or_else(|e| e.into_inner());
+            // Every editor in this window holds a clone of the *old*
+            // host's root cell. Carry it into the replacement, or they
+            // are all left pointing at a cell nothing writes to again.
+            host.adopt_root_handle(slot.root_handle());
+            *slot = host;
+        }
         // Rebuild the shared rootless host too, so inline rendering
         // sees the new plugin set. It never gets a workspace root.
         if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
@@ -6229,6 +6281,96 @@ pub(crate) mod tests {
         );
     }
 
+    /// Reload Plugins replaces the whole host inside the `HostHandle`
+    /// mutex, and `ExtensionHost::load` mints a fresh root cell. Every
+    /// editor built before the reload holds a clone of the *old* cell,
+    /// so unless the replacement adopts it they are left reading a cell
+    /// nothing writes to again — and the very next Open… in this window
+    /// re-roots the host while those editors keep keying their diagram
+    /// renders under the previous vault. That is the cross-vault cache
+    /// leak `DiagramKey::root_hash` exists to close, coming back in by
+    /// the side door.
+    #[gpui::test]
+    fn reloading_plugins_keeps_the_root_cell_editors_already_hold(
+        cx: &mut TestAppContext,
+    ) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        let before = cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { editor, .. }) = w.tabs.get(w.active) else {
+                panic!("expected an editor tab");
+            };
+            let cell = editor.read(app).plugin_root_handle().expect("editor has the root cell");
+            // `make_editor` hands over the host's *own* cell, not a copy.
+            assert!(
+                Arc::ptr_eq(&cell, &w.host.lock().unwrap().root_handle()),
+                "the editor shares the host's root cell from the moment it is built"
+            );
+            cell
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.reload_plugins(&ReloadPlugins, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let after = w.host.lock().unwrap().root_handle();
+            assert!(
+                Arc::ptr_eq(&before, &after),
+                "the reloaded host adopted the cell the editor still holds"
+            );
+        });
+
+        // And the proof that matters: re-rooting the window after a
+        // reload is visible to that editor.
+        let second = tempfile::tempdir().unwrap();
+        let second_root = second.path().canonicalize().unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&second_root, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            before.read().unwrap().as_deref(),
+            Some(second_root.as_path()),
+            "the editor's cell followed the new workspace root"
+        );
+    }
+
+    /// The background plugin surfaces have no window of their own, so
+    /// their failures used to reach the user only through `eprintln!`
+    /// — Console.app for a Finder- or Dock-launched build, i.e. nobody.
+    #[gpui::test]
+    fn a_background_plugin_failure_is_shown_in_a_window(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        install_test_globals(cx);
+        let window = cx
+            .update(|app| open_in_new_window(Some(root.path().to_path_buf()), app))
+            .expect("window");
+        cx.run_until_parked();
+
+        let shown = cx.update(|app| report_plugin_error("renderer: boom".to_string(), app));
+        assert!(shown, "a live window took it");
+        cx.update(|app| {
+            let ws = window.read(app).expect("window alive");
+            assert_eq!(
+                ws.command_error.as_ref().map(|m| m.to_string()),
+                Some("renderer: boom".to_string())
+            );
+        });
+
+        // With every window gone it reports that it could not be shown,
+        // rather than pretending it was.
+        cx.update(|app| {
+            window.update(app, |_, w, _| w.remove_window()).ok();
+        });
+        cx.run_until_parked();
+        assert!(!cx.update(|app| report_plugin_error("later".to_string(), app)));
+    }
+
     #[test]
     fn windows_cascade_and_wrap() {
         assert_eq!(cascade_origin(0), (100.0, 60.0));
@@ -8499,21 +8641,34 @@ pub(crate) mod tests {
         cx.update(|_, app| assert!(ws.read(app)._watcher.is_none()));
     }
 
-    /// The *watcher's* drain loop is per-workspace and must exit with
-    /// it. (The external-open drain is deliberately not: it is
-    /// app-level now, and outlives any one window — see
-    /// `external_opens_survive_the_window_they_were_armed_on`.)
+    /// Closing a window must let its `Workspace` — and the watcher
+    /// drain loop that outlived every earlier version of this test —
+    /// actually go. The loop holds a `WeakEntity`; if it ever held a
+    /// strong one, or forgot to exit, the entity below would never
+    /// drop and every closed window would leak a whole workspace.
+    ///
+    /// The previous name (`drain_loops_exit_when_the_workspace_goes_away`)
+    /// promised more than it checked: it had no assertion at all, and
+    /// the drain parks on a timer, so `run_until_parked` returned
+    /// whether or not the loop exited. Nothing could make it fail.
+    ///
+    /// The external-open drain is deliberately *not* covered here: it
+    /// is app-level now and outlives any one window — see
+    /// `external_opens_survive_the_window_they_were_armed_on`.
     #[gpui::test]
-    fn drain_loops_exit_when_the_workspace_goes_away(cx: &mut TestAppContext) {
+    fn closing_a_window_drops_its_workspace_and_its_watcher_loop(
+        cx: &mut TestAppContext,
+    ) {
         let _home = temp_home();
         let (root, _a, _b) = workspace_fixture();
         let root_canon = root.path().canonicalize().unwrap();
         let (ws, cx) = open_workspace(cx, &root_canon);
 
         ws.update_in(cx, |ws, _, cx| ws.setup_watcher(cx));
+        let weak = ws.downgrade();
 
-        // Queue a real fs event, then tear the window (and workspace)
-        // down; the drain loop must notice and exit rather than spin.
+        // Queue a real fs event so the loop has work in flight, then
+        // tear the window (and workspace) down under it.
         std::fs::write(root_canon.join("late.md"), "# late\n").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
         cx.update(|window, _| window.remove_window());
@@ -8524,6 +8679,10 @@ pub(crate) mod tests {
                 .advance_clock(std::time::Duration::from_millis(400));
             cx.run_until_parked();
         }
+        assert!(
+            weak.upgrade().is_none(),
+            "the workspace is gone; no drain loop is still holding it"
+        );
     }
 
     // ── theme picker edges ──────────────────────────────────────────────

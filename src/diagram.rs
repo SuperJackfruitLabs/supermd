@@ -339,16 +339,24 @@ pub fn plugin_diagram_state(
     source: &str,
     width: f32,
     host: Option<crate::extensions::HostHandle>,
-    root: Option<PathBuf>,
+    root: Option<crate::extensions::RootHandle>,
     cx: &mut gpui::App,
 ) -> DiagramState {
     // The host belongs to the workspace that owns the editor drawing
     // this block, never to the process: its preopen root is that
-    // window's folder, and `root` is that same root read off a handle
-    // the host shares (never by locking the host on the render path).
+    // window's folder.
     let Some(host) = host else {
         return DiagramState::Failed("extensions not initialized".to_string());
     };
+    // The root is read *here*, from the cell the host shares, rather
+    // than taken as a value the caller computed: a caller that gets it
+    // wrong silently re-opens the cross-vault cache leak, and there is
+    // nothing on the render path for it to get wrong if it only ever
+    // forwards the cell. A read-lock on that cell is cheap — it is the
+    // *host* mutex that must never be taken per frame, since a plugin
+    // call holds it for up to the epoch cap. Poison keeps the root
+    // rather than falling back to the shared `None` key space.
+    let root = root.and_then(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
     let theme = DiagramTheme::from_theme(&crate::theme::theme(cx));
     let key = DiagramKey {
         source_hash: hash_str(&format!("{plugin}@{version}:{lang}\u{0}{source}")),
@@ -513,6 +521,9 @@ mod tests {
                 crate::extensions::ExtensionHost::load(Path::new("/nonexistent")),
             ));
             let body = "same fence body";
+            let cell = |root: &Path| -> crate::extensions::RootHandle {
+                Arc::new(std::sync::RwLock::new(Some(root.to_path_buf())))
+            };
             let call = |root: &Path, cx: &mut gpui::App| {
                 plugin_diagram_state(
                     "renderer",
@@ -521,7 +532,7 @@ mod tests {
                     body,
                     664.0,
                     Some(host.clone()),
-                    Some(root.to_path_buf()),
+                    Some(cell(root)),
                     cx,
                 )
             };

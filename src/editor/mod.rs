@@ -182,11 +182,19 @@ pub struct Editor {
     /// folders have two indexes and two plugin sandbox roots.
     knowledge: Option<crate::knowledge::KnowledgeHandle>,
     host: Option<crate::extensions::HostHandle>,
-    /// The host's preopen root, on a handle of its own. Block widgets
-    /// read it every frame to key the diagram cache, and locking the
-    /// host for that would stall the UI behind a running plugin call.
-    /// It is the *same* cell the host writes, so a re-root is visible
-    /// here immediately.
+    /// The host's preopen root, on a cell shared with the host. Block
+    /// widgets read it every frame to key the diagram cache, and
+    /// locking the host for that would stall the UI behind a running
+    /// plugin call.
+    ///
+    /// Shared, not copied — but only because every path that replaces
+    /// the host keeps the cell: `set_workspace_root` writes through it,
+    /// and Reload Plugins hands the replacement host the old cell via
+    /// `ExtensionHost::adopt_root_handle`. A host swap that minted a
+    /// fresh cell instead would orphan this one silently, and the
+    /// editor would key its renders under a root that had stopped
+    /// tracking the window. `reloading_plugins_keeps_the_root_cell_editors_already_hold`
+    /// is what holds that up.
     host_root: Option<crate::extensions::RootHandle>,
     /// Registered once, lazily, from the first render: a press belongs
     /// to the document that was on screen when it happened, and
@@ -383,6 +391,14 @@ impl Editor {
 
     pub fn text(&self) -> String {
         self.core.buffer.text()
+    }
+
+    /// The cell naming the folder this editor's plugin renders may
+    /// read. The block-widget path forwards it straight to
+    /// `diagram::plugin_diagram_state`, which does the read itself —
+    /// nothing in between computes a root that could be wrong.
+    pub(crate) fn plugin_root_handle(&self) -> Option<crate::extensions::RootHandle> {
+        self.host_root.clone()
     }
 
     /// Point the editor at a new path after a rename or move; buffer
