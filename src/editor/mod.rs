@@ -1255,6 +1255,15 @@ impl Editor {
             return;
         }
         if self.core.selection.is_cursor() {
+            // Enter always starts a fresh undo group, independent of
+            // whatever coalescing window the preceding typing left
+            // open. Without this, a completed word right before Enter
+            // (no pause, no explicit break) could merge into the same
+            // group as the newline — and, once the ordered-list
+            // renumber stopped breaking the group on its own side (so
+            // one Enter costs one Undo, not two), that merge would
+            // reach all the way back into the user's typing on Undo.
+            self.core.break_undo_group();
             let head = self.core.selection.head;
             // Enter inside a table: tidy the block first, keeping the
             // cursor at its row boundary so the row stays whole.
@@ -6175,6 +6184,28 @@ mod tests {
         assert_eq!(buffer_text(&editor, cx), "1. one\n2. \n3. two\n", "the run renumbers");
         cx.dispatch_action(Undo);
         assert_eq!(buffer_text(&editor, cx), doc, "one Enter costs exactly one Undo");
+    }
+
+    /// The opposite side of the same bug: typing right up against the
+    /// Enter (no pause, no separate group of its own) must not let the
+    /// renumber's coalesced group reach back and undo the typing too.
+    #[gpui::test]
+    fn enter_continuation_renumber_does_not_undo_prior_typing(cx: &mut TestAppContext) {
+        let doc = "1. one\n2. two\n";
+        let (_fx, editor, cx) = open_editor(cx, "list.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(6); // right after "one"
+            cx.notify();
+        });
+        cx.simulate_input("!!!");
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "1. one!!!\n2. \n3. two\n", "the run renumbers");
+        cx.dispatch_action(Undo);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "1. one!!!\n2. two\n",
+            "the typing survives — only the Enter and its renumber are undone"
+        );
     }
 
     #[gpui::test]
