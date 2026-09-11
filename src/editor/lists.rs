@@ -89,6 +89,20 @@ pub fn renumber(text: &str, block: std::ops::Range<usize>) -> Option<String> {
     while let Some(line) = lines.next() {
         let is_last = lines.peek().is_none();
         let Some(item) = list_item(line) else {
+            // A blank line ends every currently open run. A non-blank,
+            // non-list line ends any run at its own indent or shallower
+            // (a separate paragraph, not a continuation of a deeper
+            // item) — so the next ordered item at that level restarts
+            // at the author's own number instead of continuing a stale
+            // count from an unrelated, textually earlier list.
+            if line.trim().is_empty() {
+                stack.clear();
+            } else {
+                let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+                while stack.last().is_some_and(|(ind, _)| *ind >= indent) {
+                    stack.pop();
+                }
+            }
             out.push_str(line);
             if !is_last {
                 out.push('\n');
@@ -98,7 +112,9 @@ pub fn renumber(text: &str, block: std::ops::Range<usize>) -> Option<String> {
         let rest = &line[item.indent..];
         let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
         if digits == 0 {
-            // A bullet: leave the line as-is.
+            // A bullet: leave the line as-is. It doesn't reset an
+            // ordered run — a bullet can appear inline within one
+            // (e.g. as a nested sub-item) without ending it.
             out.push_str(line);
             if !is_last {
                 out.push('\n');
@@ -227,5 +243,26 @@ mod tests {
     #[test]
     fn renumber_ignores_an_unordered_list() {
         assert!(renumber("- a\n- b\n", 0..6).is_none());
+    }
+
+    /// Two textually separate ordered lists (a blank-line-and-paragraph
+    /// gap between them) keep their own counts — the second list's
+    /// deliberate restart at 1 is not a typo to fix.
+    #[test]
+    fn renumber_restarts_a_separate_list_after_a_paragraph() {
+        let text = "1. one\n2. two\n\npara\n\n1. three\n2. four\n";
+        let out = renumber(text, 0..text.len());
+        // Already correctly numbered, so unchanged (still Some: there
+        // are ordered items to renumber, it's just a no-op on them).
+        assert_eq!(out.as_deref(), Some(text), "both lists keep restarting correctly");
+    }
+
+    /// Same, but with no blank line between the two lists (an ordinary
+    /// paragraph line ends the run just as a blank line does).
+    #[test]
+    fn renumber_restarts_a_separate_list_after_a_bare_paragraph_line() {
+        let text = "1. one\n2. two\npara\n1. three\n2. four\n";
+        let out = renumber(text, 0..text.len());
+        assert_eq!(out.as_deref(), Some(text), "the paragraph line ends the first run");
     }
 }

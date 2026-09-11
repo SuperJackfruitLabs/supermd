@@ -1450,6 +1450,10 @@ impl Editor {
     }
 
     fn table_insert_row(&mut self, _: &TableInsertRow, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
         let Some((br, block, pos)) = self.table_cursor() else {
             return;
         };
@@ -1458,6 +1462,10 @@ impl Editor {
     }
 
     fn table_delete_row(&mut self, _: &TableDeleteRow, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
         let Some((br, block, pos)) = self.table_cursor() else {
             return;
         };
@@ -1474,6 +1482,10 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
         let Some((br, block, pos)) = self.table_cursor() else {
             return;
         };
@@ -1487,6 +1499,10 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
         let Some((br, block, pos)) = self.table_cursor() else {
             return;
         };
@@ -1499,6 +1515,12 @@ impl Editor {
 
     /// Renumber the ordered-list run around the cursor (the contiguous
     /// non-blank lines it sits in). A no-op outside an ordered list.
+    ///
+    /// Deliberately does not call `break_undo_group()` before its own
+    /// edit: called right after `newline()`'s Enter-continuation insert,
+    /// it must coalesce into that same undo group so one Enter costs one
+    /// Undo. A caller that needs this isolated as its own undo step
+    /// (`renumber_list` below) breaks the group itself first.
     fn renumber_current_list(&mut self, cx: &mut Context<Self>) {
         let head = self.core.selection.head;
         let cur_line = self.core.buffer.line_of_byte(head);
@@ -1523,7 +1545,6 @@ impl Editor {
         if new_text == text {
             return;
         }
-        self.core.break_undo_group();
         self.core.replace_range(0..text.len(), &new_text, Instant::now());
         let new_head = (self.core.buffer.line_range(cur_line).start + col).min(self.core.buffer.len_bytes());
         self.core.set_cursor(new_head);
@@ -1536,6 +1557,7 @@ impl Editor {
             cx.propagate();
             return;
         }
+        self.core.break_undo_group();
         self.renumber_current_list(cx);
     }
 
@@ -6058,6 +6080,54 @@ mod tests {
     }
 
     #[gpui::test]
+    fn table_command_on_a_pipe_line_in_a_code_file_is_a_no_op(cx: &mut TestAppContext) {
+        // rustfmt's own style puts a leading `|` on an or-pattern arm —
+        // this must never be mistaken for a markdown table row just
+        // because the line starts with `|`.
+        let doc = "match x {\n    Foo::A\n    | Foo::B => 1,\n    _ => 0,\n}\n";
+        let (_fx, editor, cx) = open_editor(cx, "match.rs", doc);
+        let pipe_line_start = doc.find("| Foo::B").unwrap();
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(pipe_line_start + 2); // inside "| Foo::B => 1,"
+            cx.notify();
+        });
+        cx.dispatch_action(TableInsertRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "not a table — the code is untouched");
+        cx.dispatch_action(TableDeleteRow);
+        assert_eq!(buffer_text(&editor, cx), doc);
+        cx.dispatch_action(TableInsertColumn);
+        assert_eq!(buffer_text(&editor, cx), doc);
+        cx.dispatch_action(TableDeleteColumn);
+        assert_eq!(buffer_text(&editor, cx), doc);
+    }
+
+    #[gpui::test]
+    fn table_command_under_diff_view_leaves_the_buffer_untouched(cx: &mut TestAppContext) {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        let file = repo.path().join("table.md");
+        let doc = "| a | b |\n| - | - |\n| 1 | 2 |\n";
+        std::fs::write(&file, doc).unwrap();
+        commit_all(repo.path());
+
+        let (_bk, editor, cx) = open_editor_path(cx, &file);
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(3); // inside "a", real buffer's selection
+            cx.notify();
+        });
+        cx.dispatch_action(TableInsertRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "the real buffer is read-only under a diff");
+        cx.update(|_, app| {
+            assert!(editor.read(app).diff.is_some(), "still in diff mode");
+        });
+    }
+
+    #[gpui::test]
     fn tab_hops_table_cells_aligning_and_appending_rows(cx: &mut TestAppContext) {
         let doc = "| h1 | h2 |\n|---|---|\n| a | bbbb |";
         let (_fx, editor, cx) = open_editor(cx, "table.md", doc);
@@ -6091,6 +6161,20 @@ mod tests {
         // One undo drops the appended row (single group per press).
         cx.dispatch_action(Undo);
         assert_eq!(buffer_text(&editor, cx), aligned);
+    }
+
+    #[gpui::test]
+    fn enter_continuation_renumber_is_one_undo(cx: &mut TestAppContext) {
+        let doc = "1. one\n2. two\n";
+        let (_fx, editor, cx) = open_editor(cx, "list.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(6); // right after "one"
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "1. one\n2. \n3. two\n", "the run renumbers");
+        cx.dispatch_action(Undo);
+        assert_eq!(buffer_text(&editor, cx), doc, "one Enter costs exactly one Undo");
     }
 
     #[gpui::test]
