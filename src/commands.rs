@@ -297,6 +297,10 @@ commands! {
         keys: ["cmd-backspace"], ctx: Some("Sidebar"), menu: None, help: Some(HSidebar) },
     ws::SidebarMoveTo => { id: "sidebar_move", label: "Move to Folder…",
         keys: ["cmd-shift-m"], ctx: Some("Sidebar"), menu: None, help: Some(HSidebar) },
+    ws::RevealInFinder => { id: "reveal_in_finder", label: "Reveal in Finder",
+        keys: [], ctx: Some("Sidebar"), menu: None, help: None },
+    ws::CopyPath => { id: "copy_path", label: "Copy Path",
+        keys: [], ctx: Some("Sidebar"), menu: None, help: None },
 
     // ── Reader (context-scoped) ────────────────────────────────────────
     rd::ScrollUp => { id: "reader_up", label: "Scroll Up", keys: ["up"],
@@ -743,11 +747,22 @@ mod tests {
     /// but no user can find it. This is the property the old
     /// `assert_eq!(bindings.len(), N)` counter could never express — it
     /// stayed green while 44 bindings moved and three panels rebound.
+    ///
+    /// A right-click menu counts too: `reveal_in_finder` and `copy_path`
+    /// are deliberately menu-only and keyless — the sidebar context
+    /// menu (`menus::items_for`) is their only surface, same as a menu
+    /// bar entry or a keystroke would be for anything else.
     #[test]
     fn every_command_is_reachable_from_some_surface() {
+        let in_a_context_menu = |id: &str| {
+            crate::menus::Surface::ALL
+                .iter()
+                .any(|s| crate::menus::items_for(*s).iter().any(|i| i.id == id))
+        };
         let unreachable: Vec<&str> = COMMANDS
             .iter()
             .filter(|c| c.menu.is_none() && c.help.is_none() && c.keys.is_empty())
+            .filter(|c| !in_a_context_menu(c.id))
             .map(|c| c.id)
             .collect();
         assert!(unreachable.is_empty(), "unreachable commands: {unreachable:?}");

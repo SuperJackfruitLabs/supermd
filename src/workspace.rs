@@ -61,6 +61,8 @@ actions!(
         SidebarNewFile,
         SidebarNewFolder,
         SidebarMoveTo,
+        RevealInFinder,
+        CopyPath,
         SidebarEditCommit,
         SidebarEditCancel,
         SidebarExpand,
@@ -291,6 +293,12 @@ pub struct Workspace {
     /// a file records one now, so suppression is explicit rather than a
     /// matter of which call happens to come first.
     navigating: bool,
+    /// The open right-click menu: where it was raised, and for what.
+    /// The target itself (which sidebar row, which tab, which graph
+    /// node) is whatever selection/active state the raise already set
+    /// — `sidebar_selected`, `active`, `graph.hovered` — so dispatch
+    /// reads the same state the keyboard shortcuts do.
+    context_menu: Option<(gpui::Point<gpui::Pixels>, crate::menus::Surface)>,
 }
 
 enum SidebarEditKind {
@@ -551,6 +559,7 @@ impl Workspace {
             _watcher: None,
             history: crate::nav::History::default(),
             navigating: false,
+            context_menu: None,
         };
         workspace.refresh_git_status();
 
@@ -2462,6 +2471,29 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Show the file in Finder. `NSWorkspace` rather than a process
+    /// spawn: the App Store build cannot spawn processes.
+    fn reveal_in_finder(&mut self, _: &RevealInFinder, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        // `reveal_dir` already exists and uses
+        // `activateFileViewerSelectingURLs`, which selects the item —
+        // so it reveals a file, not only a directory.
+        crate::platform::reveal_dir(&entry.path);
+        let _ = cx;
+    }
+
+    fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+            entry.path.display().to_string(),
+        ));
+        self.show_command_error("Path copied".into(), cx);
+    }
+
     fn sidebar_open(&mut self, _: &SidebarOpen, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.sidebar_rows();
         let Some((_, entry)) = rows.get(self.sidebar_selected).cloned() else {
@@ -2869,6 +2901,109 @@ impl Workspace {
         )
     }
 
+    /// The right-click menu raised on a sidebar row, tab, or graph
+    /// node. Built from `menus::items_for`, so a renamed command or a
+    /// changed shortcut shows up here for free; each row dispatches the
+    /// same boxed action the menu bar and the keystroke do, so all
+    /// three paths stay one path.
+    fn render_context_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (pos, surface) = self.context_menu?;
+        let t = theme(cx);
+        let rows: Vec<AnyElement> = crate::menus::items_for(surface)
+            .into_iter()
+            .map(|item| {
+                let cmd = crate::commands::COMMANDS
+                    .iter()
+                    .find(|c| c.id == item.id)
+                    .expect("menu item names a real command");
+                let shortcut = if item.keys.is_empty() {
+                    String::new()
+                } else {
+                    crate::platform::shortcut_glyphs(&crate::commands::glyphs(item.keys))
+                };
+                div()
+                    .id(SharedString::from(format!("ctx-menu-{}", item.id)))
+                    .w_full()
+                    .px_3()
+                    .py(px(5.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover_bg))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg)
+                            .child(item.label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(t.fg_muted)
+                            .child(SharedString::from(shortcut)),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.context_menu = None;
+                        window.dispatch_action((cmd.action)(), cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                // A click anywhere else dismisses the menu without
+                // otherwise reacting — the row underneath must not also
+                // see the click that closed the menu.
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .child(gpui::deferred(
+                    gpui::anchored()
+                        .position(pos)
+                        .anchor(gpui::Corner::TopLeft)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .id("ctx-menu")
+                                .w(px(220.))
+                                .bg(t.panel_bg)
+                                .border_1()
+                                .border_color(t.border)
+                                .rounded_lg()
+                                .shadow_lg()
+                                .overflow_hidden()
+                                .flex()
+                                .flex_col()
+                                .py_1()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .children(rows),
+                        ),
+                ))
+                .into_any_element(),
+        )
+    }
+
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_shortcuts {
             return None;
@@ -3084,6 +3219,21 @@ impl Workspace {
                                 .bg(t.accent),
                         )
                     })
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.sidebar_selected = row_ix;
+                            let surface = if is_dir {
+                                crate::menus::Surface::SidebarFolder
+                            } else {
+                                crate::menus::Surface::SidebarFile
+                            };
+                            this.context_menu = Some((event.position, surface));
+                            window.focus(&this.sidebar_focus);
+                            cx.notify();
+                        }),
+                    )
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.sidebar_selected = row_ix;
                         if is_dir {
@@ -3314,6 +3464,8 @@ impl Workspace {
                 .on_action(cx.listener(Self::sidebar_new_file))
                 .on_action(cx.listener(Self::sidebar_new_folder))
                 .on_action(cx.listener(Self::sidebar_move_to))
+                .on_action(cx.listener(Self::reveal_in_finder))
+                .on_action(cx.listener(Self::copy_path))
                 .flex()
                 .flex_col()
                 .child(
@@ -3654,6 +3806,15 @@ impl Workspace {
                             cx.stop_propagation();
                             this.close_tab_at(ix, window, cx);
                         })),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.set_active(ix, window, cx);
+                        this.context_menu = Some((event.position, crate::menus::Surface::Tab));
+                        cx.notify();
+                    }),
                 )
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     // Double-clicking a preview tab pins it.
@@ -4115,6 +4276,7 @@ impl Workspace {
             let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
                 && state.filter.matches_at(ix, node);
             let is_open = open_path.as_deref() == Some(node.path.as_path());
+            let is_ghost = node.ghost;
             let group = match state.color_by {
                 crate::graph::ColorBy::None => None,
                 crate::graph::ColorBy::Folder => node.folder.as_deref(),
@@ -4174,6 +4336,22 @@ impl Workspace {
                                 graph.sim.hold_warm(true);
                             }
                             this.graph_tick(cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(graph) = &mut this.graph {
+                                graph.hovered = Some(ix);
+                            }
+                            let surface = if is_ghost {
+                                crate::menus::Surface::GraphGhost
+                            } else {
+                                crate::menus::Surface::GraphNode
+                            };
+                            this.context_menu = Some((event.position, surface));
+                            cx.notify();
                         }),
                     )
                     .child(
@@ -4963,6 +5141,7 @@ impl Render for Workspace {
             .children(self.render_shortcuts(cx))
             .children(self.render_about(cx))
             .children(self.render_theme_picker(cx))
+            .children(self.render_context_menu(cx))
             .when_some(self.finder.as_ref(), |root, (finder, _)| {
                 let finder = finder.clone();
                 root.child(
