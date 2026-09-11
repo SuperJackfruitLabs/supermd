@@ -169,6 +169,20 @@ pub fn open_in_new_window(
     Some(handle)
 }
 
+/// What to say when *Open Folder in New Window* opened fewer windows
+/// than the user chose folders. `None` when everything opened.
+///
+/// Pure, because the call site lives behind `cx.prompt_for_paths`,
+/// which the test platform does not implement -- the same reason
+/// `open_folders_in_new_windows` was split out of it.
+pub fn shortfall_message(opened: usize, wanted: usize) -> Option<String> {
+    match opened {
+        _ if opened >= wanted => None,
+        0 => Some("Could not open that folder in a new window".to_string()),
+        n => Some(format!("Opened {n} of {wanted} folders")),
+    }
+}
+
 /// One window per chosen folder. Anything that is not a directory is
 /// skipped rather than opened as a single-file window: this is the
 /// *folder* picker, and a file slipping through would give the new
@@ -1245,6 +1259,16 @@ impl Workspace {
                 self.show_command_error(msg, cx);
             }
             self.host.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
+            // Every cached plugin diagram was rendered against the
+            // folder we just left. `DiagramKey` carries the root, so
+            // they can never be *served* to the new one -- but they are
+            // dead weight in a process-wide, capped cache, and leaving
+            // them keeps a render of the previous vault's files alive
+            // in memory for no reason. Reload Plugins already does
+            // this; re-rooting is the same event.
+            if cx.try_global::<crate::diagram::DiagramCache>().is_some() {
+                cx.global_mut::<crate::diagram::DiagramCache>().clear();
+            }
             *self.knowledge.lock().unwrap() = crate::knowledge::Index::scan(path);
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
@@ -1456,18 +1480,8 @@ impl Workspace {
             // Silently doing nothing is the failure mode this whole
             // command class keeps falling into: a path that is not a
             // directory, or a platform that refused the window.
-            if opened < wanted {
-                this.update(cx, |this, cx| {
-                    this.show_command_error(
-                        if opened == 0 {
-                            "Could not open that folder in a new window".to_string()
-                        } else {
-                            format!("Opened {opened} of {wanted} folders")
-                        },
-                        cx,
-                    );
-                })
-                .ok();
+            if let Some(message) = shortfall_message(opened, wanted) {
+                this.update(cx, |this, cx| this.show_command_error(message, cx)).ok();
             }
         })
         .detach();
@@ -2348,10 +2362,18 @@ impl Workspace {
         // Rebuild the shared rootless host too, so inline rendering
         // sees the new plugin set. It never gets a workspace root.
         if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
+            let mut slot = state.0.lock().unwrap_or_else(|e| e.into_inner());
             let mut shared = crate::extensions::ExtensionHost::load(&plugins_dir);
             shared.set_grants(settings.plugin_grants.clone());
             shared.mark_shared_rootless();
-            *state.0.lock().unwrap() = shared;
+            // No production editor holds *this* host's cell today --
+            // but `editor/mod.rs` claims every path that replaces a
+            // host keeps the cell, and the test helpers already hand
+            // editors this one. An exemption that has to be remembered
+            // is an exemption that gets forgotten: adopt here too and
+            // the claim is true without a footnote.
+            shared.adopt_root_handle(slot.root_handle());
+            *slot = shared;
         }
         if cx.try_global::<crate::diagram::DiagramCache>().is_some() {
             cx.global_mut::<crate::diagram::DiagramCache>().clear();
@@ -6314,6 +6336,17 @@ pub(crate) mod tests {
             cell
         });
 
+        // The process-shared rootless host is rebuilt by the same
+        // command. No production editor holds *its* cell, but the test
+        // helpers hand editors that very handle, and `editor/mod.rs`
+        // claims every host-replacing path keeps the cell -- so it must
+        // be true here too, not true-with-a-footnote.
+        let shared_before = cx.update(|_, app| {
+            let host = crate::extensions::ExtensionHost::load(std::path::Path::new("/nonexistent"));
+            app.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
+            app.global::<crate::extensions::ExtensionState>().0.lock().unwrap().root_handle()
+        });
+
         ws.update_in(cx, |ws, window, cx| ws.reload_plugins(&ReloadPlugins, window, cx));
         cx.run_until_parked();
 
@@ -6323,6 +6356,12 @@ pub(crate) mod tests {
             assert!(
                 Arc::ptr_eq(&before, &after),
                 "the reloaded host adopted the cell the editor still holds"
+            );
+            let shared_after =
+                app.global::<crate::extensions::ExtensionState>().0.lock().unwrap().root_handle();
+            assert!(
+                Arc::ptr_eq(&shared_before, &shared_after),
+                "the rebuilt shared host adopted its cell too"
             );
         });
 
@@ -6369,6 +6408,115 @@ pub(crate) mod tests {
         });
         cx.run_until_parked();
         assert!(!cx.update(|app| report_plugin_error("later".to_string(), app)));
+    }
+
+    /// The drainer must *report* a failed inline render, not merely
+    /// cache it. Deleting `report_plugin_error` from the drain loop
+    /// left the whole suite green: the plugin author's `workspace-read`
+    /// refusal, or a render panic, went to Console.app and nowhere
+    /// else. `a_background_plugin_failure_is_shown_in_a_window` tests
+    /// the reporting function; this tests that anything calls it.
+    ///
+    /// It lives here rather than beside the drainer because the thing
+    /// being asserted is `Workspace::command_error`, which is private
+    /// to this module.
+    #[gpui::test]
+    fn a_failed_inline_render_is_reported_by_the_drainer(cx: &mut TestAppContext) {
+        let fixtures =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        if !fixtures.join("panic/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built (scripts/build_plugins.sh --fixtures)");
+            return;
+        }
+        let _tables = crate::extensions::table_test_guard();
+        let _home = temp_home();
+        install_test_globals(cx);
+        cx.update(|app| {
+            let host = crate::extensions::ExtensionHost::load(&fixtures);
+            app.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
+        });
+        let folder = tempfile::tempdir().unwrap();
+        let window = cx
+            .update(|app| open_in_new_window(Some(folder.path().to_path_buf()), app))
+            .expect("window");
+        cx.run_until_parked();
+
+        crate::extensions::clear_inline_cache();
+        // The `panic` fixture never moved off wit 0.1, so every inline
+        // call against it comes back an error.
+        crate::extensions::enqueue_inline(vec![(
+            "panic".to_string(),
+            "e".to_string(),
+            "x".to_string(),
+        )]);
+        cx.update(|app| crate::extensions::start_inline_drainer(app));
+        for _ in 0..50 {
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(60));
+            cx.run_until_parked();
+            let shown = cx.update(|app| {
+                window.read(app).map(|ws| ws.command_error.is_some()).unwrap_or(false)
+            });
+            if shown {
+                break;
+            }
+        }
+        cx.update(|app| {
+            let ws = window.read(app).expect("window alive");
+            let shown = ws.command_error.as_ref().map(|m| m.to_string());
+            assert!(
+                shown.as_deref().is_some_and(|m| m.contains("panic")),
+                "the window names the plugin that failed: {shown:?}"
+            );
+        });
+        crate::extensions::clear_inline_cache();
+    }
+
+    /// Re-rooting a window retires the diagrams cached against the
+    /// folder it just left. They can never be *served* to the new root
+    /// (the root is in the key), but a capped process-wide cache should
+    /// not go on holding renders of a vault nobody has open.
+    #[gpui::test]
+    fn opening_another_folder_clears_the_diagram_cache(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let second = tempfile::tempdir().unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        cx.update(|_, app| {
+            app.set_global(crate::diagram::DiagramCache::default());
+            app.global_mut::<crate::diagram::DiagramCache>().insert(
+                crate::diagram::DiagramKey {
+                    source_hash: 1,
+                    root_hash: crate::diagram::DiagramKey::root(Some(root.path())),
+                    theme_fingerprint: 0,
+                    width_bucket: 704,
+                },
+                crate::diagram::DiagramState::Pending,
+            );
+            assert_eq!(app.global::<crate::diagram::DiagramCache>().len(), 1);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(second.path(), window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                app.global::<crate::diagram::DiagramCache>().len(),
+                0,
+                "the previous vault's renders are gone"
+            );
+        });
+    }
+
+    #[test]
+    fn a_shortfall_is_named_only_when_something_was_missed() {
+        assert_eq!(shortfall_message(2, 2), None);
+        assert_eq!(shortfall_message(3, 2), None, "never a negative shortfall");
+        assert_eq!(
+            shortfall_message(0, 1).as_deref(),
+            Some("Could not open that folder in a new window")
+        );
+        assert_eq!(shortfall_message(1, 3).as_deref(), Some("Opened 1 of 3 folders"));
     }
 
     #[test]
@@ -8641,24 +8789,24 @@ pub(crate) mod tests {
         cx.update(|_, app| assert!(ws.read(app)._watcher.is_none()));
     }
 
-    /// Closing a window must let its `Workspace` — and the watcher
-    /// drain loop that outlived every earlier version of this test —
-    /// actually go. The loop holds a `WeakEntity`; if it ever held a
-    /// strong one, or forgot to exit, the entity below would never
-    /// drop and every closed window would leak a whole workspace.
+    /// Closing a window must let its `Workspace` actually go. The
+    /// watcher drain loop holds a `WeakEntity`; if it ever held a
+    /// strong one, every closed window would leak a whole workspace.
     ///
-    /// The previous name (`drain_loops_exit_when_the_workspace_goes_away`)
-    /// promised more than it checked: it had no assertion at all, and
-    /// the drain parks on a timer, so `run_until_parked` returned
-    /// whether or not the loop exited. Nothing could make it fail.
+    /// It does **not** check that the loop exits, and the name no
+    /// longer says it does: a loop that never exits leaks a task, not
+    /// the entity, so removing its `break`s leaves this green. The
+    /// name it replaced (`drain_loops_exit_when_the_workspace_goes_away`)
+    /// promised that and more — it had no assertion at all, and the
+    /// drain parks on a timer, so `run_until_parked` returned whether
+    /// or not the loop exited. `rewatch_disconnects_the_old_drain_loop`
+    /// is the one that covers exiting.
     ///
-    /// The external-open drain is deliberately *not* covered here: it
-    /// is app-level now and outlives any one window — see
+    /// The external-open drain is deliberately not covered here: it is
+    /// app-level now and outlives any one window — see
     /// `external_opens_survive_the_window_they_were_armed_on`.
     #[gpui::test]
-    fn closing_a_window_drops_its_workspace_and_its_watcher_loop(
-        cx: &mut TestAppContext,
-    ) {
+    fn closing_a_window_drops_its_workspace(cx: &mut TestAppContext) {
         let _home = temp_home();
         let (root, _a, _b) = workspace_fixture();
         let root_canon = root.path().canonicalize().unwrap();
@@ -8683,6 +8831,7 @@ pub(crate) mod tests {
             weak.upgrade().is_none(),
             "the workspace is gone; no drain loop is still holding it"
         );
+        let _ = &root_canon;
     }
 
     // ── theme picker edges ──────────────────────────────────────────────

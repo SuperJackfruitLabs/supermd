@@ -266,6 +266,14 @@ impl DiagramCache {
         self.map.get(key)
     }
 
+    /// Forget one entry. Used to retract a render whose root moved
+    /// while it was in flight — the result belongs to a vault that is
+    /// no longer the one the key names.
+    pub fn remove(&mut self, key: &DiagramKey) {
+        self.map.remove(key);
+        self.order.retain(|k| k != key);
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -356,7 +364,10 @@ pub fn plugin_diagram_state(
     // *host* mutex that must never be taken per frame, since a plugin
     // call holds it for up to the epoch cap. Poison keeps the root
     // rather than falling back to the shared `None` key space.
-    let root = root.and_then(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
+    let root_cell = root;
+    let root = root_cell
+        .as_ref()
+        .and_then(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
     let theme = DiagramTheme::from_theme(&crate::theme::theme(cx));
     let key = DiagramKey {
         source_hash: hash_str(&format!("{plugin}@{version}:{lang}\u{0}{source}")),
@@ -373,6 +384,7 @@ pub fn plugin_diagram_state(
     cx.global_mut::<DiagramCache>().insert(key.clone(), DiagramState::Pending);
 
     let available = width;
+    let keyed_root = root;
     let (plugin, lang, source) = (plugin.to_string(), lang.to_string(), source.to_string());
     let render = cx.background_executor().spawn(async move {
         let svg = host
@@ -394,7 +406,22 @@ pub fn plugin_diagram_state(
             Err(e) => DiagramState::Failed(e),
         };
         cx.update(|cx| {
-            cx.global_mut::<DiagramCache>().insert(key, state);
+            // The key was built from the root as it read *before* the
+            // render was queued; the host reads its own root again when
+            // the call actually executes. A re-root landing in that
+            // window would cache content rendered against the new vault
+            // under the old vault's key — the same cross-vault leak the
+            // key exists to close, through a narrower door. If the root
+            // moved, retract the entry instead: the next frame keys
+            // under the root that is now true and renders again.
+            let now = root_cell
+                .as_ref()
+                .and_then(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
+            if now == keyed_root {
+                cx.global_mut::<DiagramCache>().insert(key, state);
+            } else {
+                cx.global_mut::<DiagramCache>().remove(&key);
+            }
             cx.refresh_windows();
         })
         .ok();
@@ -548,6 +575,57 @@ mod tests {
             // And the same vault twice is still one entry.
             call(a.path(), cx);
             assert_eq!(cx.global::<DiagramCache>().len(), 2);
+        });
+    }
+
+    /// The root is read once to build the key, and the host reads its
+    /// own root again when the render actually executes. A re-root
+    /// landing in that window would cache a picture of vault B under
+    /// vault A's key — the same cross-vault leak, through a narrower
+    /// door. The entry is retracted instead, so the next frame keys
+    /// under the root that is now true.
+    #[gpui::test]
+    fn a_render_whose_root_moved_mid_flight_is_retracted(cx: &mut gpui::TestAppContext) {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let cell: crate::extensions::RootHandle =
+            Arc::new(std::sync::RwLock::new(Some(a.path().to_path_buf())));
+        let host: crate::extensions::HostHandle = Arc::new(std::sync::Mutex::new(
+            crate::extensions::ExtensionHost::load(Path::new("/nonexistent")),
+        ));
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(crate::theme::Theme::dark())));
+        });
+
+        // The control: nothing moves, so the result is kept.
+        cx.update(|cx| {
+            plugin_diagram_state(
+                "renderer", "0.1.0", "demo", "steady", 664.0,
+                Some(host.clone()), Some(cell.clone()), cx,
+            );
+            assert_eq!(cx.global::<DiagramCache>().len(), 1, "pending entry");
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(cx.global::<DiagramCache>().len(), 1, "a settled render is cached");
+        });
+
+        // And the race: queued against A, landing after a move to B.
+        cx.update(|cx| {
+            plugin_diagram_state(
+                "renderer", "0.1.0", "demo", "raced", 664.0,
+                Some(host.clone()), Some(cell.clone()), cx,
+            );
+            assert_eq!(cx.global::<DiagramCache>().len(), 2, "pending entry");
+        });
+        *cell.write().unwrap() = Some(b.path().to_path_buf());
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                cx.global::<DiagramCache>().len(),
+                1,
+                "the entry keyed under vault A was retracted, not filled with vault B's render"
+            );
         });
     }
 
