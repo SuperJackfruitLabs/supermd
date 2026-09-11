@@ -41,7 +41,10 @@ pub fn should_descend(root: &Path, path: &Path, is_dir: bool) -> bool {
     !(at_root && PROTECTED_ROOT_DIRS.contains(&name.as_str()))
 }
 
-fn walk_builder(root: &Path) -> ignore::WalkBuilder {
+/// The walker the knowledge index (and search/`⌘P`) uses: gitignore rules
+/// (even without git), hidden files skipped, well-known build dirs
+/// skipped. A gitignored draft is deliberately not part of the note graph.
+fn index_walk_builder(root: &Path) -> ignore::WalkBuilder {
     let mut b = ignore::WalkBuilder::new(root);
     b.hidden(true)
         .git_ignore(true)
@@ -57,10 +60,30 @@ fn walk_builder(root: &Path) -> ignore::WalkBuilder {
     b
 }
 
+/// The walker the sidebar uses. Shows gitignored files — a file tree
+/// should show what is on disk — but still skips hidden files and the
+/// build directories that would bury everything else.
+fn tree_walk_builder(root: &Path) -> ignore::WalkBuilder {
+    let mut b = ignore::WalkBuilder::new(root);
+    b.hidden(true)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .require_git(false)
+        .filter_entry({
+            let root = root.to_path_buf();
+            move |e| {
+                should_descend(&root, e.path(), e.file_type().is_some_and(|t| t.is_dir()))
+            }
+        });
+    b
+}
+
 /// Canonical workspace walker: gitignore rules (even without git),
-/// hidden files skipped, well-known build dirs skipped.
+/// hidden files skipped, well-known build dirs skipped. Used by the
+/// knowledge index and search/`⌘P` — a gitignored note stays out of both.
 pub fn workspace_walk(root: &Path) -> ignore::Walk {
-    walk_builder(root).build()
+    index_walk_builder(root).build()
 }
 
 /// True if `path` (inside `root`) survives the workspace ignore rules.
@@ -100,6 +123,9 @@ pub struct FsEntry {
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
+    /// Excluded by a `.gitignore`. Listed in the tree, dimmed, and kept
+    /// out of the knowledge index.
+    pub ignored: bool,
 }
 
 pub struct FileTree {
@@ -140,18 +166,22 @@ impl FileTree {
         if self.children.contains_key(dir) {
             return;
         }
+        let root = self.root.clone();
         let mut entries: Vec<FsEntry> = {
-            let mut b = walk_builder(dir);
+            let mut b = tree_walk_builder(dir);
             b.max_depth(Some(1));
             b.build()
                 .flatten()
                 .filter(|e| e.path() != dir)
                 .filter_map(|e| {
                     let is_dir = e.file_type()?.is_dir();
+                    let path = e.into_path();
+                    let ignored = !is_visible(&root, &path);
                     Some(FsEntry {
-                        name: e.file_name().to_string_lossy().into_owned(),
-                        path: e.into_path(),
+                        name: path.file_name()?.to_string_lossy().into_owned(),
+                        path,
                         is_dir,
+                        ignored,
                     })
                 })
                 .collect()
@@ -455,6 +485,76 @@ mod tests {
         assert_eq!(
             pick_untitled(&["Untitled.md".into(), "Untitled 2.md".into()]),
             "Untitled 3.md"
+        );
+    }
+
+    /// Test-only stand-in for the brief's `children(root, dir)`: drives
+    /// the real (private) `FileTree::load` and reads back what it cached,
+    /// rather than exposing a new public listing function.
+    fn children(root: &Path, dir: &Path) -> Vec<FsEntry> {
+        let mut tree = FileTree::new(root.to_path_buf());
+        tree.load(dir);
+        tree.children.get(dir).cloned().unwrap_or_default()
+    }
+
+    /// A file tree should show what is on disk. Gitignored files were
+    /// invisible in the sidebar, which is right for the note index and
+    /// wrong for a file browser — a draft you deliberately kept out of
+    /// git simply vanished.
+    #[test]
+    fn the_tree_shows_gitignored_files_and_marks_them() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "drafts/\n").unwrap();
+        std::fs::create_dir(dir.path().join("drafts")).unwrap();
+        std::fs::write(dir.path().join("drafts/secret.md"), "x").unwrap();
+        std::fs::write(dir.path().join("visible.md"), "x").unwrap();
+
+        let entries = children(dir.path(), dir.path());
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"drafts"), "the ignored folder is listed: {names:?}");
+        assert!(names.contains(&"visible.md"));
+
+        let drafts = entries.iter().find(|e| e.name == "drafts").unwrap();
+        assert!(drafts.ignored, "and is marked so the sidebar can dim it");
+        let visible = entries.iter().find(|e| e.name == "visible.md").unwrap();
+        assert!(!visible.ignored);
+    }
+
+    /// Build output stays collapsed. Showing `target/` or
+    /// `node_modules/` would bury the actual notes.
+    #[test]
+    fn build_directories_are_still_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/x.md"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        std::fs::write(dir.path().join("node_modules/y.md"), "x").unwrap();
+        std::fs::write(dir.path().join("real.md"), "x").unwrap();
+
+        let names: Vec<String> =
+            children(dir.path(), dir.path()).into_iter().map(|e| e.name).collect();
+        assert!(names.contains(&"real.md".to_string()));
+        assert!(!names.contains(&"target".to_string()), "{names:?}");
+        assert!(!names.contains(&"node_modules".to_string()), "{names:?}");
+    }
+
+    /// The knowledge index is unchanged: a gitignored note is still not
+    /// part of the note graph.
+    #[test]
+    fn the_index_still_skips_gitignored_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "drafts/\n").unwrap();
+        std::fs::create_dir(dir.path().join("drafts")).unwrap();
+        std::fs::write(dir.path().join("drafts/secret.md"), "# Secret\n").unwrap();
+        std::fs::write(dir.path().join("open.md"), "# Open\n").unwrap();
+
+        let index = crate::knowledge::Index::scan(dir.path());
+        let names: Vec<String> =
+            index.note_names().iter().map(|(n, _)| n.clone()).collect();
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("open")));
+        assert!(
+            !names.iter().any(|n| n.eq_ignore_ascii_case("secret")),
+            "the index keeps excluding ignored notes: {names:?}"
         );
     }
 }

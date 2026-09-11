@@ -3024,13 +3024,23 @@ impl Workspace {
                             .flex_none()
                             .text_color(tint)
                     })
-                    .child(
+                    .child({
+                        // Ignored files are listed but recede: present
+                        // when you need them, never competing with the
+                        // notes.
+                        let row_color = if entry.ignored {
+                            t.fg_muted
+                        } else if is_dir {
+                            t.fg_strong
+                        } else {
+                            t.fg
+                        };
                         div()
                             .text_size(px(t.ui_size))
-                            .text_color(if is_dir { t.fg_strong } else { t.fg })
+                            .text_color(row_color)
                             .overflow_hidden()
-                            .child(SharedString::from(entry.name.clone())),
-                    )
+                            .child(SharedString::from(entry.name.clone()))
+                    })
                     .child(div().flex_1())
                     .when(is_modified, |d| {
                         d.child(
