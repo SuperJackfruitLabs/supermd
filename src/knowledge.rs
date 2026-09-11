@@ -383,6 +383,38 @@ fn hardlinked_outside_the_workspace(_files: &[PathBuf]) -> std::collections::Has
     std::collections::HashSet::new()
 }
 
+/// The same rule, asked about one path instead of a whole walk: does
+/// `path` name an inode with a link outside `root`?
+///
+/// `Index::scan` can only answer this after its walk, so the watcher --
+/// which sees files created *after* the scan, hardlinks included -- had
+/// no way to apply it and admitted them. Cheap in the ordinary case
+/// (one link, no walk); a file with several links costs one workspace
+/// walk, which a notes vault essentially never pays.
+pub fn escapes_via_hardlink(root: &Path, path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        if meta.nlink() <= 1 {
+            return false;
+        }
+        let files: Vec<PathBuf> = crate::files::workspace_walk(root)
+            .flatten()
+            .filter(|item| item.file_type().is_some_and(|t| t.is_file()))
+            .map(|item| item.path().to_path_buf())
+            .collect();
+        hardlinked_outside_the_workspace(&files).contains(path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, path);
+        false
+    }
+}
+
 impl Index {
     /// Scan every markdown file under `root`.
     pub fn scan(root: &Path) -> Self {

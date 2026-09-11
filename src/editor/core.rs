@@ -100,6 +100,29 @@ impl EditorCore {
     pub fn set_cursor(&mut self, offset: usize) {
         let offset = offset.min(self.buffer.len_bytes());
         self.selection = Selection::cursor(offset);
+        // A cursor move that is part of the edit still in progress --
+        // no group break since it was applied -- is where that edit
+        // *ended*, so Redo must restore it. Without this, an action
+        // that edits and then places the cursor (the ordered-list
+        // renumber, every table command) redid to wherever the raw
+        // replacement happened to leave it: for a whole-document
+        // rewrite, the end of the document.
+        if !self.history.broken {
+            if let Some(group) = self.history.undo.last_mut() {
+                group.selection_after = self.selection;
+            }
+        }
+    }
+
+    /// Buffer bytes the newest undo group is holding (old plus new text
+    /// across its edits). Undo history is where an edit that is correct
+    /// but needlessly wide shows up as cost rather than as a wrong
+    /// answer, so tests pin the scope of an edit here.
+    #[cfg(test)]
+    pub fn last_group_bytes(&self) -> usize {
+        self.history.undo.last().map_or(0, |group| {
+            group.edits.iter().map(|e| e.old.len() + e.new.len()).sum()
+        })
     }
 
     pub fn select_to(&mut self, offset: usize) {

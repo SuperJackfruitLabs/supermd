@@ -471,6 +471,20 @@ pub(crate) fn should_offer_default_handler(markdown_opens_this_session: u32) -> 
 
 /// Seti's 12 palette variables mapped onto our theme so icons read well
 /// in both appearances.
+/// The colour a sidebar row's name draws in. Ignored files -- the ones
+/// a `.gitignore` keeps out of the index -- are listed but recede:
+/// present when you need them, never competing with the notes, and the
+/// only affordance saying "this file is not in your graph".
+pub(crate) fn sidebar_row_color(ignored: bool, is_dir: bool, t: &Theme) -> gpui::Hsla {
+    if ignored {
+        t.fg_muted
+    } else if is_dir {
+        t.fg_strong
+    } else {
+        t.fg
+    }
+}
+
 pub(crate) fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
     let s = &t.syntax;
     match color {
@@ -598,7 +612,11 @@ pub struct Workspace {
     /// The target itself (which sidebar row, which tab, which graph
     /// node) is whatever selection/active state the raise already set
     /// — `sidebar_selected`, `active`, `graph.hovered` — so dispatch
-    /// reads the same state the keyboard shortcuts do.
+    /// reads the same state the keyboard shortcuts do. That claim was
+    /// once true of the sidebar and tabs only: the graph raise set
+    /// `graph.hovered` and nothing but the hover highlight read it, so
+    /// the node menu acted on the active tab. `graph_local` reads it
+    /// now — anything added to a graph surface must too.
     context_menu: Option<(gpui::Point<gpui::Pixels>, crate::menus::Surface)>,
 }
 
@@ -1000,8 +1018,11 @@ impl Workspace {
         // or one visible path in a batch would wave through every
         // ignored path riding alongside it.
         let root = self.tree.as_ref().map(|tree| tree.root.clone());
-        if let Some(root) = &root {
-            if !paths.iter().any(|p| crate::files::is_visible(root, p)) {
+        // One matcher for the batch: it caches the ignore files of each
+        // directory it walks through, and a batch is a snapshot anyway.
+        let mut ignores = root.as_ref().map(|root| crate::files::index_matcher(root));
+        if let Some(ignores) = ignores.as_mut() {
+            if !paths.iter().any(|p| ignores.allows(p)) {
                 return;
             }
         }
@@ -1017,12 +1038,14 @@ impl Workspace {
                     continue;
                 }
                 // Same admission rule `Index::scan` applies at its own
-                // walk: a path under `.git`/`target`/hidden or excluded
-                // by the root `.gitignore` never enters the index,
-                // however the watcher heard about it. Without this, a
-                // batch that also touched one visible file would index
-                // every ignored `.md` path riding alongside it.
-                if root.as_ref().is_some_and(|root| !crate::files::is_visible(root, path)) {
+                // walk -- literally the same matcher: a path under
+                // `.git`/`target`/hidden, or excluded by any ignore file
+                // that walk honours (nested `.gitignore`s,
+                // `.git/info/exclude`, `.ignore`), never enters the
+                // index, however the watcher heard about it. Without
+                // this, a batch that also touched one visible file would
+                // index every ignored `.md` path riding alongside it.
+                if ignores.as_mut().is_some_and(|ignores| !ignores.allows(path)) {
                     index.remove_file(path);
                     continue;
                 }
@@ -1034,6 +1057,18 @@ impl Workspace {
                 // escape check. Drop any entry the path may already have.
                 if std::fs::symlink_metadata(path)
                     .is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    index.remove_file(path);
+                    continue;
+                }
+                // And the same rule again for the link kind that is not
+                // a symlink: `ln ~/.ssh/id_rsa <root>/leak.md` reads the
+                // outside file's bytes under an in-root path. `scan`
+                // drops those after its walk; a hardlink made while the
+                // workspace is open only ever reaches the index here.
+                if root
+                    .as_ref()
+                    .is_some_and(|root| crate::knowledge::escapes_via_hardlink(root, path))
                 {
                     index.remove_file(path);
                     continue;
@@ -2355,26 +2390,64 @@ impl Workspace {
         );
     }
 
-    fn reload_plugins(&mut self, _: &ReloadPlugins, _window: &mut Window, cx: &mut Context<Self>) {
-        let plugins_dir = crate::settings::config_dir().join("plugins");
-        let mut host = crate::extensions::ExtensionHost::load(&plugins_dir);
-        let settings = crate::settings::load(&crate::settings::config_dir());
-        host.set_grants(settings.plugin_grants.clone());
+    /// Swap this window's plugin host for one freshly loaded from
+    /// `plugins_dir`, keeping the window's own workspace root and its
+    /// editors' root cell. Returns how many plugins loaded.
+    fn adopt_reloaded_host(
+        &mut self,
+        plugins_dir: &Path,
+        grants: &std::collections::BTreeMap<String, Vec<String>>,
+        refresh_tables: bool,
+    ) -> usize {
+        let mut host = crate::extensions::ExtensionHost::load(plugins_dir);
+        host.set_grants(grants.clone());
         if let Some(tree) = &self.tree {
             host.set_workspace_root(Some(tree.root.clone()));
         }
-        crate::extensions::refresh_tables(&mut host);
-        for (dir, err) in host.failures() {
-            eprintln!("supermd: plugin failed: {}: {err}", dir.display());
+        if refresh_tables {
+            crate::extensions::refresh_tables(&mut host);
+            for (dir, err) in host.failures() {
+                eprintln!("supermd: plugin failed: {}: {err}", dir.display());
+            }
         }
         let count = host.plugins().len();
-        {
-            let mut slot = self.host.lock().unwrap_or_else(|e| e.into_inner());
-            // Every editor in this window holds a clone of the *old*
-            // host's root cell. Carry it into the replacement, or they
-            // are all left pointing at a cell nothing writes to again.
-            host.adopt_root_handle(slot.root_handle());
-            *slot = host;
+        let mut slot = self.host.lock().unwrap_or_else(|e| e.into_inner());
+        // Every editor in this window holds a clone of the *old*
+        // host's root cell. Carry it into the replacement, or they
+        // are all left pointing at a cell nothing writes to again.
+        host.adopt_root_handle(slot.root_handle());
+        *slot = host;
+        count
+    }
+
+    fn reload_plugins(&mut self, _: &ReloadPlugins, _window: &mut Window, cx: &mut Context<Self>) {
+        let plugins_dir = crate::settings::config_dir().join("plugins");
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        let grants = settings.plugin_grants.clone();
+        let count = self.adopt_reloaded_host(&plugins_dir, &grants, true);
+        // `refresh_tables` just rewrote the *process-wide* fence,
+        // decoration and inline tables, so every window's projectors
+        // now claim blocks for the new plugin set. A window whose host
+        // was left behind answers those claims with "no such plugin"
+        // and shows a red error banner in place of every such block
+        // until it restarts -- so every window gets the new host, each
+        // keeping its own sandbox root.
+        //
+        // Identified by entity, not by window handle: `self` is the
+        // workspace being updated right now, and updating it again --
+        // through its own window -- panics.
+        let me = cx.entity_id();
+        let others: Vec<Entity<Workspace>> = cx
+            .windows()
+            .into_iter()
+            .filter_map(|handle| handle.downcast::<Workspace>())
+            .filter_map(|handle| handle.root(cx).ok())
+            .filter(|workspace| workspace.entity_id() != me)
+            .collect();
+        for workspace in others {
+            workspace.update(cx, |workspace, _cx| {
+                workspace.adopt_reloaded_host(&plugins_dir, &grants, false);
+            });
         }
         // Rebuild the shared rootless host too, so inline rendering
         // sees the new plugin set. It never gets a workspace root.
@@ -3587,16 +3660,7 @@ impl Workspace {
                             .text_color(tint)
                     })
                     .child({
-                        // Ignored files are listed but recede: present
-                        // when you need them, never competing with the
-                        // notes.
-                        let row_color = if entry.ignored {
-                            t.fg_muted
-                        } else if is_dir {
-                            t.fg_strong
-                        } else {
-                            t.fg
-                        };
+                        let row_color = sidebar_row_color(entry.ignored, is_dir, &t);
                         div()
                             .text_size(px(t.ui_size))
                             .text_color(row_color)
@@ -4426,8 +4490,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Narrow the graph to what is near the note you have open, or
-    /// widen it back to the whole vault.
+    /// Narrow the graph to what is near the node under the pointer —
+    /// or, with the pointer off the nodes, the note you have open —
+    /// and widen it back to the whole vault.
     fn graph_local(&mut self, _: &GraphLocal, _: &mut Window, cx: &mut Context<Self>) {
         let open = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
         let Some(graph) = self.graph.as_mut() else { return };
@@ -4438,13 +4503,23 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(open) = open else {
-            self.show_command_error("Open a note to centre the graph on it".into(), cx);
-            return;
-        };
-        let Some(center) = graph.sim.nodes.iter().position(|n| n.path == open) else {
-            self.show_command_error("That note is not in the graph".into(), cx);
-            return;
+        // The node under the pointer wins. A right-click sets `hovered`
+        // and the menu dispatches this action, so without reading it
+        // the menu acted on the active tab instead of the node it was
+        // raised over — the wrong note, or none at all.
+        let hovered = graph.hovered.filter(|ix| *ix < graph.sim.nodes.len());
+        let center = if let Some(ix) = hovered {
+            ix
+        } else {
+            let Some(open) = open else {
+                self.show_command_error("Open a note to centre the graph on it".into(), cx);
+                return;
+            };
+            let Some(center) = graph.sim.nodes.iter().position(|n| n.path == open) else {
+                self.show_command_error("That note is not in the graph".into(), cx);
+                return;
+            };
+            center
         };
         graph.filter.local = Some((center, 1));
         let edges = graph.sim.edges.clone();
@@ -6732,6 +6807,70 @@ pub(crate) mod tests {
         });
     }
 
+    /// The watcher's admission rule has to be `Index::scan`'s. A note
+    /// excluded by a *nested* `.gitignore` is absent from the scan and
+    /// was re-admitted by the watcher the moment the user saved it,
+    /// where it stayed in backlinks, the graph and `[[` completion
+    /// until the next restart -- while the sidebar, reading the same
+    /// rule, drew it undimmed.
+    #[gpui::test]
+    fn the_watcher_applies_nested_ignore_files_too(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let notes = root.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        std::fs::write(notes.join(".gitignore"), "private.md\n").unwrap();
+        let private = notes.join("private.md");
+        std::fs::write(&private, "links [[A]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let a = root.path().join("A.md");
+        // `A.md` rides along so the whole-batch short-circuit does not
+        // return early -- the per-path check is what is on trial.
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[a.clone(), private.clone()], cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let index = ws.read(app).knowledge.lock().unwrap();
+            let back = index.backlinks(&a);
+            assert!(
+                !back.iter().any(|(p, _)| p.ends_with("private.md")),
+                "a nested-gitignored note must stay out of the index: {back:?}"
+            );
+        });
+    }
+
+    /// The other half of the same rule: `Index::scan` drops a file
+    /// hardlinked to something outside the workspace, and a hardlink
+    /// made while the workspace is open reaches the index only through
+    /// the watcher, which had a symlink check and no hardlink check.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_watcher_never_indexes_a_note_hardlinked_from_outside(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        let outside = outside_dir.path().join("outside.md");
+        std::fs::write(&outside, "secret links [[A]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let leak = root.path().join("leak.md");
+        if std::fs::hard_link(&outside, &leak).is_err() {
+            return; // cross-device temp dirs: nothing to test here
+        }
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&leak), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let index = ws.read(app).knowledge.lock().unwrap();
+            let back = index.backlinks(&root.path().join("A.md"));
+            assert!(
+                !back.iter().any(|(p, _)| p.ends_with("leak.md")),
+                "a hardlink out of the workspace must never enter the index: {back:?}"
+            );
+        });
+    }
+
     #[gpui::test]
     fn on_fs_events_checks_each_path_not_just_the_batch(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -6853,6 +6992,83 @@ pub(crate) mod tests {
         cx.dispatch_action(GraphDismiss);
         cx.run_until_parked();
         cx.update(|_, app| assert!(ws.read(app).graph.is_none()));
+    }
+
+    /// A right-click on a graph node sets `graph.hovered` and the menu
+    /// dispatches `graph_local` -- which centred on the *active tab's*
+    /// path instead, so right-clicking a node while another note was
+    /// open centred the graph on the wrong note, and with no note open
+    /// it answered "Open a note to centre the graph on it" to a click
+    /// that named a specific node.
+    #[gpui::test]
+    fn the_graph_menu_centres_on_the_clicked_node(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Hub.md"), "to [[SpokeA]] and [[SpokeB]]\n").unwrap();
+        std::fs::write(root.path().join("SpokeA.md"), "back [[Hub]]\n").unwrap();
+        std::fs::write(root.path().join("SpokeB.md"), "quiet\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // A note open in the active tab -- the thing graph_local used
+        // to centre on no matter which node was clicked.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path(&root.path().join("Hub.md"), window, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("supermd".into(), "__graph".into(), window, cx)
+        });
+        cx.run_until_parked();
+
+        let (hub, spoke) = cx.update(|_, app| {
+            let nodes = ws.read(app).graph.as_ref().expect("graph open").nodes();
+            let ix = |name: &str| {
+                nodes.iter().position(|n| n.path.ends_with(name)).expect(name)
+            };
+            (ix("Hub.md"), ix("SpokeB.md"))
+        });
+        assert_ne!(hub, spoke);
+
+        // What the right-click handler does before raising the menu.
+        ws.update_in(cx, |ws, _, cx| {
+            ws.graph.as_mut().unwrap().hovered = Some(spoke);
+            cx.notify();
+        });
+        ws.update_in(cx, |ws, window, cx| ws.graph_local(&GraphLocal, window, cx));
+        cx.update(|_, app| {
+            let graph = ws.read(app).graph.as_ref().expect("graph open");
+            assert_eq!(
+                graph.filter.local,
+                Some((spoke, 1)),
+                "centred on the clicked node, not on the open note"
+            );
+        });
+
+        // Off again, then with no node under the pointer it falls back
+        // to the open note exactly as the keyboard action always has.
+        ws.update_in(cx, |ws, window, cx| ws.graph_local(&GraphLocal, window, cx));
+        ws.update_in(cx, |ws, _, cx| {
+            ws.graph.as_mut().unwrap().hovered = None;
+            cx.notify();
+        });
+        ws.update_in(cx, |ws, window, cx| ws.graph_local(&GraphLocal, window, cx));
+        cx.update(|_, app| {
+            let graph = ws.read(app).graph.as_ref().expect("graph open");
+            assert_eq!(graph.filter.local, Some((hub, 1)), "the open note");
+        });
+    }
+
+    /// `FsEntry.ignored` is computed and tested; this is the only test
+    /// that anything *reads* it. Without the dim, an ignored file looks
+    /// exactly like an indexed one and the sidebar quietly stops being
+    /// the place you can tell them apart.
+    #[test]
+    fn an_ignored_sidebar_row_is_dimmed() {
+        let t = crate::theme::Theme::dark();
+        assert_eq!(sidebar_row_color(true, false, &t), t.fg_muted, "an ignored file recedes");
+        assert_eq!(sidebar_row_color(true, true, &t), t.fg_muted, "an ignored folder too");
+        assert_ne!(sidebar_row_color(false, false, &t), t.fg_muted, "an indexed file does not");
+        assert_eq!(sidebar_row_color(false, false, &t), t.fg);
+        assert_eq!(sidebar_row_color(false, true, &t), t.fg_strong, "folders lead");
     }
 
     #[gpui::test]
@@ -9508,6 +9724,80 @@ pub(crate) mod tests {
         });
     }
 
+    /// The reading view resolves links through the workspace index,
+    /// which `make_reader` hands over in one line. Without it the
+    /// reader's index stays `None` and every wiki link and every
+    /// relative link in a preview reads as a note that does not exist
+    /// -- and the only `describe_link` test passes `None`, so it
+    /// structurally cannot see the difference.
+    #[gpui::test]
+    fn the_reading_view_previews_links_through_the_index(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Target.md"), "# Target\n\nthe body\n").unwrap();
+        let note = root.path().join("Note.md");
+        std::fs::write(&note, "see [[Target]] and [here](Target.md)\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&note, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        let reader = cx.update(|_, app| {
+            let ws = ws.read(app);
+            match ws.tabs.get(ws.active) {
+                Some(Tab::Editor { view: EditorView::Preview(reader), .. }) => reader.clone(),
+                _ => panic!("the active tab should be previewing"),
+            }
+        });
+        cx.update(|_, app| {
+            let reader = reader.read(app);
+            assert!(
+                matches!(reader.describe("[[Target", app), Some(crate::preview::Preview::Note { .. })),
+                "the wiki link resolves: {:?}",
+                reader.describe("[[Target", app)
+            );
+            assert!(
+                matches!(reader.describe("Target.md", app), Some(crate::preview::Preview::Note { .. })),
+                "and so does the relative link: {:?}",
+                reader.describe("Target.md", app)
+            );
+        });
+    }
+
+    /// The counter has to be wired to the real open path. Every other
+    /// test of this feature calls `note_markdown_open` directly, so
+    /// deleting its single call site left the whole thing unreachable
+    /// with the suite green.
+    #[gpui::test]
+    fn opening_markdown_files_normally_reaches_the_offer(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        for name in ["one.md", "two.md", "three.md"] {
+            std::fs::write(root.path().join(name), "# x\n").unwrap();
+        }
+        let (ws, cx) = open_workspace(cx, root.path());
+        for name in ["one.md", "two.md"] {
+            ws.update_in(cx, |ws, window, cx| {
+                ws.open_path(&root.path().join(name), window, cx)
+            });
+        }
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(!ws.read(app).show_default_handler_offer, "not on the first two");
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path(&root.path().join("three.md"), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                ws.read(app).show_default_handler_offer,
+                crate::platform::MACOS,
+                "opening the third Markdown file the ordinary way raises the offer"
+            );
+        });
+    }
+
     /// A refusal (or an acceptance) is remembered permanently: once
     /// `default_handler_asked` is set, opening more Markdown files must
     /// never bring the offer back.
@@ -9966,6 +10256,63 @@ pub(crate) mod tests {
             );
         });
         assert!(!landed.exists());
+    }
+
+    /// `refresh_tables` writes the *process-wide* fence/decoration/
+    /// inline tables, so a reload in one window re-points every
+    /// window's projectors at the new plugin set -- while only the
+    /// reloading window's host actually has it. Window B then claims a
+    /// fence, its own host answers "no such plugin", and a red error
+    /// banner replaces every such block until that window restarts.
+    #[gpui::test]
+    fn reloading_plugins_refreshes_every_window(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        // Not `with_plugins`: that installs the ExtensionState global,
+        // and `open_arg` then hands every window the *same* host handle,
+        // which is exactly the sharing this test has to not have.
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        if !fixtures.join("echo/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built (scripts/build_plugins.sh --fixtures)");
+            return;
+        }
+        let _tables = crate::extensions::table_test_guard();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        // B first, so the live `cx` belongs to A's window -- the
+        // reload has to run through the window whose action it is.
+        let (ws_b, cx) = open_workspace(cx, b.path());
+        let (ws_a, cx) = open_workspace(cx, a.path());
+        cx.run_until_parked();
+
+        // The plugin appears on disk only after both windows are open,
+        // so neither host has it until something reloads.
+        let plugins = crate::settings::config_dir().join("plugins/echo");
+        std::fs::create_dir_all(&plugins).unwrap();
+        for f in ["plugin.toml", "plugin.wasm"] {
+            std::fs::copy(fixtures.join("echo").join(f), plugins.join(f)).unwrap();
+        }
+
+        ws_a.update_in(cx, |ws, window, cx| ws.reload_plugins(&ReloadPlugins, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let names = |ws: &Entity<Workspace>| -> Vec<String> {
+                ws.read(app)
+                    .host
+                    .lock()
+                    .unwrap()
+                    .plugins()
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect()
+            };
+            assert_eq!(names(&ws_a), ["echo"], "the reloading window");
+            assert_eq!(names(&ws_b), ["echo"], "and every other window with it");
+            assert_eq!(
+                ws_b.read(app).host.lock().unwrap().workspace_root().as_deref(),
+                Some(b.path()),
+                "each window keeps its own sandbox root"
+            );
+        });
     }
 
     #[gpui::test]

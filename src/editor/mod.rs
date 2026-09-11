@@ -1618,13 +1618,16 @@ impl Editor {
             ..self.core.buffer.line_range(end_line).end;
 
         let text = self.core.buffer.text();
-        let Some(new_text) = lists::renumber(&text, block) else {
+        // The list, not the file: a whole-document replacement pushed an
+        // undo entry holding two full copies of it on every Enter, and
+        // the helper already knows the block's own range.
+        let Some(new_block) = lists::renumber_block(&text, block.clone()) else {
             return;
         };
-        if new_text == text {
+        if new_block == text[block.clone()] {
             return;
         }
-        self.core.replace_range(0..text.len(), &new_text, Instant::now());
+        self.core.replace_range(block, &new_block, Instant::now());
         let new_head = (self.core.buffer.line_range(cur_line).start + col).min(self.core.buffer.len_bytes());
         self.core.set_cursor(new_head);
         self.core.break_undo_group();
@@ -6575,6 +6578,73 @@ mod tests {
         assert_eq!(buffer_text(&editor, cx), "1. one\n2. \n3. two\n", "the run renumbers");
         cx.dispatch_action(Undo);
         assert_eq!(buffer_text(&editor, cx), doc, "one Enter costs exactly one Undo");
+    }
+
+    /// The explicit command is its own undo step. It shares its helper
+    /// with Enter-continuation, which deliberately coalesces into the
+    /// Enter's group -- so without its own break, Renumber List
+    /// coalesces into whatever typing is still in the window and one
+    /// Undo takes the user's words with it.
+    #[gpui::test]
+    fn the_renumber_command_is_its_own_undo_step(cx: &mut TestAppContext) {
+        let doc = "1. one\n1. two\n";
+        let (_fx, editor, cx) = open_editor(cx, "cmd.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(6); // right after "one"
+            cx.notify();
+        });
+        cx.simulate_input("!");
+        assert_eq!(buffer_text(&editor, cx), "1. one!\n1. two\n");
+        cx.dispatch_action(RenumberList);
+        assert_eq!(buffer_text(&editor, cx), "1. one!\n2. two\n", "the run renumbers");
+        cx.dispatch_action(Undo);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "1. one!\n1. two\n",
+            "one Undo takes the renumber and leaves the typing"
+        );
+    }
+
+    /// Redo has to put the cursor back where the edit left it. The
+    /// renumber's replacement is not where the user is typing, so
+    /// redoing an Enter threw the cursor to the end of the document.
+    #[gpui::test]
+    fn redo_of_an_ordered_list_enter_restores_the_cursor(cx: &mut TestAppContext) {
+        let doc = "1. one\n2. two\n";
+        let (_fx, editor, cx) = open_editor(cx, "redo.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(6); // right after "one"
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        let landed = head(&editor, cx);
+        assert_eq!(landed, 10, "after the new \"2. \" marker");
+        cx.dispatch_action(Undo);
+        cx.dispatch_action(Redo);
+        assert_eq!(buffer_text(&editor, cx), "1. one\n2. \n3. two\n");
+        assert_eq!(head(&editor, cx), landed, "redo puts the cursor back, not at the end");
+    }
+
+    /// And the renumber rewrites the list, not the file: an Enter in a
+    /// three-line list inside a long document must not push an undo
+    /// entry holding two whole copies of it.
+    #[gpui::test]
+    fn the_renumber_edit_is_scoped_to_the_list(cx: &mut TestAppContext) {
+        let filler = "lorem ipsum dolor sit amet\n\n".repeat(200);
+        let doc = format!("{filler}1. one\n2. two\n");
+        let (_fx, editor, cx) = open_editor(cx, "big.md", &doc);
+        let at = doc.find("1. one").unwrap() + 6;
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(at);
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        let bytes = cx.update(|_, app| editor.read(app).core.last_group_bytes());
+        assert!(
+            bytes < doc.len(),
+            "the undo entry is the list, not the document: {bytes} vs {}",
+            doc.len()
+        );
     }
 
     /// The opposite side of the same bug: typing right up against the

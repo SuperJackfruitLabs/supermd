@@ -159,6 +159,15 @@ impl Reader {
         self.knowledge = Some(knowledge);
     }
 
+    /// The hover preview for a link destination in this document --
+    /// exactly what the rendered view shows for it. Resolving needs
+    /// both halves the workspace hands over: the file this text came
+    /// from, and the index. Without the index every wiki link and
+    /// every relative link previews as a note that does not exist.
+    pub fn describe(&self, dest: &str, cx: &App) -> Option<crate::preview::Preview> {
+        describe_link(self.path.as_deref(), dest, self.knowledge.as_ref(), cx)
+    }
+
     pub fn scroll_to_block(&mut self, block_ix: usize, cx: &mut Context<Self>) {
         let state = self.list_state.clone();
         let current = -state.scroll_px_offset_for_scrollbar().y;
@@ -331,13 +340,14 @@ impl Render for Reader {
                             reader.update(cx, |_, cx| cx.emit(ReaderEvent::Follow(dest)));
                         })
                     };
-                    let base = reader.read(cx).path.clone();
-                    let knowledge = reader.read(cx).knowledge.clone();
-                    let describe: view::Describe = std::rc::Rc::new(
-                        move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
-                            describe_link(base.as_deref(), dest, knowledge.as_ref(), cx)
-                        },
-                    );
+                    let describe: view::Describe = {
+                        let reader = reader.clone();
+                        std::rc::Rc::new(
+                            move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
+                                reader.read(cx).describe(dest, cx)
+                            },
+                        )
+                    };
                     view::list_item(&document, ix, &t, cx, Some(&follow), Some(&describe))
                 })
                 .size_full(),

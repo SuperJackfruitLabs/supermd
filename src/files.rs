@@ -86,36 +86,76 @@ pub fn workspace_walk(root: &Path) -> ignore::Walk {
     index_walk_builder(root).build()
 }
 
-/// True if `path` (inside `root`) survives the workspace ignore rules.
-/// Checks hidden/well-known components plus the root .gitignore — used
-/// to drop watcher events from ignored paths.
-pub fn is_visible(root: &Path, path: &Path) -> bool {
-    let Ok(rel) = path.strip_prefix(root) else {
-        return false;
-    };
-    for comp in rel.components() {
-        if let std::path::Component::Normal(name) = comp {
-            let n = name.to_string_lossy();
-            if n.starts_with('.') || IGNORED_DIRS.contains(&n.as_ref()) {
+/// The index walk's own ignore rules, asked about single paths instead
+/// of driven over a tree.
+///
+/// Built from `index_walk_builder`, so this is the *same* rule
+/// `Index::scan` walks with — nested `.gitignore`s, `.git/info/exclude`,
+/// `.ignore`/`.rgignore`, and ignore files above the root included. The
+/// hand-rolled root-only gitignore this replaced admitted notes the
+/// scan had excluded: the watcher re-indexed them on the next save and
+/// the sidebar drew them undimmed, so the one affordance saying "this
+/// file is outside the index" was wrong exactly where it mattered.
+///
+/// A matcher is a snapshot of the ignore files it has already loaded,
+/// so build one per batch and drop it; a long-lived one stops noticing
+/// edits to a `.gitignore`.
+pub struct IndexMatcher {
+    root: PathBuf,
+    /// `None` only if the builder handed back no matcher at all, which
+    /// it does not for a single root; visibility then falls back to the
+    /// component rules alone.
+    inner: Option<ignore::IncrementalIgnore>,
+}
+
+pub fn index_matcher(root: &Path) -> IndexMatcher {
+    IndexMatcher {
+        root: root.to_path_buf(),
+        inner: index_walk_builder(root).build_matchers().pop(),
+    }
+}
+
+impl IndexMatcher {
+    /// True if `path` (inside the root) survives the workspace ignore
+    /// rules — the question `Index::scan`'s walk answers by arriving
+    /// at the file or not.
+    pub fn allows(&mut self, path: &Path) -> bool {
+        let Ok(rel) = path.strip_prefix(&self.root) else {
+            return false;
+        };
+        // `should_descend` is the walker's `filter_entry`, and a
+        // matcher cannot apply that (it needs a real directory entry),
+        // so run it here over each component on the way down — plus the
+        // dotfile rule, which also covers paths that no longer exist.
+        let mut acc = self.root.clone();
+        let count = rel.components().count();
+        for (ix, comp) in rel.components().enumerate() {
+            acc.push(comp);
+            let is_dir = ix + 1 < count || acc.is_dir();
+            if let std::path::Component::Normal(name) = comp {
+                if name.to_string_lossy().starts_with('.') {
+                    return false;
+                }
+            }
+            if !should_descend(&self.root, &acc, is_dir) {
                 return false;
             }
         }
+        let Some(inner) = self.inner.as_mut() else {
+            return true;
+        };
+        // `matched` wants a root-relative path with no `..`; `normalize`
+        // is the crate's own way of getting one.
+        let rel = inner.normalize(path).unwrap_or_else(|| rel.to_path_buf());
+        !inner.matched(&rel, path.is_dir()).is_ignore()
     }
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
-    builder.add(root.join(".gitignore"));
-    let Ok(gitignore) = builder.build() else {
-        return true;
-    };
-    let mut acc = root.to_path_buf();
-    let count = rel.components().count();
-    for (ix, comp) in rel.components().enumerate() {
-        acc.push(comp);
-        let is_dir = ix + 1 < count || acc.is_dir();
-        if gitignore.matched(&acc, is_dir).is_ignore() {
-            return false;
-        }
-    }
-    true
+}
+
+/// True if `path` (inside `root`) survives the workspace ignore rules.
+/// One-shot form of `IndexMatcher::allows`; prefer the matcher when
+/// asking about more than one path.
+pub fn is_visible(root: &Path, path: &Path) -> bool {
+    index_matcher(root).allows(path)
 }
 
 #[derive(Clone, Debug)]
@@ -176,16 +216,21 @@ impl FileTree {
                 .filter_map(|e| {
                     let is_dir = e.file_type()?.is_dir();
                     let path = e.into_path();
-                    let ignored = !is_visible(&root, &path);
                     Some(FsEntry {
                         name: path.file_name()?.to_string_lossy().into_owned(),
                         path,
                         is_dir,
-                        ignored,
+                        ignored: false,
                     })
                 })
                 .collect()
         };
+        // One matcher for the whole listing: it caches each directory's
+        // ignore files, which a per-entry `is_visible` would re-read.
+        let mut matcher = index_matcher(&root);
+        for entry in &mut entries {
+            entry.ignored = !matcher.allows(&entry.path);
+        }
         entries.sort_by(|a, b| {
             b.is_dir
                 .cmp(&a.is_dir)
@@ -383,6 +428,68 @@ mod tests {
         assert!(!is_visible(dir.path(), &dir.path().join("target/debug/app")));
         assert!(!is_visible(dir.path(), &dir.path().join(".git/HEAD")));
         assert!(!is_visible(dir.path(), &dir.path().join("a/.hidden")));
+    }
+
+    /// The watcher and the sidebar ask `is_visible`; `Index::scan`
+    /// walks with `index_walk_builder`. They have to be one rule: a
+    /// nested `.gitignore` excluded a note from the scan, `is_visible`
+    /// let the watcher re-admit it the moment the user saved, and the
+    /// sidebar drew it undimmed while it sat in the graph.
+    #[test]
+    fn is_visible_honours_the_same_ignore_files_the_index_walk_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join(".gitignore"), "private.md\n").unwrap();
+        std::fs::write(notes.join("private.md"), "secret\n").unwrap();
+        std::fs::write(notes.join("public.md"), "fine\n").unwrap();
+        // `.ignore` and `.git/info/exclude` count for the walker too.
+        std::fs::write(dir.path().join(".ignore"), "drafts/\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("drafts")).unwrap();
+        std::fs::write(dir.path().join("drafts/d.md"), "draft\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+        std::fs::write(dir.path().join(".git/info/exclude"), "excluded.md\n").unwrap();
+        std::fs::write(dir.path().join("excluded.md"), "x\n").unwrap();
+
+        let walked: Vec<PathBuf> = workspace_walk(dir.path())
+            .flatten()
+            .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+            .map(|e| e.into_path())
+            .collect();
+        for path in [
+            notes.join("private.md"),
+            dir.path().join("drafts/d.md"),
+            dir.path().join("excluded.md"),
+        ] {
+            assert!(!walked.contains(&path), "the index walk skips {path:?}");
+            assert!(!is_visible(dir.path(), &path), "so must is_visible: {path:?}");
+        }
+        assert!(walked.contains(&notes.join("public.md")));
+        assert!(is_visible(dir.path(), &notes.join("public.md")));
+    }
+
+    /// And the sidebar dims exactly what the index drops.
+    #[test]
+    fn the_tree_marks_a_nested_gitignored_file_as_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join(".gitignore"), "private.md\n").unwrap();
+        std::fs::write(notes.join("private.md"), "secret\n").unwrap();
+        std::fs::write(notes.join("public.md"), "fine\n").unwrap();
+
+        let mut tree = FileTree::new(dir.path().to_path_buf());
+        tree.toggle(&notes);
+        let rows = tree.visible();
+        let find = |name: &str| {
+            rows.iter()
+                .find(|(_, e)| e.name == name)
+                .unwrap_or_else(|| panic!("{name} listed: {rows:?}"))
+                .1
+                .ignored
+        };
+        assert!(find("private.md"), "dimmed, like the index drops it");
+        assert!(!find("public.md"));
     }
 
     #[test]
