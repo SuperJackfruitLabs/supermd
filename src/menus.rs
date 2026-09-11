@@ -65,7 +65,13 @@ pub struct MenuItem {
 }
 
 /// The menu for a surface, resolved against the command table. An id
-/// with no matching command is dropped rather than shown as a dead row.
+/// with no matching command is dropped rather than shown as a dead row
+/// — deliberately kept even though `every_menu_item_names_a_real_command`
+/// now catches a bad id at the source (`command_ids`): the filter is
+/// runtime insurance against every *other* way a mismatch could reach
+/// production (a command removed later, a future caller of this
+/// function that skips the test), so a typo here never renders a menu
+/// row that does nothing when clicked.
 pub fn items_for(surface: Surface) -> Vec<MenuItem> {
     surface
         .command_ids()
@@ -104,16 +110,20 @@ mod tests {
         assert!(ids.contains(&"reveal_in_finder"), "{ids:?}");
     }
 
-    /// Every item must name a real command, or the menu offers
-    /// something that cannot be dispatched.
+    /// Every id in `command_ids` must name a real command. This checks
+    /// the *source* list, not `items_for`'s output: `items_for` filters
+    /// out ids that fail to resolve, so asserting over its result is a
+    /// tautology (every returned item was, by construction, a matched
+    /// `COMMANDS` entry) and would pass no matter what a surface's
+    /// `command_ids` says. Walking `command_ids` directly is the only
+    /// way a typo'd id can fail this test.
     #[test]
     fn every_menu_item_names_a_real_command() {
         for surface in Surface::ALL {
-            for item in items_for(*surface) {
+            for id in surface.command_ids() {
                 assert!(
-                    crate::commands::COMMANDS.iter().any(|c| c.id == item.id),
-                    "{surface:?} offers {:?}, which is not in COMMANDS",
-                    item.id
+                    crate::commands::COMMANDS.iter().any(|c| &c.id == id),
+                    "{surface:?} offers {id:?}, which is not in COMMANDS",
                 );
             }
         }
