@@ -15,6 +15,7 @@ pub mod table_edit;
 pub mod movement;
 pub mod projection;
 pub mod projector;
+pub mod replace;
 pub mod spans;
 
 use std::collections::HashMap;
@@ -50,12 +51,15 @@ actions!(
         DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow,
         OpenFind, FindNext, FindPrev, CloseFind, ToggleBold, ToggleItalic, ToggleCode,
         ToggleStrike, InsertLink, CycleHeading, ToggleQuote, Outdent, FollowLink,
-        DismissCompletion
+        DismissCompletion, ReplaceNext, ReplaceAll
     ]
 );
 
 struct FindState {
     input: Entity<crate::input::TextInput>,
+    /// The replacement field, shown only once the user asks for it.
+    replace_input: Entity<crate::input::TextInput>,
+    replacing: bool,
     matches: Vec<Range<usize>>,
     active: usize,
     _watch: gpui::Subscription,
@@ -1705,20 +1709,97 @@ impl Editor {
             .unwrap_or(0);
     }
 
-    fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(state) = &self.find {
-            window.focus(&state.input.read(cx).focus_handle);
+    /// Create the find bar if it isn't already open. Shared by
+    /// `open_find` and the replace commands, which may need the bar
+    /// (and its query field) open before they can show their own.
+    fn ensure_find(&mut self, cx: &mut Context<Self>) {
+        if self.find.is_some() {
             return;
         }
         let input = cx.new(|cx| crate::input::TextInput::new("Find…", cx));
+        let replace_input = cx.new(|cx| crate::input::TextInput::new("Replace…", cx));
         let watch = cx.observe(&input, |this: &mut Editor, input, cx| {
             let query = input.read(cx).content.to_string();
             this.recompute_matches(&query);
             cx.notify();
         });
-        window.focus(&input.read(cx).focus_handle);
-        self.find = Some(FindState { input, matches: Vec::new(), active: 0, _watch: watch });
+        self.find = Some(FindState {
+            input,
+            replace_input,
+            replacing: false,
+            matches: Vec::new(),
+            active: 0,
+            _watch: watch,
+        });
+    }
+
+    fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_find(cx);
+        let state = self.find.as_ref().expect("just ensured");
+        window.focus(&state.input.read(cx).focus_handle);
         cx.notify();
+    }
+
+    /// Apply a `ReplaceEdit` as its own undo group, same path
+    /// `formatting.rs` edits already use: one replace, one undo group,
+    /// cursor left at the end of the new text.
+    fn apply_replace(&mut self, edit: replace::ReplaceEdit, cx: &mut Context<Self>) {
+        self.core.break_undo_group();
+        self.core.replace_range(edit.range, &edit.replacement, Instant::now());
+        self.core.selection = Selection::cursor(edit.select.end);
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    /// First press reveals the replace field (and focuses it) without
+    /// touching the buffer; the field is "shown only once the user
+    /// asks for it". A second press performs the replacement.
+    ///
+    /// Returns `true` when the field was just revealed, so the caller
+    /// stops there instead of also replacing.
+    fn reveal_replace_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.ensure_find(cx);
+        let state = self.find.as_mut().expect("just ensured");
+        if state.replacing {
+            return false;
+        }
+        state.replacing = true;
+        window.focus(&state.replace_input.read(cx).focus_handle);
+        cx.notify();
+        true
+    }
+
+    fn replace_next(&mut self, _: &ReplaceNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reveal_replace_field(window, cx) {
+            return;
+        }
+        let Some((at, with)) = self.find.as_ref().and_then(|s| {
+            let at = s.matches.get(s.active)?.clone();
+            Some((at, s.replace_input.read(cx).content.to_string()))
+        }) else {
+            return;
+        };
+        let text = self.core.buffer.text();
+        let edit = replace::replace_one(&text, at, &with);
+        self.apply_replace(edit, cx);
+    }
+
+    fn replace_all(&mut self, _: &ReplaceAll, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reveal_replace_field(window, cx) {
+            return;
+        }
+        let Some((query, with)) = self
+            .find
+            .as_ref()
+            .map(|s| (s.input.read(cx).content.to_string(), s.replace_input.read(cx).content.to_string()))
+        else {
+            return;
+        };
+        let text = self.core.buffer.text();
+        let Some(edit) = replace::replace_all(&text, &query, &with) else {
+            return;
+        };
+        self.apply_replace(edit, cx);
     }
 
     fn cycle_find(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -3742,6 +3823,9 @@ impl Render for Editor {
                         .text_color(t.fg_muted)
                         .child(SharedString::from(format!("{current}/{total}"))),
                 )
+                .when(state.replacing, |d| {
+                    d.child(div().flex_1().child(state.replace_input.clone()))
+                })
         });
 
         div()
@@ -3795,6 +3879,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_prev))
             .on_action(cx.listener(Self::close_find))
+            .on_action(cx.listener(Self::replace_next))
+            .on_action(cx.listener(Self::replace_all))
             .on_mouse_move(cx.listener(Self::on_root_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
@@ -4537,6 +4623,110 @@ mod tests {
             let ed = editor.read(app);
             assert!(ed.find.is_none());
             assert!(ed.focus_handle.is_focused(window), "close refocuses the editor");
+        });
+    }
+
+    /// Replace All is one undo entry. Stepping back through a hundred
+    /// replacements one at a time is not undo.
+    #[gpui::test]
+    fn replace_all_is_a_single_undo_entry(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        editor.update(cx, |ed, cx| {
+            let text = ed.core.buffer.text();
+            let e = crate::editor::replace::replace_all(&text, "cat", "dog").expect("matches");
+            ed.core.replace_range(e.range.clone(), &e.replacement, std::time::Instant::now());
+            cx.notify();
+        });
+        editor.update(cx, |ed, _| {
+            assert_eq!(ed.core.buffer.text(), "a dog b dog c dog\n");
+            ed.core.undo();
+            assert_eq!(
+                ed.core.buffer.text(),
+                "a cat b cat c cat\n",
+                "one undo takes back the whole Replace All"
+            );
+        });
+    }
+
+    /// First press of ⌘⌥E only reveals the replace field; the second
+    /// press, once it has text, replaces the active match.
+    #[gpui::test]
+    fn replace_next_reveals_the_field_then_replaces_the_active_match(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceNext);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.find.as_ref().unwrap().replacing, "field revealed");
+            assert_eq!(ed.core.buffer.text(), "a cat b cat\n", "no edit on the reveal press");
+        });
+
+        editor.update_in(cx, |ed, _, cx| {
+            let replace_input = ed.find.as_ref().unwrap().replace_input.clone();
+            replace_input.update(cx, |input, cx| {
+                input.content = "dog".into();
+                cx.notify();
+            });
+        });
+
+        cx.dispatch_action(ReplaceNext);
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.buffer.text(),
+                "a dog b cat\n",
+                "only the active match is replaced"
+            );
+        });
+    }
+
+    /// ⌘⌥⇧E rewrites every match through the same reveal-then-act flow,
+    /// and the whole thing is one undo entry.
+    #[gpui::test]
+    fn replace_all_reveals_the_field_then_replaces_every_match(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceAll);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.find.as_ref().unwrap().replacing, "field revealed");
+            assert_eq!(ed.core.buffer.text(), "a cat b cat c cat\n", "no edit on the reveal press");
+        });
+
+        editor.update_in(cx, |ed, _, cx| {
+            let replace_input = ed.find.as_ref().unwrap().replace_input.clone();
+            replace_input.update(cx, |input, cx| {
+                input.content = "dog".into();
+                cx.notify();
+            });
+        });
+
+        cx.dispatch_action(ReplaceAll);
+        editor.update(cx, |ed, _| {
+            assert_eq!(ed.core.buffer.text(), "a dog b dog c dog\n");
+            ed.core.undo();
+            assert_eq!(
+                ed.core.buffer.text(),
+                "a cat b cat c cat\n",
+                "one undo takes back the whole Replace All"
+            );
         });
     }
 

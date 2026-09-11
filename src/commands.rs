@@ -269,6 +269,10 @@ commands! {
     ed::FindPrev => { id: "find_prev", label: "Find Previous",
         keys: ["cmd-shift-g"], ctx: Some("Editor"), menu: Some((Edit, 2)),
         help: Some(HEditor) },
+    ed::ReplaceNext => { id: "replace_next", label: "Replace",
+        keys: ["cmd-alt-e"], ctx: Some("Editor"), menu: Some((Edit, 6)), help: Some(HEditor) },
+    ed::ReplaceAll => { id: "replace_all", label: "Replace All",
+        keys: ["cmd-alt-shift-e"], ctx: Some("Editor"), menu: Some((Edit, 7)), help: Some(HEditor) },
 
     // ── Format ─────────────────────────────────────────────────────────
     ed::ToggleBold => { id: "bold", label: "Bold", keys: ["cmd-b"],

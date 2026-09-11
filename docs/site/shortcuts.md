@@ -62,6 +62,8 @@ The modifier says what a shortcut acts on. New bindings follow the tier that mat
 | ⌘ F | Ctrl F | Find in File |
 | ⌘ G | Ctrl G | Find Next |
 | ⌘ ⇧ G | Ctrl Shift G | Find Previous |
+| ⌘ ⌥ E | Ctrl Alt E | Replace |
+| ⌘ ⌥ ⇧ E | Ctrl Alt Shift E | Replace All |
 | ⌘ B | Ctrl B | Bold |
 | ⌘ I | Ctrl I | Italic |
 
