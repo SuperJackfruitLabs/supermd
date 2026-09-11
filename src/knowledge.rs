@@ -326,6 +326,24 @@ fn stem_of(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// True if `path` names an inode with more than one link -- i.e. some
+/// other path, possibly entirely outside the workspace, reads the exact
+/// same bytes. `ln ~/.ssh/id_rsa ws/leak.md` has no symlink for
+/// `is_symlink()` to catch, but the same "nothing outside the workspace
+/// is read" property applies. Not a vault-borne vector — git carries no
+/// hardlinks across a clone — so unix-only is a full fix, not a partial
+/// one: `nlink` has no equivalent in `std::fs::Metadata` on Windows.
+#[cfg(unix)]
+fn has_multiple_hardlinks(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).map(|m| m.nlink() > 1).unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn has_multiple_hardlinks(_path: &Path) -> bool {
+    false
+}
+
 impl Index {
     /// Scan every markdown file under `root`.
     pub fn scan(root: &Path) -> Self {
@@ -344,6 +362,12 @@ impl Index {
                 continue;
             }
             let path = item.path();
+            // A hardlink is not a symlink -- `is_symlink()` above never
+            // sees it -- but it can still name a file entirely outside
+            // the workspace.
+            if has_multiple_hardlinks(path) {
+                continue;
+            }
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Ok(text) = std::fs::read_to_string(path) {
                     index.update_file(path, &text);
@@ -968,6 +992,36 @@ mod tests {
         assert_eq!(
             index.resolve(&root.join("note.md"), &wiki), None,
             "a wiki link to a symlinked note must not resolve"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hardlinked_markdown_file_is_not_indexed() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&outside, "secret").unwrap();
+        // `ln outside.md ws/leak.md`: no symlink at all, so the
+        // walker's `is_symlink()` filter never sees it, and
+        // `read_to_string` reads the *same inode* as the file outside
+        // the workspace -- git cannot carry this (hardlinks do not
+        // survive a clone), but the property claimed is that nothing
+        // outside the workspace is read.
+        let leak = root.join("leak.md");
+        std::fs::hard_link(&outside, &leak).unwrap();
+        assert!(
+            std::fs::metadata(&leak).unwrap().nlink() > 1,
+            "precondition: the walked path really is a hardlink"
+        );
+        let index = Index::scan(&root);
+        assert!(
+            !index.notes.contains_key(&leak),
+            "a hardlinked note must never enter the index"
         );
     }
 

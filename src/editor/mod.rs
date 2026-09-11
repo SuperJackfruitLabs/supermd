@@ -175,6 +175,13 @@ pub struct Editor {
     /// The pointer is inside the popover itself, so it must not close.
     hover_held: bool,
     hover_close_task: Option<gpui::Task<()>>,
+    /// Registered once, lazily, from the first render: a press belongs
+    /// to the document that was on screen when it happened, and
+    /// neither it nor the hover it started should outlive this editor
+    /// losing focus — a tab switch moves focus to the newly active
+    /// document before this one is ever rendered again, so the moment
+    /// it happens is the only reliable place to catch it.
+    blur_subscription: Option<gpui::Subscription>,
 }
 
 /// Snapshot taken right after a paste lands, so a background enricher
@@ -336,6 +343,7 @@ impl Editor {
             hover_preview: None,
             hover_held: false,
             hover_close_task: None,
+            blur_subscription: None,
         };
         editor.restyle(langs);
         editor.schedule_status(cx);
@@ -955,6 +963,17 @@ impl Editor {
         self.save = SavePolicy::default();
         self.disk_mtime = autosave::disk_mtime(&self.path);
         self.marked_range = None;
+        // The buffer just got swapped out from under any in-flight
+        // press or hover: their offsets belong to text that no longer
+        // exists, so a release now must not navigate and a stale
+        // popover must not linger.
+        self.pending_link = None;
+        self.hover_link = None;
+        self.hover_task = None;
+        self.hover_at = None;
+        self.hover_preview = None;
+        self.hover_held = false;
+        self.hover_close_task = None;
         let langs = crate::highlight::languages(cx);
         self.restyle(&langs);
         if self.find.is_some() {
@@ -2257,11 +2276,29 @@ impl Editor {
     }
 
     fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.finish_mouse_up(true, cx);
+    }
+
+    /// The release landed outside the editor's own bounds. Browsers
+    /// treat that as a cancelled click, not a completed one: a
+    /// pending link must be dropped, not followed.
+    fn on_root_mouse_up_out(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.finish_mouse_up(false, cx);
+    }
+
+    fn finish_mouse_up(&mut self, in_bounds: bool, cx: &mut Context<Self>) {
         let selection_drag_ended = self.dragging && !self.scrollbar_dragging;
         self.dragging = false;
         // The press landed on a followable link and nothing dragged it
-        // away: this release is the click, so navigate now.
+        // away: an in-bounds release is the click, so navigate now.
         if let Some(pending) = self.pending_link.take() {
+            if !in_bounds {
+                // Cancelled: the press still belongs to nothing, and
+                // no caret placement follows a click that never
+                // completed.
+                cx.notify();
+                return;
+            }
             if !self.open_link(&pending.link, cx) {
                 // Refused (an escaping wiki target, say) — the click
                 // still belongs to the document, so place the caret.
@@ -2483,6 +2520,13 @@ impl Editor {
             eprintln!("supermd: cannot record the preview grant: {err}");
             return;
         }
+        // The grant just landed on disk, but `preview_for` never reads
+        // disk itself: without this the cache `PreviewState` holds
+        // stays exactly as stale as it was before the click, and the
+        // popover below would still show `Ungranted`.
+        if let Some(state) = cx.try_global::<crate::preview::PreviewState>() {
+            state.refresh_grants();
+        }
         // Forced: clicking the button requires the pointer inside the
         // popover, which is exactly the state the dwell path refuses to
         // touch. Without this the grant was written to settings and
@@ -2502,10 +2546,13 @@ impl Editor {
 
         match crate::knowledge::classify(link) {
             LinkTarget::External(url) => {
-                let grants = crate::settings::load(&crate::settings::config_dir())
-                    .plugin_grants
-                    .get("supermd")
-                    .cloned()
+                // Cached on `PreviewState`, not read from disk here:
+                // this runs on every dwell, and `settings::load` is a
+                // file read plus a TOML parse the UI thread should
+                // never do that often.
+                let grants = cx
+                    .try_global::<crate::preview::PreviewState>()
+                    .map(|s| s.grants())
                     .unwrap_or_default();
                 // The *visible* text, not `context` — that is the
                 // whole line, which never looks like a hostname and so
@@ -3571,12 +3618,29 @@ impl Focusable for Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.inline_gen != crate::extensions::inline_generation()
             && matches!(self.provider, Provider::Markdown)
         {
             let langs = crate::highlight::languages(cx);
             self.restyle(&langs);
+        }
+        if self.blur_subscription.is_none() {
+            // A window is only available from render, so the
+            // subscription cannot be set up any earlier than the
+            // first paint. Idempotent: every later render sees
+            // `Some` and skips this.
+            self.blur_subscription =
+                Some(cx.on_blur(&self.focus_handle, window, |editor, _window, cx| {
+                    editor.pending_link = None;
+                    editor.hover_link = None;
+                    editor.hover_task = None;
+                    editor.hover_at = None;
+                    editor.hover_preview = None;
+                    editor.hover_held = false;
+                    editor.hover_close_task = None;
+                    cx.notify();
+                }));
         }
         self.reproject();
         let entity = cx.weak_entity();
@@ -4068,7 +4132,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::renumber_list))
             .on_mouse_move(cx.listener(Self::on_root_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_root_mouse_up_out))
             .flex()
             .flex_col()
             .children(diff_header)
@@ -5093,6 +5157,54 @@ mod tests {
         });
     }
 
+    /// A press belongs to the document that was on screen when it
+    /// happened. Neither survives the buffer being swapped or the
+    /// editor leaving the screen.
+    #[gpui::test]
+    fn a_reload_clears_a_pending_press(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "see [[Target]] here\n");
+        editor.update(cx, |ed, _| {
+            ed.pending_link =
+                ed.link_at_offset(6).cloned().map(|link| PendingLink { offset: 6, link });
+            assert!(ed.pending_link.is_some(), "precondition");
+        });
+        editor.update(cx, |ed, cx| ed.reload_from_disk(cx));
+        editor.update(cx, |ed, _| {
+            assert!(ed.pending_link.is_none(), "a reload drops the press");
+            assert!(ed.hover_link.is_none(), "and the hover it belonged to");
+        });
+    }
+
+    /// The other way a press can outlive the document it was made on:
+    /// the editor loses focus (a tab switch, in the app) before the
+    /// release ever reaches it. Returning and releasing over blank
+    /// space must not still be holding that press.
+    #[gpui::test]
+    fn losing_focus_clears_a_pending_press(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "see [[Target]] here\n");
+        // `on_blur` only fires for a window the platform considers
+        // active -- true of any real window that has ever been shown,
+        // but a test window starts inactive until told otherwise.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        editor.update(cx, |ed, _| {
+            ed.pending_link =
+                ed.link_at_offset(6).cloned().map(|link| PendingLink { offset: 6, link });
+            ed.hover_link = ed.link_at_offset(6).cloned();
+            assert!(ed.pending_link.is_some(), "precondition");
+            assert!(ed.hover_link.is_some(), "precondition");
+        });
+        // Something else takes focus -- in the app, a tab switch moves
+        // it to the newly active document's own handle.
+        let elsewhere = cx.update(|_, app| app.focus_handle());
+        cx.update(|window, _| window.focus(&elsewhere));
+        cx.run_until_parked();
+        editor.update(cx, |ed, _| {
+            assert!(ed.pending_link.is_none(), "losing focus drops the press");
+            assert!(ed.hover_link.is_none(), "and the hover it belonged to");
+        });
+    }
+
     #[gpui::test]
     fn ime_marked_text_composes_and_commits(cx: &mut TestAppContext) {
         let (_fx, editor, cx) = open_editor(cx, "note.md", "");
@@ -5594,6 +5706,36 @@ mod tests {
         cx.update(|_, app| {
             let sel = editor.read(app).core.selection.range();
             assert!(!sel.is_empty(), "the drag must have selected text (got {sel:?})");
+        });
+    }
+
+    /// A browser treats a release outside the element as a cancelled
+    /// click, not a completed one -- so must this editor.
+    #[gpui::test]
+    fn a_release_outside_the_editor_cancels_the_pending_link(cx: &mut TestAppContext) {
+        let ws = knowledge_fixture(cx);
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "go [[Roadmap]] or here").unwrap();
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+
+        // Display text is "go Roadmap or here": press inside the link.
+        let start = point_for_index(&editor, cx, 0, 4);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        editor.update(cx, |ed, _| {
+            assert!(ed.pending_link.is_some(), "precondition: the press is pending");
+        });
+
+        // The release lands well outside the editor's own bounds.
+        cx.simulate_mouse_up(point(px(-500.), px(-500.)), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            opened.borrow().is_empty(),
+            "a release outside the editor must not navigate: {opened:?}"
+        );
+        editor.update(cx, |ed, _| {
+            assert!(ed.pending_link.is_none(), "the press must be cancelled, not merely unactioned");
         });
     }
 

@@ -697,10 +697,14 @@ impl Workspace {
 
     fn on_fs_events(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         // Ignore churn from ignored paths (target/, node_modules/, …) so
-        // builds in an open workspace don't hammer the UI.
-        if let Some(tree) = &self.tree {
-            let root = tree.root.clone();
-            if !paths.iter().any(|p| crate::files::is_visible(&root, p)) {
+        // builds in an open workspace don't hammer the UI. This is only
+        // a whole-batch shortcut for the common case of an irrelevant
+        // batch; it must never stand in for the per-path check below,
+        // or one visible path in a batch would wave through every
+        // ignored path riding alongside it.
+        let root = self.tree.as_ref().map(|tree| tree.root.clone());
+        if let Some(root) = &root {
+            if !paths.iter().any(|p| crate::files::is_visible(root, p)) {
                 return;
             }
         }
@@ -713,6 +717,16 @@ impl Workspace {
             let mut index = state.0.lock().unwrap();
             for path in paths {
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                // Same admission rule `Index::scan` applies at its own
+                // walk: a path under `.git`/`target`/hidden or excluded
+                // by the root `.gitignore` never enters the index,
+                // however the watcher heard about it. Without this, a
+                // batch that also touched one visible file would index
+                // every ignored `.md` path riding alongside it.
+                if root.as_ref().is_some_and(|root| !crate::files::is_visible(root, path)) {
+                    index.remove_file(path);
                     continue;
                 }
                 // Same rule as Index::scan: a symlink never enters the
@@ -5931,6 +5945,35 @@ mod tests {
             assert!(
                 !back.iter().any(|(p, _)| p.ends_with("leak.md")),
                 "a symlinked note must never enter the index: {back:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn on_fs_events_checks_each_path_not_just_the_batch(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        let hidden = root.path().join(".git").join("HIDDEN.md");
+        std::fs::write(&hidden, "secret links [[A]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let a = root.path().join("A.md");
+        // The batch carries one path `is_visible` admits (so the
+        // batch-level short-circuit above does not return early) and
+        // one it does not: a `.md` under `.git`, which `Index::scan`
+        // never walks. Each path must be checked on its own.
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[a.clone(), hidden.clone()], cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let state = app.global::<crate::knowledge::KnowledgeState>();
+            let index = state.0.lock().unwrap();
+            let back = index.backlinks(&a);
+            assert!(
+                !back.iter().any(|(p, _)| p.ends_with("HIDDEN.md")),
+                "a path under .git must not enter the index just because \
+                 the batch also touched a visible file: {back:?}"
             );
         });
     }

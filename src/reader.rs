@@ -309,7 +309,14 @@ impl Render for Reader {
                                 range: 0..0,
                                 context: String::new(),
                             };
-                            let grants = crate::preview::stored_grants();
+                            // Cached on `PreviewState`, not read from
+                            // disk on every tooltip render — see
+                            // `Editor::preview_for`, which reads the
+                            // same cache.
+                            let grants = cx
+                                .try_global::<crate::preview::PreviewState>()
+                                .map(|s| s.grants())
+                                .unwrap_or_default();
                             Some(crate::preview::preview_for_link(
                                 &link,
                                 dest,
