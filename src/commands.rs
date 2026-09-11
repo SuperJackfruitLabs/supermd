@@ -289,6 +289,16 @@ commands! {
         ctx: Some("Editor"), menu: Some((Format, 1)), help: None },
     ed::ToggleQuote => { id: "quote", label: "Quote", keys: [],
         ctx: Some("Editor"), menu: Some((Format, 1)), help: None },
+    ed::TableInsertRow => { id: "table_insert_row", label: "Insert Row Below",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 8)), help: Some(HEditor) },
+    ed::TableDeleteRow => { id: "table_delete_row", label: "Delete Row",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 9)), help: Some(HEditor) },
+    ed::TableInsertColumn => { id: "table_insert_column", label: "Insert Column Right",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 10)), help: Some(HEditor) },
+    ed::TableDeleteColumn => { id: "table_delete_column", label: "Delete Column",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 11)), help: Some(HEditor) },
+    ed::RenumberList => { id: "renumber_list", label: "Renumber List",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 12)), help: Some(HEditor) },
 
     // ── Sidebar (context-scoped; no menu placement) ────────────────────
     ws::SidebarNewFile => { id: "sidebar_new_file", label: "New File Here",

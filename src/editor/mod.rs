@@ -12,6 +12,7 @@ pub mod formatting;
 pub mod lists;
 pub mod paste_image;
 pub mod table_edit;
+pub mod table_ops;
 pub mod movement;
 pub mod projection;
 pub mod projector;
@@ -51,7 +52,8 @@ actions!(
         DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow,
         OpenFind, FindNext, FindPrev, CloseFind, ToggleBold, ToggleItalic, ToggleCode,
         ToggleStrike, InsertLink, CycleHeading, ToggleQuote, Outdent, FollowLink,
-        DismissCompletion, ReplaceNext, ReplaceAll
+        DismissCompletion, ReplaceNext, ReplaceAll, TableInsertRow, TableDeleteRow,
+        TableInsertColumn, TableDeleteColumn, RenumberList
     ]
 );
 
@@ -1287,7 +1289,11 @@ impl Editor {
                 }
                 let line = self.core.buffer.line_text(line_ix);
                 let indent = &line[..item.indent];
+                let ordered = item.next_marker.as_bytes().first().is_some_and(u8::is_ascii_digit);
                 self.insert_str(&format!("\n{indent}{}", item.next_marker), cx);
+                if ordered {
+                    self.renumber_current_list(cx);
+                }
                 return;
             }
         }
@@ -1412,6 +1418,125 @@ impl Editor {
         } else {
             target
         }
+    }
+
+    /// The table block, cell-relative cursor position, and block text
+    /// at the cursor, or `None` outside a table.
+    fn table_cursor(&self) -> Option<(Range<usize>, String, table_edit::CellPos)> {
+        let head = self.core.selection.head;
+        let text = self.core.buffer.text();
+        let br = table_edit::table_block(&text, head)?;
+        let block = text[br.clone()].to_string();
+        let pos = table_edit::cell_at(&block, head - br.start)?;
+        Some((br, block, pos))
+    }
+
+    /// Replace the table block with `new_block` as one undo group, and
+    /// place the cursor collapsed at the start of `pos`'s cell.
+    fn apply_table_edit(
+        &mut self,
+        br: Range<usize>,
+        new_block: &str,
+        pos: table_edit::CellPos,
+        cx: &mut Context<Self>,
+    ) {
+        self.core.break_undo_group();
+        self.core.replace_range(br.clone(), new_block, Instant::now());
+        if let Some(r) = table_edit::cell_range(new_block, pos) {
+            self.core.set_cursor(br.start + r.start);
+        }
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    fn table_insert_row(&mut self, _: &TableInsertRow, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((br, block, pos)) = self.table_cursor() else {
+            return;
+        };
+        let new_block = table_ops::insert_row(&block, pos.row);
+        self.apply_table_edit(br, &new_block, table_edit::CellPos { row: pos.row + 1, cell: 0 }, cx);
+    }
+
+    fn table_delete_row(&mut self, _: &TableDeleteRow, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((br, block, pos)) = self.table_cursor() else {
+            return;
+        };
+        let Some(new_block) = table_ops::delete_row(&block, pos.row) else {
+            return;
+        };
+        let row = table_edit::rows(&new_block).len().saturating_sub(1).min(pos.row);
+        self.apply_table_edit(br, &new_block, table_edit::CellPos { row, cell: pos.cell }, cx);
+    }
+
+    fn table_insert_column(
+        &mut self,
+        _: &TableInsertColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((br, block, pos)) = self.table_cursor() else {
+            return;
+        };
+        let new_block = table_ops::insert_column(&block, pos.cell);
+        self.apply_table_edit(br, &new_block, table_edit::CellPos { row: pos.row, cell: pos.cell + 1 }, cx);
+    }
+
+    fn table_delete_column(
+        &mut self,
+        _: &TableDeleteColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((br, block, pos)) = self.table_cursor() else {
+            return;
+        };
+        let Some(new_block) = table_ops::delete_column(&block, pos.cell) else {
+            return;
+        };
+        let cell = pos.cell.min(table_edit::rows(&new_block)[pos.row].cells.len().saturating_sub(1));
+        self.apply_table_edit(br, &new_block, table_edit::CellPos { row: pos.row, cell }, cx);
+    }
+
+    /// Renumber the ordered-list run around the cursor (the contiguous
+    /// non-blank lines it sits in). A no-op outside an ordered list.
+    fn renumber_current_list(&mut self, cx: &mut Context<Self>) {
+        let head = self.core.selection.head;
+        let cur_line = self.core.buffer.line_of_byte(head);
+        let col = head - self.core.buffer.line_range(cur_line).start;
+
+        let mut start_line = cur_line;
+        while start_line > 0 && !self.core.buffer.line_text(start_line - 1).trim().is_empty() {
+            start_line -= 1;
+        }
+        let last_line = self.core.buffer.line_count().saturating_sub(1);
+        let mut end_line = cur_line;
+        while end_line < last_line && !self.core.buffer.line_text(end_line + 1).trim().is_empty() {
+            end_line += 1;
+        }
+        let block = self.core.buffer.line_range(start_line).start
+            ..self.core.buffer.line_range(end_line).end;
+
+        let text = self.core.buffer.text();
+        let Some(new_text) = lists::renumber(&text, block) else {
+            return;
+        };
+        if new_text == text {
+            return;
+        }
+        self.core.break_undo_group();
+        self.core.replace_range(0..text.len(), &new_text, Instant::now());
+        let new_head = (self.core.buffer.line_range(cur_line).start + col).min(self.core.buffer.len_bytes());
+        self.core.set_cursor(new_head);
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    fn renumber_list(&mut self, _: &RenumberList, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        self.renumber_current_list(cx);
     }
 
     /// Add (or remove, when negative) leading spaces on a line while
@@ -3904,6 +4029,11 @@ impl Render for Editor {
             .on_action(cx.listener(Self::close_find))
             .on_action(cx.listener(Self::replace_next))
             .on_action(cx.listener(Self::replace_all))
+            .on_action(cx.listener(Self::table_insert_row))
+            .on_action(cx.listener(Self::table_delete_row))
+            .on_action(cx.listener(Self::table_insert_column))
+            .on_action(cx.listener(Self::table_delete_column))
+            .on_action(cx.listener(Self::renumber_list))
             .on_mouse_move(cx.listener(Self::on_root_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_root_mouse_up))

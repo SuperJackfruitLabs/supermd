@@ -67,6 +67,75 @@ pub fn list_item(line: &str) -> Option<ListItem> {
     Some(ListItem { indent, marker_len, content_empty, next_marker, indent_step })
 }
 
+/// Rewrite the ordered-list numbers within `block` (a byte range of
+/// `text`) so each indent level counts sequentially, keeping the first
+/// number an author chose at each level. Unordered items and lines
+/// that aren't list items are left untouched. `None` means the block
+/// holds no ordered item at all — nothing to renumber.
+///
+/// Returns the whole of `text`, unchanged outside `block`.
+pub fn renumber(text: &str, block: std::ops::Range<usize>) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..block.start]);
+
+    // Stack of (indent, current number) for the ordered runs in play.
+    // A shallower or equal indent pops deeper entries (their scope
+    // ended); an equal indent continues counting; a deeper indent
+    // starts a fresh run at the author's own first number.
+    let mut stack: Vec<(usize, u64)> = Vec::new();
+    let mut found_any = false;
+
+    let mut lines = text[block.clone()].split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let is_last = lines.peek().is_none();
+        let Some(item) = list_item(line) else {
+            out.push_str(line);
+            if !is_last {
+                out.push('\n');
+            }
+            continue;
+        };
+        let rest = &line[item.indent..];
+        let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 {
+            // A bullet: leave the line as-is.
+            out.push_str(line);
+            if !is_last {
+                out.push('\n');
+            }
+            continue;
+        }
+        found_any = true;
+        while stack.last().is_some_and(|(indent, _)| *indent > item.indent) {
+            stack.pop();
+        }
+        let n = match stack.last_mut() {
+            Some((indent, n)) if *indent == item.indent => {
+                *n += 1;
+                *n
+            }
+            _ => {
+                let start: u64 = rest[..digits].parse().unwrap_or(1);
+                stack.push((item.indent, start));
+                start
+            }
+        };
+        out.push_str(&line[..item.indent]);
+        out.push_str(&n.to_string());
+        out.push_str(&rest[digits..]);
+        if !is_last {
+            out.push('\n');
+        }
+    }
+
+    out.push_str(&text[block.end..]);
+    if found_any {
+        Some(out)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +196,36 @@ mod tests {
         for line in ["hello", "-nospace", "1.nospace", "12345678901. huge", "", "  ", "> quote"] {
             assert_eq!(list_item(line), None, "{line:?}");
         }
+    }
+
+    /// A list edited in the middle reads "1. 2. 3. 3. 4." Renumbering
+    /// rewrites the run, keeping the first number the author chose.
+    #[test]
+    fn renumber_fixes_a_run_after_an_insertion() {
+        let text = "1. one\n2. two\n2. inserted\n3. three\n";
+        let out = renumber(text, 0..text.len()).expect("an ordered list");
+        assert_eq!(out, "1. one\n2. two\n3. inserted\n4. three\n");
+    }
+
+    /// A list that starts at 5 keeps starting at 5.
+    #[test]
+    fn renumber_keeps_the_starting_number() {
+        let text = "5. five\n5. six\n5. seven\n";
+        let out = renumber(text, 0..text.len()).expect("an ordered list");
+        assert_eq!(out, "5. five\n6. six\n7. seven\n");
+    }
+
+    /// Nested items renumber within their own level.
+    #[test]
+    fn renumber_treats_each_indent_level_separately() {
+        let text = "1. a\n   1. x\n   1. y\n2. b\n";
+        let out = renumber(text, 0..text.len()).expect("an ordered list");
+        assert_eq!(out, "1. a\n   1. x\n   2. y\n2. b\n");
+    }
+
+    /// Bullets are left alone.
+    #[test]
+    fn renumber_ignores_an_unordered_list() {
+        assert!(renumber("- a\n- b\n", 0..6).is_none());
     }
 }
