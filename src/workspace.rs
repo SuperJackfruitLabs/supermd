@@ -23,6 +23,8 @@ actions!(
     workspace,
     [
         NewFile,
+        NewWindow,
+        OpenFolderInNewWindow,
         OpenDialog,
         CloseTab,
         NextTab,
@@ -92,6 +94,93 @@ actions!(
         NavigateForward,
     ]
 );
+
+/// Where the nth window of this session opens. A cascade, so a second
+/// window never lands exactly on top of the one that spawned it and
+/// look like nothing happened; it wraps after ten so a long session
+/// cannot walk windows off the bottom of the screen.
+pub fn cascade_origin(n: usize) -> (f32, f32) {
+    let step = (n % 10) as f32 * 24.0;
+    (100.0 + step, 60.0 + step)
+}
+
+/// How many windows this session has opened, for the cascade.
+static WINDOWS_OPENED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The window chrome every SuperMD window wears. One place, so the
+/// second window is the same window as the first.
+pub fn window_options() -> gpui::WindowOptions {
+    let n = WINDOWS_OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (x, y) = cascade_origin(n);
+    gpui::WindowOptions {
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some("SuperMD".into()),
+            // Client-side decorations: we draw the top bar, native
+            // traffic lights overlay it.
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(12.), px(10.))),
+        }),
+        window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
+            origin: gpui::point(px(x), px(y)),
+            size: gpui::size(px(1200.), px(800.)),
+        })),
+        // Linux: ask for client-side decorations; we draw our own
+        // window controls when the compositor grants them.
+        window_decorations: if cfg!(target_os = "linux") {
+            Some(gpui::WindowDecorations::Client)
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+}
+
+/// Open another window on `path` (None = an empty window with the
+/// welcome document). Each window builds its own `Workspace`, and so
+/// its own knowledge index, tabs, graph and plugin sandbox root: two
+/// vaults open at once never see each other's notes.
+pub fn open_in_new_window(
+    path: Option<PathBuf>,
+    cx: &mut App,
+) -> Option<gpui::WindowHandle<Workspace>> {
+    let handle = cx
+        .open_window(window_options(), move |_window, cx| {
+            cx.new(|cx| {
+                let mut workspace = Workspace::new(path, cx);
+                workspace.setup_watcher(cx);
+                workspace
+            })
+        })
+        .ok()?;
+    handle
+        .update(cx, |workspace, window, cx| {
+            crate::apply_system_appearance(window.appearance(), cx);
+            window
+                .observe_window_appearance(|window, cx| {
+                    crate::apply_system_appearance(window.appearance(), cx);
+                    window.refresh();
+                })
+                .detach();
+            window.focus(&workspace.focus_handle(cx));
+            cx.activate(true);
+        })
+        .ok();
+    Some(handle)
+}
+
+/// One window per chosen folder. Anything that is not a directory is
+/// skipped rather than opened as a single-file window: this is the
+/// *folder* picker, and a file slipping through would give the new
+/// window no sidebar, no index and no sandbox root. Returns how many
+/// windows opened.
+pub fn open_folders_in_new_windows(paths: Vec<PathBuf>, cx: &mut App) -> usize {
+    paths
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .filter_map(|path| open_in_new_window(Some(path), cx))
+        .count()
+}
 
 /// The welcome tour must be editable (it promises clickable checkboxes),
 /// so it lives as a real file the user owns. Written once; never
@@ -1243,6 +1332,32 @@ impl Workspace {
             tree.refresh();
         }
         self.open_path(&path, window, cx);
+    }
+
+    /// A second window on nothing in particular.
+    fn new_window(&mut self, _: &NewWindow, _window: &mut Window, cx: &mut Context<Self>) {
+        open_in_new_window(None, cx);
+    }
+
+    /// Pick a folder and open it *beside* this window rather than
+    /// replacing what is already here.
+    fn open_folder_in_new_window(
+        &mut self,
+        _: &OpenFolderInNewWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |_this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            cx.update(|_, cx| open_folders_in_new_windows(paths, cx)).ok();
+        })
+        .detach();
     }
 
     fn open_dialog(&mut self, _: &OpenDialog, window: &mut Window, cx: &mut Context<Self>) {
@@ -5116,6 +5231,8 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_file))
+            .on_action(cx.listener(Self::new_window))
+            .on_action(cx.listener(Self::open_folder_in_new_window))
             .on_action(cx.listener(Self::open_dialog))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -5964,6 +6081,148 @@ pub(crate) mod tests {
             assert_eq!(root_a.as_deref(), Some(a.path()));
             assert_eq!(root_b.as_deref(), Some(b.path()));
             assert_ne!(root_a, root_b, "one host for both windows is the leak");
+        });
+    }
+
+    /// The folder picker opens a window per folder and ignores
+    /// anything that is not one — a file would give the new window no
+    /// sidebar, no index and no sandbox root.
+    #[gpui::test]
+    fn the_folder_picker_opens_a_window_per_folder_and_skips_files(
+        cx: &mut TestAppContext,
+    ) {
+        let _home = temp_home();
+        let (root, a, _) = workspace_fixture();
+        let other = tempfile::tempdir().unwrap();
+        let (_ws, cx) = open_workspace(cx, root.path());
+        let before = cx.update(|_, app| app.windows().len());
+
+        let opened = cx.update(|_, app| {
+            open_folders_in_new_windows(
+                vec![other.path().to_path_buf(), a.clone()],
+                app,
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(opened, 1, "the folder opened, the file did not");
+        assert_eq!(cx.update(|_, app| app.windows().len()), before + 1);
+    }
+
+    #[test]
+    fn windows_cascade_and_wrap() {
+        assert_eq!(cascade_origin(0), (100.0, 60.0));
+        assert_eq!(cascade_origin(1), (124.0, 84.0));
+        // Wraps rather than walking off the bottom of the screen.
+        assert_eq!(cascade_origin(10), cascade_origin(0));
+    }
+
+    /// The production path, not the test harness: `open_in_new_window`
+    /// must build a whole second workspace — its own index and its own
+    /// plugin sandbox root — on the folder it was handed, while the
+    /// window it was invoked from keeps its own.
+    #[gpui::test]
+    fn open_in_new_window_gives_the_second_folder_its_own_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        let _home = temp_home();
+        let a = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("Alpha.md"), "# Alpha\n").unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(b.path().join("Beta.md"), "# Beta\n").unwrap();
+
+        let (ws_a, cx) = open_workspace(cx, a.path());
+        let before = cx.update(|_, app| app.windows().len());
+        let handle = cx
+            .update(|_, app| open_in_new_window(Some(b.path().to_path_buf()), app))
+            .expect("the window opens");
+        cx.run_until_parked();
+
+        assert_eq!(cx.update(|_, app| app.windows().len()), before + 1);
+        cx.update(|_, app| {
+            let ws_b = handle.read(app).expect("the new window holds a workspace");
+            let names_b: Vec<String> = ws_b
+                .knowledge
+                .lock()
+                .unwrap()
+                .note_names()
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
+            assert!(names_b.iter().any(|n| n.eq_ignore_ascii_case("beta")), "{names_b:?}");
+            assert!(
+                !names_b.iter().any(|n| n.eq_ignore_ascii_case("alpha")),
+                "the new window has its own index: {names_b:?}"
+            );
+            assert_eq!(
+                ws_b.host.lock().unwrap().workspace_root(),
+                Some(b.path()),
+                "and its own plugin sandbox root"
+            );
+            let names_a: Vec<String> = ws_a
+                .read(app)
+                .knowledge
+                .lock()
+                .unwrap()
+                .note_names()
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
+            assert!(names_a.iter().any(|n| n.eq_ignore_ascii_case("alpha")), "{names_a:?}");
+            assert!(
+                !names_a.iter().any(|n| n.eq_ignore_ascii_case("beta")),
+                "and the window it came from is untouched: {names_a:?}"
+            );
+        });
+    }
+
+    /// ⌘⇧N means two things, and both have to survive.
+    ///
+    /// `SidebarNewFolder` has had it scoped to `Sidebar` all along;
+    /// `NewWindow` claims it globally. gpui scores a context-free
+    /// binding at the depth of the *deepest* context, so "Sidebar" does
+    /// NOT outrank "no context" — the two tie, and the tie is broken by
+    /// declaration order in `commands::COMMANDS`. That is exactly the
+    /// collision class that made ⌘⇧G unreachable in 0.0.15, so this
+    /// asserts the real keystroke through the real keymap, both ways
+    /// round, rather than trusting the scoping.
+    #[gpui::test]
+    fn new_window_yields_cmd_shift_n_to_a_focused_sidebar(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|_, app| app.bind_keys(crate::app_keybindings()));
+        let chord = crate::platform::keybinding("cmd-shift-n");
+
+        // ── sidebar focused: New Folder Here, and no new window ──
+        select_sidebar_row(&ws, cx, "a.md");
+        let before = cx.update(|_, app| app.windows().len());
+        cx.simulate_keystrokes(&chord);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(
+                matches!(
+                    ws.read(app).sidebar_edit.as_ref().map(|e| &e.kind),
+                    Some(SidebarEditKind::NewDir(_))
+                ),
+                "the sidebar binding still wins while the sidebar has focus"
+            );
+            assert_eq!(app.windows().len(), before, "and no window was opened");
+        });
+        cx.dispatch_action(SidebarEditCancel);
+        cx.run_until_parked();
+
+        // ── sidebar not focused: New Window, and no folder edit ──
+        ws.update_in(cx, |ws, window, _| window.focus(&ws.focus_handle));
+        cx.run_until_parked();
+        cx.simulate_keystrokes(&chord);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                app.windows().len(),
+                before + 1,
+                "off the sidebar, ⌘⇧N opens a window"
+            );
+            assert!(ws.read(app).sidebar_edit.is_none(), "and creates no folder");
         });
     }
 

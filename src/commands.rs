@@ -148,8 +148,23 @@ commands! {
     // ── File ───────────────────────────────────────────────────────────
     ws::NewFile => { id: "new_file", label: "New File", keys: ["cmd-n"],
         ctx: None, menu: Some((File, 0)), help: Some(General) },
+    // ⌘⇧N is also New Folder Here while the sidebar has focus. The two
+    // bindings tie on context depth — gpui scores a context-free
+    // binding at the depth of the *deepest* context, so "Sidebar" does
+    // not outrank "no context" — and the tie is broken by declaration
+    // order, later wins. `SidebarNewFolder` is declared further down
+    // this table, which is the only reason the sidebar binding is still
+    // reachable. `new_window_yields_cmd_shift_n_to_a_focused_sidebar`
+    // asserts both halves; do not reorder without re-running it.
+    ws::NewWindow => { id: "new_window", label: "New Window",
+        keys: ["cmd-shift-n"], ctx: None, menu: Some((File, 0)), help: Some(General) },
     ws::OpenDialog => { id: "open", label: "Open…", keys: ["cmd-o"],
         ctx: None, menu: Some((File, 0)), help: Some(General) },
+    // No keystroke, so no ⌘/ row (`help_sections` lists only commands
+    // with a key) -- `help: None`, like every other keyless command.
+    ws::OpenFolderInNewWindow => { id: "open_folder_new_window",
+        label: "Open Folder in New Window…", keys: [],
+        ctx: None, menu: Some((File, 0)), help: None },
     ed::SaveNow => { id: "save", label: "Save Now", keys: ["cmd-s"],
         ctx: Some("Editor"), menu: Some((File, 1)), help: Some(General) },
     ws::CloseTab => { id: "close_tab", label: "Close Tab", keys: ["cmd-w"],
@@ -200,8 +215,12 @@ commands! {
         ctx: None, menu: Some((Go, 2)), help: Some(General) },
 
     // ── Tools ──────────────────────────────────────────────────────────
+    // Declared here (with the graph's own commands) but shown in Go,
+    // after Back/Forward -- hence group 3, not group 0: `menus` emits a
+    // separator when the group changes as it walks *declaration* order,
+    // so the number has to agree with where the entry actually lands.
     ws::ToggleGraph => { id: "graph", label: "Graph View", keys: ["cmd-shift-g"],
-        ctx: None, menu: Some((Go, 0)), help: Some(General) },
+        ctx: None, menu: Some((Go, 3)), help: Some(General) },
     ws::GraphFit => { id: "graph_fit", label: "Fit Graph to Window",
         keys: ["cmd-0"], ctx: Some("GraphView"), menu: None, help: Some(General) },
     ws::GraphColorBy => { id: "graph_color_by", label: "Graph Colour: Folder / Tag / None",
@@ -574,6 +593,39 @@ mod tests {
         assert_eq!(bindings().len(), total, "one binding per declared key");
     }
 
+    /// A context-scoped binding does NOT outrank a context-free one on
+    /// the same keystroke: gpui scores a binding with no context at the
+    /// depth of the *deepest* context in the dispatch path, so the two
+    /// tie and the tie is broken by the order they were added — later
+    /// wins, and that order is this table's order. ⌘⇧N is both New
+    /// Window (global) and New Folder Here (Sidebar); the sidebar only
+    /// keeps it because it is declared further down.
+    ///
+    /// This is the same class of bug that made ⌘⇧G unreachable, and
+    /// `no_two_commands_claim_one_key_in_the_same_context` cannot see
+    /// it, because the contexts differ.
+    #[test]
+    fn a_scoped_command_sharing_a_key_with_a_global_one_is_declared_later() {
+        for (ix, scoped) in COMMANDS.iter().enumerate() {
+            let Some(ctx) = scoped.context else { continue };
+            for key in scoped.keys {
+                if let Some((jx, global)) = COMMANDS
+                    .iter()
+                    .enumerate()
+                    .find(|(_, c)| c.context.is_none() && c.keys.contains(key))
+                {
+                    assert!(
+                        jx < ix,
+                        "{} ({ctx}) shares {key:?} with the global {} but is declared \
+                         first, so the global shadows it",
+                        scoped.id,
+                        global.id
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn no_two_commands_claim_one_key_in_the_same_context() {
         let mut seen: Vec<(&str, Option<&str>)> = Vec::new();
@@ -632,12 +684,24 @@ mod tests {
 
     #[test]
     fn items_for_a_menu_come_back_in_group_order() {
-        let view = items_for(MenuId::View);
-        assert!(!view.is_empty(), "the View menu has entries");
-        let groups: Vec<u8> = view.iter().map(|c| c.menu.unwrap().1).collect();
-        let mut sorted = groups.clone();
-        sorted.sort_unstable();
-        assert_eq!(groups, sorted, "entries are grouped in order");
+        // Every menu, not just View: `menus` emits a separator whenever
+        // the group changes as it walks declaration order, so a command
+        // declared out of group order scatters separators through the
+        // menu it lands in.
+        for id in MENU_ORDER {
+            let cmds = items_for(id);
+            let groups: Vec<u8> = cmds.iter().map(|c| c.menu.unwrap().1).collect();
+            let mut sorted = groups.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                groups,
+                sorted,
+                "{:?} entries are declared in group order: {:?}",
+                id,
+                cmds.iter().map(|c| c.id).collect::<Vec<_>>()
+            );
+        }
+        assert!(!items_for(MenuId::View).is_empty(), "the View menu has entries");
     }
 
     /// SuperMD can only ever be a LaunchServices default handler on

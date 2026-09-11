@@ -21,6 +21,7 @@ The modifier says what a shortcut acts on. New bindings follow the tier that mat
 | macOS | Windows / Linux | Action |
 | ----- | --------------- | ------ |
 | ⌘ N | Ctrl N | New File |
+| ⌘ ⇧ N | Ctrl Shift N | New Window |
 | ⌘ O | Ctrl O | Open… |
 | ⌘ S | Ctrl S | Save Now |
 | ⌘ W | Ctrl W | Close Tab |
