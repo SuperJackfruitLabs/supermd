@@ -617,7 +617,8 @@ pub struct Workspace {
     /// `graph.hovered` and nothing but the hover highlight read it, so
     /// the node menu acted on the active tab. `graph_local` reads it
     /// now — anything added to a graph surface must too.
-    context_menu: Option<(gpui::Point<gpui::Pixels>, crate::menus::Surface)>,
+    context_menu:
+        Option<(gpui::Point<gpui::Pixels>, crate::menus::Surface, crate::menus::EditorContext)>,
 }
 
 enum SidebarEditKind {
@@ -710,6 +711,12 @@ fn make_editor(
         // No window here; render drains the queue with one in hand.
         EditorEvent::OpenPath(path) => {
             this.pending_link_opens.push(path.clone());
+            cx.notify();
+        }
+        // The editor decided *whether* there is a menu and *what* it
+        // knows; the workspace owns the single overlay that draws one.
+        EditorEvent::ContextMenu { position, ctx } => {
+            this.context_menu = Some((*position, crate::menus::Surface::Editor, *ctx));
             cx.notify();
         }
     })
@@ -3378,9 +3385,9 @@ impl Workspace {
     /// same boxed action the menu bar and the keystroke do, so all
     /// three paths stay one path.
     fn render_context_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (pos, surface) = self.context_menu?;
+        let (pos, surface, ectx) = self.context_menu?;
         let t = theme(cx);
-        let rows: Vec<AnyElement> = crate::menus::items_for(surface)
+        let rows: Vec<AnyElement> = crate::menus::items_for(surface, ectx)
             .into_iter()
             .map(|item| {
                 let cmd = crate::commands::COMMANDS
@@ -3691,7 +3698,8 @@ impl Workspace {
                             } else {
                                 crate::menus::Surface::SidebarFile
                             };
-                            this.context_menu = Some((event.position, surface));
+                            this.context_menu =
+                                Some((event.position, surface, Default::default()));
                             window.focus(&this.sidebar_focus);
                             cx.notify();
                         }),
@@ -4274,7 +4282,11 @@ impl Workspace {
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
                         this.set_active(ix, window, cx);
-                        this.context_menu = Some((event.position, crate::menus::Surface::Tab));
+                        this.context_menu = Some((
+                            event.position,
+                            crate::menus::Surface::Tab,
+                            Default::default(),
+                        ));
                         cx.notify();
                     }),
                 )
@@ -4823,7 +4835,8 @@ impl Workspace {
                             } else {
                                 crate::menus::Surface::GraphNode
                             };
-                            this.context_menu = Some((event.position, surface));
+                            this.context_menu =
+                                Some((event.position, surface, Default::default()));
                             cx.notify();
                         }),
                     )
@@ -7522,6 +7535,46 @@ pub(crate) mod tests {
             let Some(Tab::Editor { editor, .. }) = w.tabs.get(w.active) else { panic!("active tab is not an editor") };
             editor.clone()
         })
+    }
+
+    /// The editor raises its context menu as an event because the
+    /// workspace owns the single overlay that draws one. The subscription
+    /// must carry the editor's facts through: dropping them (storing a
+    /// `Default` context, say) compiles, draws, and silently hands the
+    /// user the empty menu the missing right-click handler already did.
+    #[gpui::test]
+    fn an_editor_context_menu_event_opens_the_overlay_with_its_facts(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        let editor = active_editor(&ws, cx);
+
+        cx.update(|_, app| assert!(ws.read(app).context_menu.is_none(), "nothing is open yet"));
+        let ctx = crate::menus::EditorContext {
+            in_table: true,
+            can_format: true,
+            ..Default::default()
+        };
+        let at = gpui::point(px(42.), px(17.));
+        editor.update(cx, |_, cx| {
+            cx.emit(EditorEvent::ContextMenu { position: at, ctx });
+        });
+        cx.run_until_parked();
+
+        let (pos, surface, stored) =
+            cx.update(|_, app| ws.read(app).context_menu.expect("the overlay opened"));
+        assert_eq!(pos, at, "it opens where the press landed");
+        assert_eq!(surface, crate::menus::Surface::Editor);
+        assert_eq!(stored, ctx, "the editor's facts reached the overlay");
+        // And the rows it draws are the table commands, not the two
+        // toggles a dropped context would have left.
+        let ids: Vec<&str> = crate::menus::items_for(surface, stored)
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert!(ids.contains(&"table_insert_row"), "{ids:?}");
     }
 
     // ── sidebar keyboard browsing ───────────────────────────────────────

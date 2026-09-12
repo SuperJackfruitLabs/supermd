@@ -888,7 +888,11 @@ mod tests {
         let in_a_context_menu = |id: &str| {
             crate::menus::Surface::ALL
                 .iter()
-                .any(|s| crate::menus::items_for(*s).iter().any(|i| i.id == id))
+                .any(|s| {
+                    crate::menus::items_for(*s, crate::menus::EditorContext::permissive())
+                        .iter()
+                        .any(|i| i.id == id)
+                })
         };
         let unreachable: Vec<&str> = COMMANDS
             .iter()

@@ -228,6 +228,11 @@ pub enum EditorEvent {
     ConsentNeeded { plugin: String, cap: String },
     /// A followed link wants this file opened in a tab.
     OpenPath(PathBuf),
+    /// A right-click landed in the document. The workspace owns the
+    /// one context-menu overlay (sidebar, tabs and graph nodes already
+    /// raise it), so the editor reports where the press was and what it
+    /// knew at the caret; `menus::items_for` turns that into rows.
+    ContextMenu { position: gpui::Point<Pixels>, ctx: crate::menus::EditorContext },
 }
 
 /// The `[[` completion popup: doc offset of the opener, the filtered
@@ -1592,6 +1597,44 @@ impl Editor {
         self.apply_table_edit(br, &new_block, table_edit::CellPos { row: pos.row, cell }, cx);
     }
 
+    /// The contiguous run of non-blank lines the cursor sits in — the
+    /// block Renumber List rewrites, and so the block that decides
+    /// whether the right-click menu offers it.
+    fn list_run_around_cursor(&self) -> Range<usize> {
+        let cur_line = self.core.buffer.line_of_byte(self.core.selection.head);
+        let mut start_line = cur_line;
+        while start_line > 0 && !self.core.buffer.line_text(start_line - 1).trim().is_empty() {
+            start_line -= 1;
+        }
+        let last_line = self.core.buffer.line_count().saturating_sub(1);
+        let mut end_line = cur_line;
+        while end_line < last_line && !self.core.buffer.line_text(end_line + 1).trim().is_empty() {
+            end_line += 1;
+        }
+        self.core.buffer.line_range(start_line).start..self.core.buffer.line_range(end_line).end
+    }
+
+    /// What a right-click at `offset` knows, for `menus::items_for`.
+    /// Each fact is the *command's own* precondition, read at the caret
+    /// after the click has placed it: `table_cursor()` for the four
+    /// table commands, `renumber_block` for Renumber List (both skip a
+    /// fenced code block, so a fence offers neither), and a cached-link
+    /// hit for Follow Link. Menu availability and command applicability
+    /// are then the same test, not two that can drift apart.
+    fn menu_context(&self, offset: usize) -> crate::menus::EditorContext {
+        let can_format = self.can_format();
+        if !can_format {
+            return crate::menus::EditorContext::default();
+        }
+        let text = self.core.buffer.text();
+        crate::menus::EditorContext {
+            in_table: self.table_cursor().is_some(),
+            in_ordered_list: lists::renumber_block(&text, self.list_run_around_cursor()).is_some(),
+            on_link: self.link_at_offset(offset).is_some(),
+            can_format,
+        }
+    }
+
     /// Renumber the ordered-list run around the cursor (the contiguous
     /// non-blank lines it sits in). A no-op outside an ordered list.
     ///
@@ -1604,18 +1647,7 @@ impl Editor {
         let head = self.core.selection.head;
         let cur_line = self.core.buffer.line_of_byte(head);
         let col = head - self.core.buffer.line_range(cur_line).start;
-
-        let mut start_line = cur_line;
-        while start_line > 0 && !self.core.buffer.line_text(start_line - 1).trim().is_empty() {
-            start_line -= 1;
-        }
-        let last_line = self.core.buffer.line_count().saturating_sub(1);
-        let mut end_line = cur_line;
-        while end_line < last_line && !self.core.buffer.line_text(end_line + 1).trim().is_empty() {
-            end_line += 1;
-        }
-        let block = self.core.buffer.line_range(start_line).start
-            ..self.core.buffer.line_range(end_line).end;
+        let block = self.list_run_around_cursor();
 
         let text = self.core.buffer.text();
         // The list, not the file: a whole-document replacement pushed an
@@ -2293,6 +2325,64 @@ impl Editor {
         self.core.break_undo_group();
         self.preferred_x = None;
         window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    /// A right press: place the caret (or keep the selection), then ask
+    /// the workspace to raise the context menu here.
+    ///
+    /// Deliberately *not* a call into `on_line_mouse_down`. That path
+    /// arms `pending_link`, which the next left release follows — a
+    /// right-click must never navigate, and must not leave a primed
+    /// link behind for a later click to trip over either, so it clears
+    /// one rather than setting one. It also does not start a drag: the
+    /// root's `on_mouse_up` only listens for the left button, so a
+    /// `dragging` flag set here would stay set and turn every later
+    /// pointer move into a selection drag.
+    fn on_line_right_mouse_down(
+        &mut self,
+        line_ix: usize,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.diff.is_some() {
+            return; // read-only, same as the left path
+        }
+        self.pending_link = None;
+        self.dragging = false;
+        self.toolbar_visible = false;
+        self.toolbar_task = None;
+
+        let clicked = self
+            .offset_at_point(event.position)
+            .unwrap_or_else(|| self.core.buffer.line_range(line_ix).start);
+        // A right-click *inside* the selection keeps it. Collapsing the
+        // caret here is the classic way this feature breaks: the user
+        // selects a phrase, right-clicks it, picks Bold — and the
+        // selection the command was for is gone.
+        let sel = self.core.selection.range();
+        let caret = if sel.start < sel.end && sel.start <= clicked && clicked < sel.end {
+            self.core.selection.head
+        } else {
+            let offset = self.tidy_table_on_leave(clicked, cx);
+            self.core.set_cursor(offset);
+            self.core.break_undo_group();
+            self.preferred_x = None;
+            offset
+        };
+        // Redundant on paper — gpui's `track_focus` focuses any div it
+        // is on when a mouse button goes down over it, whichever button
+        // — and so untestable in isolation; kept because the left path
+        // states it too and this one must not quietly depend on that.
+        window.focus(&self.focus_handle);
+
+        // An empty menu is worse than none: a code file or the diff
+        // view takes none of these commands, so no overlay opens.
+        let ctx = self.menu_context(caret);
+        if !crate::menus::items_for(crate::menus::Surface::Editor, ctx).is_empty() {
+            cx.emit(EditorEvent::ContextMenu { position: event.position, ctx });
+        }
         cx.notify();
     }
 
@@ -4266,6 +4356,7 @@ impl Render for Editor {
                                 )
                             };
                             let mouse_editor = editor_entity.clone();
+                            let menu_editor = editor_entity.clone();
                             let line_el = LineElement {
                                 editor: editor_entity.clone(),
                                 line_ix,
@@ -4283,6 +4374,13 @@ impl Render for Editor {
                                                 cx: &mut App| {
                                 mouse_editor.update(cx, |editor, cx| {
                                     editor.on_line_mouse_down(line_ix, event, window, cx);
+                                });
+                            };
+                            let on_right = move |event: &MouseDownEvent,
+                                                 window: &mut Window,
+                                                 cx: &mut App| {
+                                menu_editor.update(cx, |editor, cx| {
+                                    editor.on_line_right_mouse_down(line_ix, event, window, cx);
                                 });
                             };
                             if code_mode {
@@ -4315,6 +4413,7 @@ impl Render for Editor {
                                             .min_w_0()
                                             .pr(px(16.))
                                             .on_mouse_down(MouseButton::Left, on_down)
+                                            .on_mouse_down(MouseButton::Right, on_right)
                                             .child(line_el),
                                     )
                                     .into_any_element()
@@ -4333,6 +4432,7 @@ impl Render for Editor {
                                             .when(ix + 1 == item_count, |d| d.pb(px(96.)))
                                             .when(is_code, |d| d.bg(t.code_bg))
                                             .on_mouse_down(MouseButton::Left, on_down)
+                                            .on_mouse_down(MouseButton::Right, on_right)
                                             .child(line_el),
                                     )
                                     .into_any_element()
@@ -5648,6 +5748,232 @@ mod tests {
             .detach();
         });
         opened
+    }
+
+    // ── right-click context menu ───────────────────────────────────────
+
+    /// Every `EditorEvent::ContextMenu` an editor raised.
+    fn menu_sink(
+        cx: &mut VisualTestContext,
+        editor: &Entity<Editor>,
+    ) -> Rc<RefCell<Vec<(Point<Pixels>, crate::menus::EditorContext)>>> {
+        let raised: Rc<RefCell<Vec<(Point<Pixels>, crate::menus::EditorContext)>>> = Rc::default();
+        let sink = raised.clone();
+        cx.update(|_, app| {
+            app.subscribe(editor, move |_, event: &EditorEvent, _| {
+                if let EditorEvent::ContextMenu { position, ctx } = event {
+                    sink.borrow_mut().push((*position, *ctx));
+                }
+            })
+            .detach();
+        });
+        raised
+    }
+
+    /// Put the caret at `at` and repaint, so the lines it reveals are
+    /// in the layout cache and can be clicked.
+    fn caret_and_draw(editor: &Entity<Editor>, cx: &mut VisualTestContext, at: usize) {
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(at);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    /// The rows a raised menu would actually draw.
+    fn menu_ids(ctx: crate::menus::EditorContext) -> Vec<&'static str> {
+        crate::menus::items_for(crate::menus::Surface::Editor, ctx)
+            .into_iter()
+            .map(|i| i.id)
+            .collect()
+    }
+
+    /// The reported bug, end to end: the user clicks into a table, gets
+    /// the raw Markdown as designed, right-clicks to add a row — and
+    /// until now nothing happened, because no `MouseButton::Right`
+    /// handler existed anywhere in the editor. The five commands all
+    /// ship with `keys: []`, so this menu is their only pointer surface.
+    #[gpui::test]
+    fn a_right_click_in_a_table_raises_the_table_commands(cx: &mut TestAppContext) {
+        let doc = "intro\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "t.md", doc);
+        let raised = menu_sink(cx, &editor);
+        caret_and_draw(&editor, cx, doc.find('1').unwrap());
+
+        let p = point_for_index(&editor, cx, 4, 2);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+
+        let raised = raised.borrow();
+        let (pos, ctx) = *raised.first().expect("a right-click raises the menu");
+        assert_eq!(pos, p, "the menu opens where the press landed");
+        assert!(ctx.in_table, "the caret is in a table cell: {ctx:?}");
+        let ids = menu_ids(ctx);
+        for expected in [
+            "table_insert_row",
+            "table_delete_row",
+            "table_insert_column",
+            "table_delete_column",
+        ] {
+            assert!(ids.contains(&expected), "{expected} missing from {ids:?}");
+        }
+    }
+
+    /// A right-click inside an existing selection keeps it. Collapsing
+    /// the caret to the press is the usual way this breaks: the user
+    /// selects a phrase, right-clicks it, picks Bold, and the command
+    /// runs on an empty cursor.
+    #[gpui::test]
+    fn a_right_click_inside_the_selection_keeps_it(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "sel.md", "alpha beta gamma\n");
+        let _raised = menu_sink(cx, &editor);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.selection = Selection { anchor: 0, head: 10 };
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let inside = point_for_index(&editor, cx, 0, 5);
+        cx.simulate_mouse_down(inside, MouseButton::Right, Modifiers::none());
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.selection.range(),
+                0..10,
+                "the selection the menu is about survives the press that opened it",
+            );
+        });
+
+        // Outside it, the caret does move — the menu is about the new
+        // spot, and leaving a far-away selection standing would be just
+        // as wrong.
+        let outside = point_for_index(&editor, cx, 0, 14);
+        cx.simulate_mouse_down(outside, MouseButton::Right, Modifiers::none());
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.core.selection.is_cursor(), "a press outside collapses");
+            assert_eq!(ed.core.selection.head, 14);
+        });
+    }
+
+    /// A right press must not navigate, and must not leave a primed
+    /// link behind for the next left release to follow.
+    #[gpui::test]
+    fn a_right_click_on_a_link_neither_follows_nor_arms_it(cx: &mut TestAppContext) {
+        let ws = knowledge_fixture(cx);
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "see [[Roadmap]] now\n").unwrap();
+        index_workspace(cx, ws.path());
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+        let raised = menu_sink(cx, &editor);
+        cx.run_until_parked();
+
+        let p = point_for_index(&editor, cx, 0, 7);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(p, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(opened.borrow().is_empty(), "a right-click never navigates");
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.pending_link.is_none(), "no link is left primed for a later release");
+            assert!(!ed.dragging, "a right press is not the start of a drag");
+        });
+
+        // And it clears one it finds: a left press arms the link and
+        // starts a drag, both of which the release acts on. A right
+        // press in between ends that interaction — the release that
+        // follows must not navigate on a press the user abandoned.
+        // (The caret goes back off the link first: a *revealed* link is
+        // being edited and a plain left click does not arm it.)
+        caret_and_draw(&editor, cx, 0);
+        let p = point_for_index(&editor, cx, 0, 7);
+        cx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+        cx.update(|_, app| assert!(editor.read(app).pending_link.is_some(), "the left press armed it"));
+        let elsewhere = point_for_index(&editor, cx, 0, 13);
+        cx.simulate_mouse_down(elsewhere, MouseButton::Right, Modifiers::none());
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.pending_link.is_none(), "the right press cleared the primed link");
+            assert!(!ed.dragging, "and ended the drag it would have extended");
+        });
+        cx.simulate_mouse_up(elsewhere, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(opened.borrow().is_empty(), "the abandoned press still never navigates");
+        let ctx = raised.borrow().first().expect("the menu opened").1;
+        assert!(ctx.on_link, "the press was on a link: {ctx:?}");
+        assert!(menu_ids(ctx).contains(&"follow_link"), "{:?}", menu_ids(ctx));
+    }
+
+    /// Off a link, Follow Link is not offered — a dead row is exactly
+    /// the Format-menu failure this whole menu exists to fix.
+    #[gpui::test]
+    fn prose_offers_the_toggles_and_nothing_dead(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "prose.md", "just some words here\n");
+        let raised = menu_sink(cx, &editor);
+        // The menu's rows dispatch their action through the window, so
+        // they land wherever focus is. A right-click in a document the
+        // user was not typing in (the sidebar had focus) has to take it.
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            assert!(!editor.read(app).focus_handle.is_focused(window), "the premise: focus is elsewhere");
+        });
+        let p = point_for_index(&editor, cx, 0, 5);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+
+        let ctx = raised.borrow().first().expect("the menu opened").1;
+        assert_eq!(menu_ids(ctx), vec!["bold", "italic"], "{ctx:?}");
+        cx.update(|window, app| {
+            assert!(
+                editor.read(app).focus_handle.is_focused(window),
+                "the press focused the editor, so the row it opens can reach it",
+            );
+        });
+    }
+
+    /// An ordered list offers Renumber List; a fenced code block that
+    /// happens to hold numbers does not — `renumber_block` skips fence
+    /// bodies, and the menu asks it rather than guessing.
+    #[gpui::test]
+    fn an_ordered_list_offers_renumber_but_a_fence_does_not(cx: &mut TestAppContext) {
+        let doc = "1. one\n1. two\n\n```\n1. not a list\n```\n";
+        let (_fx, editor, cx) = open_editor(cx, "list.md", doc);
+        let raised = menu_sink(cx, &editor);
+
+        caret_and_draw(&editor, cx, 3);
+        let p = point_for_index(&editor, cx, 0, 3);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+        let ctx = raised.borrow().last().expect("the menu opened").1;
+        assert!(ctx.in_ordered_list, "{ctx:?}");
+        assert!(menu_ids(ctx).contains(&"renumber_list"), "{:?}", menu_ids(ctx));
+
+        // Inside the fence: numbers there are the user's literal text.
+        let inside = doc.find("not a list").unwrap();
+        caret_and_draw(&editor, cx, inside);
+        let fence_line = cx.update(|_, app| editor.read(app).core.buffer.line_of_byte(inside));
+        let p = point_for_index(&editor, cx, fence_line, 2);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+        let ctx = raised.borrow().last().expect("the menu opened").1;
+        assert!(!ctx.in_ordered_list, "a fence is not a list: {ctx:?}");
+        let ids = menu_ids(ctx);
+        assert!(!ids.contains(&"renumber_list"), "{ids:?}");
+        assert!(!ids.contains(&"table_insert_row"), "{ids:?}");
+    }
+
+    /// A code file takes none of these commands (`can_format()` is
+    /// false for every one of them), so no menu opens at all: an empty
+    /// overlay is worse than none.
+    #[gpui::test]
+    fn a_code_file_raises_no_menu(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "main.rs", "fn main() {}\n");
+        let raised = menu_sink(cx, &editor);
+        let p = point_for_index(&editor, cx, 0, 3);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+        assert!(raised.borrow().is_empty(), "a code file offers no editor commands");
+        cx.update(|_, app| {
+            let ctx = editor.read(app).menu_context(3);
+            assert!(menu_ids(ctx).is_empty(), "{ctx:?}");
+        });
     }
 
     /// Following `[[drafts/secret]]` must never zero the file it names.
