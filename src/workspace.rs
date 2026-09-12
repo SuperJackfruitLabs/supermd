@@ -2420,7 +2420,7 @@ impl Workspace {
         count
     }
 
-    fn reload_plugins(&mut self, _: &ReloadPlugins, _window: &mut Window, cx: &mut Context<Self>) {
+    fn reload_plugins(&mut self, _: &ReloadPlugins, window: &mut Window, cx: &mut Context<Self>) {
         let plugins_dir = crate::settings::config_dir().join("plugins");
         let settings = crate::settings::load(&crate::settings::config_dir());
         let grants = settings.plugin_grants.clone();
@@ -2433,19 +2433,22 @@ impl Workspace {
         // until it restarts -- so every window gets the new host, each
         // keeping its own sandbox root.
         //
-        // Identified by entity, not by window handle: `self` is the
+        // Skipped by window handle, not by entity: `self` is the
         // workspace being updated right now, and updating it again --
         // through its own window -- panics.
-        let me = cx.entity_id();
-        let others: Vec<Entity<Workspace>> = cx
+        //
+        // `WindowHandle::root` would read the entity directly, but it
+        // is `#[cfg(any(test, feature = "test-support"))]`, so using it
+        // here compiles under `cargo test` and breaks `cargo build`.
+        let me = window.window_handle();
+        let others: Vec<gpui::WindowHandle<Workspace>> = cx
             .windows()
             .into_iter()
+            .filter(|handle| *handle != me)
             .filter_map(|handle| handle.downcast::<Workspace>())
-            .filter_map(|handle| handle.root(cx).ok())
-            .filter(|workspace| workspace.entity_id() != me)
             .collect();
-        for workspace in others {
-            workspace.update(cx, |workspace, _cx| {
+        for handle in others {
+            let _ = handle.update(cx, |workspace, _window, _cx| {
                 workspace.adopt_reloaded_host(&plugins_dir, &grants, false);
             });
         }
