@@ -24,7 +24,7 @@ pub struct Claim {
 }
 
 pub struct WidgetCtx<'a> {
-    pub editor: &'a gpui::Entity<super::Editor>,
+    pub editor: &'a gpui::Entity<crate::editor::Editor>,
     pub item_ix: usize,
     pub lines: Range<usize>,
     pub payload: &'a Arc<dyn Any + Send + Sync>,
@@ -372,12 +372,18 @@ impl Projector for PluginBlockProjector {
             .downcast_ref::<PluginBlockPayload>()
             .expect("plugin block payload");
         let t = ctx.theme;
+        let (host, root) = {
+            let editor = ctx.editor.read(ctx.cx);
+            (editor.host.clone(), editor.plugin_root_handle())
+        };
         let state = crate::diagram::plugin_diagram_state(
             &payload.plugin,
             &payload.version,
             &payload.lang,
             &payload.body,
             664.0,
+            host,
+            root,
             ctx.cx,
         );
         let handle = ctx.editor.clone();
@@ -503,6 +509,88 @@ mod tests {
         let lines = lines_of(src);
         let blocks = crate::editor::blocks::blocks(src);
         assert!(DiagramProjector.discover(src, &blocks, &lines).is_empty());
+    }
+
+    /// The chain the diagram cache's isolation actually runs through:
+    /// `Editor`'s root cell → this projector → `DiagramKey`. Both
+    /// halves of the F1 fix could be deleted here — forwarding `None`
+    /// instead of the cell — with every other test still green, because
+    /// the diagram tests call `plugin_diagram_state` directly with a
+    /// root they pass themselves and never touch `render`.
+    ///
+    /// Re-rooting the cell (Open… in the same window) must make the
+    /// next render a cache *miss*: same plugin, same fence body, same
+    /// width, different vault.
+    #[gpui::test]
+    fn a_re_rooted_editor_keys_its_block_renders_under_the_new_vault(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::sync::Arc as StdArc;
+
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let note = files.path().join("n.md");
+        std::fs::write(&note, "body\n").unwrap();
+
+        let host: crate::extensions::HostHandle = StdArc::new(std::sync::Mutex::new(
+            crate::extensions::ExtensionHost::load(std::path::Path::new("/nonexistent")),
+        ));
+        host.lock().unwrap().set_workspace_root(Some(a.path().to_path_buf()));
+        let langs = StdArc::new(crate::highlight::Languages::new());
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(StdArc::new(crate::theme::Theme::dark())));
+            cx.set_global(crate::highlight::SyntaxLanguages(langs.clone()));
+        });
+        let contents = std::fs::read_to_string(&note).unwrap();
+        let host_for_editor = host.clone();
+        let (editor, cx) = cx.add_window_view(move |_, cx| {
+            crate::editor::Editor::from_text_in(
+                &note,
+                contents,
+                &langs,
+                None,
+                Some(host_for_editor),
+                cx,
+            )
+        });
+
+        let payload: StdArc<dyn Any + Send + Sync> = StdArc::new(PluginBlockPayload {
+            plugin: "renderer".into(),
+            version: "0.1.0".into(),
+            lang: "demo".into(),
+            body: "same fence body".into(),
+        });
+        let theme = crate::theme::Theme::dark();
+        let draw = |editor: &gpui::Entity<crate::editor::Editor>,
+                    payload: &StdArc<dyn Any + Send + Sync>,
+                    app: &mut gpui::App| {
+            let mut ctx = WidgetCtx {
+                editor,
+                item_ix: 0,
+                lines: 0..1,
+                payload,
+                theme: &theme,
+                cx: app,
+            };
+            let _ = PluginBlockProjector.render(&mut ctx);
+            app.global::<crate::diagram::DiagramCache>().len()
+        };
+
+        let after_a = cx.update(|_, app| draw(&editor, &payload, app));
+        assert_eq!(after_a, 1, "the first render cached one entry");
+        // Same render, same vault: a hit, not a second entry.
+        let again = cx.update(|_, app| draw(&editor, &payload, app));
+        assert_eq!(again, 1, "the same vault re-uses its entry");
+
+        // Open… another folder in this window: the host writes through
+        // the cell the editor holds.
+        host.lock().unwrap().set_workspace_root(Some(b.path().to_path_buf()));
+        let after_b = cx.update(|_, app| draw(&editor, &payload, app));
+        assert_eq!(
+            after_b, 2,
+            "vault B must not be shown vault A's cached render"
+        );
     }
 
     #[test]

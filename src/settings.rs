@@ -23,6 +23,11 @@ pub struct Settings {
     pub plugin_grants: std::collections::BTreeMap<String, Vec<String>>,
     /// Time-of-day theme adaptation (off unless enabled).
     pub flux: FluxSettings,
+    /// Whether the user has already been offered (and answered, yes or
+    /// no) "make SuperMD the default Markdown app". A refusal is
+    /// remembered forever -- a prompt that comes back is worse than no
+    /// prompt.
+    pub default_handler_asked: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
@@ -66,6 +71,7 @@ impl Default for Settings {
             format_on_save: false,
             plugin_grants: Default::default(),
             flux: FluxSettings::default(),
+            default_handler_asked: false,
         }
     }
 }
@@ -96,17 +102,83 @@ pub fn themes_dir() -> PathBuf {
 }
 
 pub fn load(dir: &Path) -> Settings {
-    std::fs::read_to_string(dir.join("settings.toml"))
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default()
+    load_reporting(dir).0
+}
+
+/// Like `load`, but also reports when an on-disk file existed and
+/// could not be used -- the case a torn write produces (including
+/// invalid UTF-8 from a write cut off mid-character, which
+/// `read_to_string` rejects the same way it rejects a missing file).
+/// A missing file is the ordinary first run and stays silent; anything
+/// else preserves the original bytes beside the new one and returns a
+/// message describing what happened and where they went, so a caller
+/// that can reach the user (workspace startup) can say so before the
+/// next save silently overwrites the preserved copy with defaults.
+pub fn load_reporting(dir: &Path) -> (Settings, Option<String>) {
+    let path = dir.join("settings.toml");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // No file is the ordinary first-run case, not a problem.
+            return (Settings::default(), None);
+        }
+        Err(err) => {
+            return (Settings::default(), Some(preserve_corrupt(dir, &path, &err.to_string())));
+        }
+    };
+    match toml::from_str(&String::from_utf8_lossy(&bytes)) {
+        Ok(settings) => (settings, None),
+        Err(err) => (Settings::default(), Some(preserve_corrupt(dir, &path, &err.to_string()))),
+    }
+}
+
+/// Defaulting is right for a missing file and wrong for a corrupt one:
+/// the user's themes, recents, bookmarks and every plugin permission
+/// grant live here. Keep the bytes so they can be recovered, and
+/// return a message describing why and where.
+fn preserve_corrupt(dir: &Path, path: &Path, reason: &str) -> String {
+    let kept = dir.join("settings.toml.corrupt");
+    // The source is already fully written by the time we get here (we
+    // are reading it after the fact, not racing a writer), so a plain
+    // copy keeps the exact original bytes -- unlike `save`, there is no
+    // concurrent writer for this to tear. It can still fail (the file
+    // may be the unreadable one that sent us here), and reporting a
+    // preservation that did not happen is worse than reporting none:
+    // it is the message the user reads before the next save.
+    let msg = match std::fs::copy(path, &kept) {
+        Ok(_) => format!(
+            "{} could not be read ({reason}); the previous file was kept at {}",
+            path.display(),
+            kept.display()
+        ),
+        Err(copy_err) => format!(
+            "{} could not be read ({reason}) and could not be copied aside either \
+             ({copy_err}); it was left exactly as it is and will not be overwritten",
+            path.display()
+        ),
+    };
+    eprintln!("supermd: {msg}");
+    msg
 }
 
 pub fn save(dir: &Path, settings: &Settings) -> std::io::Result<()> {
+    // Never replace a file we could not read. The atomic write below
+    // renames over the target, which needs only directory permission,
+    // so an unreadable settings.toml -- the one case `preserve_corrupt`
+    // cannot copy aside -- would be destroyed with no copy anywhere.
+    // A file that reads fine but parses badly is a different story: it
+    // has been preserved by then, and defaults may replace it.
+    if let Err(err) = std::fs::read(dir.join("settings.toml")) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(err);
+        }
+    }
     std::fs::create_dir_all(dir)?;
     let body = toml::to_string_pretty(settings)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(dir.join("settings.toml"), body)
+    // Temp file plus rename, as documents already do: an interrupted
+    // write leaves the old file intact rather than a truncated one.
+    crate::editor::autosave::atomic_write(&dir.join("settings.toml"), &body)
 }
 
 #[cfg(test)]
@@ -121,6 +193,60 @@ mod tests {
         assert_eq!(load(dir.path()), Settings::default());
         assert_eq!(Settings::default().light_theme, "Jackfruit Light");
         assert_eq!(Settings::default().dark_theme, "Jackfruit Dark");
+    }
+
+    /// A file that could not be *read* is the one case where the
+    /// preserving copy cannot work either -- and the atomic save that
+    /// follows needs only directory permission, so it would rename
+    /// defaults straight over bytes nothing ever kept a copy of.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_not_reported_as_preserved_nor_saved_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let original = "light_theme = \"Nord\"\n";
+        std::fs::write(&path, original).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // running as root: the mode proves nothing here
+        }
+
+        let (settings, msg) = load_reporting(dir.path());
+        assert_eq!(settings, Settings::default(), "unusable, so defaults");
+        let msg = msg.expect("an unreadable file is reported");
+        assert!(
+            !dir.path().join("settings.toml.corrupt").exists(),
+            "no copy was made -- the bytes could not be read"
+        );
+        assert!(
+            !msg.contains("kept at"),
+            "the message must not promise a copy that does not exist: {msg}"
+        );
+
+        assert!(
+            save(dir.path(), &Settings::default()).is_err(),
+            "the save that follows must refuse rather than replace it"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "every byte the user had is still on disk"
+        );
+    }
+
+    /// The readable-but-corrupt case still preserves, and says so.
+    #[test]
+    fn a_corrupt_file_is_copied_aside_and_the_message_names_the_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.toml"), "not [valid").unwrap();
+        let (_, msg) = load_reporting(dir.path());
+        let kept = dir.path().join("settings.toml.corrupt");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "not [valid");
+        assert!(msg.unwrap().contains(&kept.display().to_string()));
+        // Defaults may now be written over the unusable original.
+        save(dir.path(), &Settings::default()).unwrap();
     }
 
     #[test]
@@ -138,6 +264,18 @@ mod tests {
     #[test]
     fn format_on_save_defaults_off() {
         assert!(!Settings::default().format_on_save);
+    }
+
+    /// A refusal is remembered forever. A prompt that comes back is
+    /// worse than no prompt.
+    #[test]
+    fn the_default_handler_answer_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        assert!(!s.default_handler_asked, "not asked on a fresh install");
+        s.default_handler_asked = true;
+        save(dir.path(), &s).unwrap();
+        assert!(load(dir.path()).default_handler_asked);
     }
 
     #[test]
@@ -266,5 +404,137 @@ mod tests {
         let s = load(dir.path());
         assert_eq!(s.light_theme, "Jackfruit Light");
         assert_eq!(s.dark_theme, "Nord");
+    }
+
+    /// A torn write must not cost the user their settings. `save` was a
+    /// plain `fs::write`, so an interrupted one truncated the file and
+    /// `load` silently returned defaults -- discarding themes, recents,
+    /// bookmarks and every plugin permission grant with no message.
+    #[test]
+    fn a_corrupt_settings_file_is_preserved_not_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.toml"), "this is not = valid toml [[[").unwrap();
+
+        let loaded = load(dir.path());
+        assert_eq!(loaded, Settings::default(), "unreadable settings fall back");
+        assert!(
+            dir.path().join("settings.toml.corrupt").exists(),
+            "and the unreadable file is kept, not thrown away"
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("settings.toml.corrupt"))
+                .unwrap()
+                .contains("not = valid"),
+            "the preserved copy is the original bytes"
+        );
+    }
+
+    /// A missing file is not a corrupt one: first run must not leave a
+    /// `.corrupt` file lying beside the settings.
+    #[test]
+    fn a_missing_settings_file_leaves_no_corrupt_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load(dir.path()), Settings::default());
+        assert!(!dir.path().join("settings.toml.corrupt").exists());
+    }
+
+    /// A write torn mid-character leaves invalid UTF-8 -- and
+    /// `read_to_string` rejects that exactly the way it rejects a
+    /// missing file, so treating every read error as "no file" misses
+    /// the realistic torn-write case whenever the settings held any
+    /// non-ASCII content (a theme name, a grant string, a path): no
+    /// `.corrupt` copy, no message, and the bytes gone for good the
+    /// moment anything next saves.
+    #[test]
+    fn invalid_utf8_from_a_torn_write_is_preserved_not_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        // A truncated 4-byte UTF-8 sequence, as a write cut off
+        // mid-character would leave behind.
+        let original: &[u8] = b"theme = \"dark\xF0\x9F\x92";
+        std::fs::write(dir.path().join("settings.toml"), original).unwrap();
+
+        let loaded = load(dir.path());
+        assert_eq!(loaded, Settings::default(), "unreadable settings fall back");
+        let kept = dir.path().join("settings.toml.corrupt");
+        assert!(kept.exists(), "invalid UTF-8 must take the preservation path, not the missing-file one");
+        assert_eq!(
+            std::fs::read(&kept).unwrap(),
+            original,
+            "the preserved copy keeps the exact original bytes, not a lossy re-encoding"
+        );
+    }
+
+    /// The corruption is reported, not just fixed silently -- every
+    /// call site does load-mutate-save, so a caller that never learns
+    /// about the fallback will overwrite the preserved copy with
+    /// defaults on its very next save.
+    #[test]
+    fn load_reporting_surfaces_the_corruption_message() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.toml"), "this is not = valid toml [[[").unwrap();
+
+        let (settings, corrupt) = load_reporting(dir.path());
+        assert_eq!(settings, Settings::default());
+        let msg = corrupt.expect("a parse failure must be reported, not swallowed");
+        assert!(
+            msg.contains("settings.toml.corrupt"),
+            "the message must point at the recovery file: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_reporting_is_silent_for_a_missing_or_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_reporting(dir.path()).1, None, "first run reports nothing");
+        save(dir.path(), &Settings::default()).unwrap();
+        assert_eq!(load_reporting(dir.path()).1, None, "a valid file reports nothing");
+    }
+
+    /// Writes go through a temp file and a rename, so a reader never
+    /// observes a half-written file. A regression to a plain
+    /// `fs::write` would still leave "one file, no scratch" for a
+    /// clean directory, so a stale scratch file from a previous crash
+    /// is the case that actually distinguishes the two: `save` must
+    /// clear it, where an in-place `fs::write` would leave it sitting
+    /// untouched.
+    #[test]
+    fn save_cleans_up_a_stale_scratch_file_from_a_previous_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        // Mirrors atomic_write's naming: settings.toml -> settings.supermd-tmp.
+        std::fs::write(dir.path().join("settings.supermd-tmp"), "leftover from a crashed write").unwrap();
+
+        let mut s = Settings::default();
+        s.format_on_save = true;
+        save(dir.path(), &s).unwrap();
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["settings.toml".to_string()], "stale scratch must not survive: {names:?}");
+        assert!(load(dir.path()).format_on_save, "and it round-trips");
+    }
+
+    /// Same claim, checked a second way: a rename always produces a
+    /// fresh inode, where an in-place `fs::write` truncation reuses the
+    /// old one. This is the most direct evidence that `save` goes
+    /// through rename rather than truncation.
+    #[cfg(unix)]
+    #[test]
+    fn save_replaces_the_file_via_rename_not_in_place_truncation() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), &Settings::default()).unwrap();
+        let before = std::fs::metadata(dir.path().join("settings.toml")).unwrap().ino();
+
+        let mut s = Settings::default();
+        s.format_on_save = true;
+        save(dir.path(), &s).unwrap();
+        let after = std::fs::metadata(dir.path().join("settings.toml")).unwrap().ino();
+
+        assert_ne!(before, after, "save must rename a new file over the old one, not truncate it in place");
+        assert!(load(dir.path()).format_on_save);
     }
 }

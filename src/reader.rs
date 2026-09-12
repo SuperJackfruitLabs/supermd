@@ -50,6 +50,10 @@ pub struct Reader {
     pub document: std::sync::Arc<Document>,
     pub toc: Vec<TocEntry>,
     pub list_state: ListState,
+    /// The owning workspace's knowledge index, for resolving a link's
+    /// hover preview. None when no workspace handed one over — the
+    /// index is per-workspace state, never a process global.
+    knowledge: Option<crate::knowledge::KnowledgeHandle>,
     focus_handle: FocusHandle,
     scroll_anim: Option<gpui::Task<()>>,
 }
@@ -143,9 +147,25 @@ impl Reader {
             document,
             toc,
             list_state,
+            knowledge: None,
             focus_handle: cx.focus_handle(),
             scroll_anim: None,
         }
+    }
+
+    /// Hand the reader its workspace's index (the workspace does this
+    /// right after building it).
+    pub fn set_knowledge(&mut self, knowledge: crate::knowledge::KnowledgeHandle) {
+        self.knowledge = Some(knowledge);
+    }
+
+    /// The hover preview for a link destination in this document --
+    /// exactly what the rendered view shows for it. Resolving needs
+    /// both halves the workspace hands over: the file this text came
+    /// from, and the index. Without the index every wiki link and
+    /// every relative link previews as a note that does not exist.
+    pub fn describe(&self, dest: &str, cx: &App) -> Option<crate::preview::Preview> {
+        describe_link(self.path.as_deref(), dest, self.knowledge.as_ref(), cx)
     }
 
     pub fn scroll_to_block(&mut self, block_ix: usize, cx: &mut Context<Self>) {
@@ -260,6 +280,35 @@ pub enum ReaderEvent {
 
 impl gpui::EventEmitter<ReaderEvent> for Reader {}
 
+/// What a rendered-view tooltip should show for a link destination in
+/// the note at `base`. Pulled out of the render closure that builds it
+/// so it can be tested directly, the way `Editor::preview_for` is —
+/// including that it reads `PreviewState`'s cached grants rather than
+/// settings off disk (see the module doc on `PreviewState::grants`).
+fn describe_link(
+    base: Option<&Path>,
+    dest: &str,
+    knowledge: Option<&crate::knowledge::KnowledgeHandle>,
+    cx: &App,
+) -> Option<crate::preview::Preview> {
+    let base = base?;
+    // Same marker the click path reads: a wiki destination resolves
+    // by stem, not as a path, or every `[[Wiki]]` previewed as "does
+    // not exist".
+    let (wiki, target) = match dest.strip_prefix("[[") {
+        Some(stem) => (true, stem.to_string()),
+        None => (false, dest.to_string()),
+    };
+    let link = crate::knowledge::RawLink { target, wiki, range: 0..0, context: String::new() };
+    let grants = cx
+        .try_global::<crate::preview::PreviewState>()
+        .map(|s| s.grants())
+        .unwrap_or_default();
+    Some(crate::preview::preview_for_link(&link, dest, &grants, |l| {
+        knowledge.and_then(|k| k.lock().unwrap().resolve(base, l))
+    }))
+}
+
 impl Render for Reader {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.weak_entity();
@@ -291,36 +340,14 @@ impl Render for Reader {
                             reader.update(cx, |_, cx| cx.emit(ReaderEvent::Follow(dest)));
                         })
                     };
-                    let base = reader.read(cx).path.clone();
-                    let describe: view::Describe = std::rc::Rc::new(
-                        move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
-                            let base = base.clone()?;
-                            // Same marker the click path reads: a wiki
-                            // destination resolves by stem, not as a
-                            // path, or every `[[Wiki]]` previewed as
-                            // "does not exist".
-                            let (wiki, target) = match dest.strip_prefix("[[") {
-                                Some(stem) => (true, stem.to_string()),
-                                None => (false, dest.to_string()),
-                            };
-                            let link = crate::knowledge::RawLink {
-                                target,
-                                wiki,
-                                range: 0..0,
-                                context: String::new(),
-                            };
-                            let grants = crate::preview::stored_grants();
-                            Some(crate::preview::preview_for_link(
-                                &link,
-                                dest,
-                                &grants,
-                                |l| {
-                                    cx.try_global::<crate::knowledge::KnowledgeState>()
-                                        .and_then(|s| s.0.lock().unwrap().resolve(&base, l))
-                                },
-                            ))
-                        },
-                    );
+                    let describe: view::Describe = {
+                        let reader = reader.clone();
+                        std::rc::Rc::new(
+                            move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
+                                reader.read(cx).describe(dest, cx)
+                            },
+                        )
+                    };
                     view::list_item(&document, ix, &t, cx, Some(&follow), Some(&describe))
                 })
                 .size_full(),
@@ -607,5 +634,61 @@ mod tests {
         cx.dispatch_action(ScrollTop);
         cx.run_until_parked();
         assert_eq!(offset_px(&reader, cx), 0., "Home should land at the top");
+    }
+
+    /// The tooltip's preview must answer from `PreviewState`'s cached
+    /// grants -- the same cache `Editor::preview_for` reads -- and must
+    /// see a newly written grant once told to refresh, not only at
+    /// startup.
+    fn consent_for_dest(
+        cx: &mut TestAppContext,
+        base: &Path,
+        dest: &str,
+    ) -> crate::preview::Consent {
+        cx.update(|app| {
+            let Some(crate::preview::Preview::External { consent, .. }) =
+                describe_link(Some(base), dest, None, app)
+            else {
+                panic!("expected an external preview")
+            };
+            consent
+        })
+    }
+
+    #[gpui::test]
+    fn describe_link_reads_the_cached_grants_and_sees_a_refresh(cx: &mut TestAppContext) {
+        let _home = crate::workspace::tests::temp_home();
+        cx.update(|app| {
+            app.set_global(crate::preview::PreviewState::new(Arc::new(|_: &str| Ok(Vec::new()))));
+        });
+
+        let base = PathBuf::from("/vault/note.md");
+        let dest = "https://example.test/a";
+        assert_eq!(
+            consent_for_dest(cx, &base, dest),
+            crate::preview::Consent::Ungranted,
+            "nothing is granted before any grant is written"
+        );
+
+        // A grant lands on disk exactly the way
+        // `enable_previews_for_hovered_site` writes one -- through
+        // `settings::save`, never through this cx.
+        let dir = crate::settings::config_dir();
+        let mut settings = crate::settings::load(&dir);
+        settings.plugin_grants.insert("supermd".into(), vec!["net:example.test".into()]);
+        crate::settings::save(&dir, &settings).unwrap();
+
+        assert_eq!(
+            consent_for_dest(cx, &base, dest),
+            crate::preview::Consent::Ungranted,
+            "a stale cache must not see the new grant on its own"
+        );
+
+        cx.update(|app| app.global::<crate::preview::PreviewState>().refresh_grants());
+        assert_eq!(
+            consent_for_dest(cx, &base, dest),
+            crate::preview::Consent::Granted,
+            "refresh_grants must pick up what is on disk now"
+        );
     }
 }

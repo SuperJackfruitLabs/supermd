@@ -12,9 +12,11 @@ pub mod formatting;
 pub mod lists;
 pub mod paste_image;
 pub mod table_edit;
+pub mod table_ops;
 pub mod movement;
 pub mod projection;
 pub mod projector;
+pub mod replace;
 pub mod spans;
 
 use std::collections::HashMap;
@@ -50,12 +52,16 @@ actions!(
         DeleteWordLeft, Newline, InsertTab, Undo, Redo, SelectAll, Copy, Cut, Paste, SaveNow,
         OpenFind, FindNext, FindPrev, CloseFind, ToggleBold, ToggleItalic, ToggleCode,
         ToggleStrike, InsertLink, CycleHeading, ToggleQuote, Outdent, FollowLink,
-        DismissCompletion
+        DismissCompletion, ReplaceNext, ReplaceAll, TableInsertRow, TableDeleteRow,
+        TableInsertColumn, TableDeleteColumn, RenumberList
     ]
 );
 
 struct FindState {
     input: Entity<crate::input::TextInput>,
+    /// The replacement field, shown only once the user asks for it.
+    replace_input: Entity<crate::input::TextInput>,
+    replacing: bool,
     matches: Vec<Range<usize>>,
     active: usize,
     _watch: gpui::Subscription,
@@ -169,6 +175,34 @@ pub struct Editor {
     /// The pointer is inside the popover itself, so it must not close.
     hover_held: bool,
     hover_close_task: Option<gpui::Task<()>>,
+    /// The owning workspace's knowledge index and plugin host, handed
+    /// over when the workspace builds the editor. An editor does not
+    /// know *which* workspace owns it, so it is given what it needs
+    /// rather than reaching for a process global — two windows on two
+    /// folders have two indexes and two plugin sandbox roots.
+    knowledge: Option<crate::knowledge::KnowledgeHandle>,
+    host: Option<crate::extensions::HostHandle>,
+    /// The host's preopen root, on a cell shared with the host. Block
+    /// widgets read it every frame to key the diagram cache, and
+    /// locking the host for that would stall the UI behind a running
+    /// plugin call.
+    ///
+    /// Shared, not copied — but only because every path that replaces
+    /// the host keeps the cell: `set_workspace_root` writes through it,
+    /// and Reload Plugins hands the replacement host the old cell via
+    /// `ExtensionHost::adopt_root_handle`. A host swap that minted a
+    /// fresh cell instead would orphan this one silently, and the
+    /// editor would key its renders under a root that had stopped
+    /// tracking the window. `reloading_plugins_keeps_the_root_cell_editors_already_hold`
+    /// is what holds that up.
+    host_root: Option<crate::extensions::RootHandle>,
+    /// Registered once, lazily, from the first render: a press belongs
+    /// to the document that was on screen when it happened, and
+    /// neither it nor the hover it started should outlive this editor
+    /// losing focus — a tab switch moves focus to the newly active
+    /// document before this one is ever rendered again, so the moment
+    /// it happens is the only reliable place to catch it.
+    blur_subscription: Option<gpui::Subscription>,
 }
 
 /// Snapshot taken right after a paste lands, so a background enricher
@@ -194,6 +228,11 @@ pub enum EditorEvent {
     ConsentNeeded { plugin: String, cap: String },
     /// A followed link wants this file opened in a tab.
     OpenPath(PathBuf),
+    /// A right-click landed in the document. The workspace owns the
+    /// one context-menu overlay (sidebar, tabs and graph nodes already
+    /// raise it), so the editor reports where the press was and what it
+    /// knew at the caret; `menus::items_for` turns that into rows.
+    ContextMenu { position: gpui::Point<Pixels>, ctx: crate::menus::EditorContext },
 }
 
 /// The `[[` completion popup: doc offset of the opener, the filtered
@@ -276,6 +315,19 @@ impl Editor {
     }
 
     pub fn from_text(path: &Path, text: String, langs: &Languages, cx: &mut Context<Self>) -> Self {
+        Self::from_text_in(path, text, langs, None, None, cx)
+    }
+
+    /// The workspace's constructor: the same editor, plus the handles
+    /// to the index and plugin host that own it.
+    pub fn from_text_in(
+        path: &Path,
+        text: String,
+        langs: &Languages,
+        knowledge: Option<crate::knowledge::KnowledgeHandle>,
+        host: Option<crate::extensions::HostHandle>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let provider = if is_markdown(path) {
             Provider::Markdown
         } else if let Some(lang) = language_for_path(path) {
@@ -330,6 +382,12 @@ impl Editor {
             hover_preview: None,
             hover_held: false,
             hover_close_task: None,
+            knowledge,
+            host_root: host
+                .as_ref()
+                .map(|h| h.lock().unwrap_or_else(|e| e.into_inner()).root_handle()),
+            host,
+            blur_subscription: None,
         };
         editor.restyle(langs);
         editor.schedule_status(cx);
@@ -338,6 +396,14 @@ impl Editor {
 
     pub fn text(&self) -> String {
         self.core.buffer.text()
+    }
+
+    /// The cell naming the folder this editor's plugin renders may
+    /// read. The block-widget path forwards it straight to
+    /// `diagram::plugin_diagram_state`, which does the read itself —
+    /// nothing in between computes a root that could be wrong.
+    pub(crate) fn plugin_root_handle(&self) -> Option<crate::extensions::RootHandle> {
+        self.host_root.clone()
     }
 
     /// Point the editor at a new path after a rename or move; buffer
@@ -448,10 +514,12 @@ impl Editor {
 
     /// The "repository is out of scope" hint for the empty-diff message,
     /// asked of the open workspace root. No workspace, no hint.
-    fn git_scope_hint(&self, cx: &App) -> Option<&'static str> {
-        let root = cx
-            .try_global::<crate::knowledge::KnowledgeState>()
-            .and_then(|s| s.0.lock().ok().map(|ix| ix.root.clone()))?;
+    fn git_scope_hint(&self) -> Option<&'static str> {
+        let root = self
+            .knowledge
+            .as_ref()
+            .and_then(|k| k.lock().ok().map(|ix| ix.root.clone()))
+            .filter(|root| !root.as_os_str().is_empty())?;
         crate::workspace::git_scope_hint(
             false,
             crate::workspace::repo_root_may_be_out_of_scope(&root),
@@ -699,12 +767,12 @@ impl Editor {
         }
         self.reveal_cursor();
         self.schedule_status(cx);
-        self.refresh_completion(cx);
+        self.refresh_completion();
         cx.notify();
     }
 
     /// Rebuild the `[[` completion for the text left of the cursor.
-    fn refresh_completion(&mut self, cx: &Context<Self>) {
+    fn refresh_completion(&mut self) {
         self.completion = None;
         if !self.can_format() || !self.core.selection.is_cursor() {
             return;
@@ -721,12 +789,11 @@ impl Editor {
         if query.contains(']') || query.contains('[') || query.contains('|') {
             return;
         }
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
+        let Some(state) = self.knowledge.clone() else {
             return;
         };
         let q = query.to_lowercase();
         let mut matches: Vec<(String, PathBuf)> = state
-            .0
             .lock()
             .unwrap()
             .note_names()
@@ -828,10 +895,10 @@ impl Editor {
             }
             _ => {}
         }
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
+        let Some(state) = self.knowledge.clone() else {
             return false;
         };
-        let resolved = state.0.lock().unwrap().resolve(&self.path, link);
+        let resolved = state.lock().unwrap().resolve(&self.path, link);
         let target = match resolved {
             Some(path) => path,
             None if link.wiki => {
@@ -839,7 +906,7 @@ impl Editor {
                 let Some(dir) = self.path.parent() else {
                     return false;
                 };
-                let root = state.0.lock().unwrap().root.clone();
+                let root = state.lock().unwrap().root.clone();
                 // `link.target` is unsanitised text from between the
                 // brackets: contain it before anything touches the disk.
                 let Some(path) = crate::knowledge::creatable_note_path(&root, dir, &link.target)
@@ -859,7 +926,7 @@ impl Editor {
                 // buffer. `AlreadyExists` (a file we did not see, or one
                 // that appeared in between) is the same answer: open it.
                 match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                    Ok(_) => state.0.lock().unwrap().update_file(&path, ""),
+                    Ok(_) => state.lock().unwrap().update_file(&path, ""),
                     Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                         if std::fs::symlink_metadata(&path)
                             .is_ok_and(|m| m.file_type().is_symlink())
@@ -904,10 +971,9 @@ impl Editor {
         if crate::extensions::widget_plugins().is_empty() {
             return;
         }
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+        let Some(host) = self.host.clone() else {
             return;
         };
-        let host = state.0.clone();
         self.status_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(500))
@@ -949,6 +1015,17 @@ impl Editor {
         self.save = SavePolicy::default();
         self.disk_mtime = autosave::disk_mtime(&self.path);
         self.marked_range = None;
+        // The buffer just got swapped out from under any in-flight
+        // press or hover: their offsets belong to text that no longer
+        // exists, so a release now must not navigate and a stale
+        // popover must not linger.
+        self.pending_link = None;
+        self.hover_link = None;
+        self.hover_task = None;
+        self.hover_at = None;
+        self.hover_preview = None;
+        self.hover_held = false;
+        self.hover_close_task = None;
         let langs = crate::highlight::languages(cx);
         self.restyle(&langs);
         if self.find.is_some() {
@@ -973,11 +1050,11 @@ impl Editor {
         let Some(plugin) = plugins.first() else {
             return;
         };
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+        let Some(host) = self.host.clone() else {
             return;
         };
         let snapshot = self.core.buffer.text();
-        let result = state.0.lock().unwrap().format_document(plugin, &snapshot);
+        let result = host.lock().unwrap().format_document(plugin, &snapshot);
         if let Ok(formatted) = result {
             if formatted != snapshot {
                 self.apply_command_output(
@@ -997,13 +1074,13 @@ impl Editor {
         if plugins.is_empty() {
             return;
         }
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+        let Some(host) = self.host.clone() else {
             return;
         };
         let snapshot = self.core.buffer.text();
         let path = self.path.to_string_lossy().into_owned();
         let result = chain_save_hooks(snapshot.clone(), &path, &plugins, |p, path, doc| {
-            state.0.lock().unwrap().on_save(p, path, doc)
+            host.lock().unwrap().on_save(p, path, doc)
         });
         if result != snapshot {
             self.apply_command_output(
@@ -1248,6 +1325,16 @@ impl Editor {
             self.after_edit(cx);
             return;
         }
+        // Enter always starts a fresh undo group, independent of
+        // whatever coalescing window the preceding typing left open —
+        // whether the cursor is collapsed or Enter is replacing a
+        // selection. Without this, typing right up against Enter (no
+        // pause, no explicit break) could merge into the same group as
+        // the newline — and, once the ordered-list renumber stopped
+        // breaking the group on its own side (so one Enter costs one
+        // Undo, not two), that merge would reach all the way back into
+        // the user's typing on Undo.
+        self.core.break_undo_group();
         if self.core.selection.is_cursor() {
             let head = self.core.selection.head;
             // Enter inside a table: tidy the block first, keeping the
@@ -1283,7 +1370,11 @@ impl Editor {
                 }
                 let line = self.core.buffer.line_text(line_ix);
                 let indent = &line[..item.indent];
+                let ordered = item.next_marker.as_bytes().first().is_some_and(u8::is_ascii_digit);
                 self.insert_str(&format!("\n{indent}{}", item.next_marker), cx);
+                if ordered {
+                    self.renumber_current_list(cx);
+                }
                 return;
             }
         }
@@ -1408,6 +1499,180 @@ impl Editor {
         } else {
             target
         }
+    }
+
+    /// The table block, cell-relative cursor position, and block text
+    /// at the cursor, or `None` outside a table.
+    fn table_cursor(&self) -> Option<(Range<usize>, String, table_edit::CellPos)> {
+        let head = self.core.selection.head;
+        let text = self.core.buffer.text();
+        let br = table_edit::table_block(&text, head)?;
+        let block = text[br.clone()].to_string();
+        let pos = table_edit::cell_at(&block, head - br.start)?;
+        Some((br, block, pos))
+    }
+
+    /// Replace the table block with `new_block` as one undo group, and
+    /// place the cursor collapsed at the start of `pos`'s cell.
+    fn apply_table_edit(
+        &mut self,
+        br: Range<usize>,
+        new_block: &str,
+        pos: table_edit::CellPos,
+        cx: &mut Context<Self>,
+    ) {
+        self.core.break_undo_group();
+        self.core.replace_range(br.clone(), new_block, Instant::now());
+        if let Some(r) = table_edit::cell_range(new_block, pos) {
+            self.core.set_cursor(br.start + r.start);
+        }
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    fn table_insert_row(&mut self, _: &TableInsertRow, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let Some((br, block, pos)) = self.table_cursor() else {
+            return;
+        };
+        // Not `pos.row + 1`: a row asked for from the header lands
+        // below the separator, and the cursor has to follow it there.
+        let at = table_ops::insert_row_index(&block, pos.row);
+        let new_block = table_ops::insert_row(&block, pos.row);
+        self.apply_table_edit(br, &new_block, table_edit::CellPos { row: at + 1, cell: 0 }, cx);
+    }
+
+    fn table_delete_row(&mut self, _: &TableDeleteRow, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let Some((br, block, pos)) = self.table_cursor() else {
+            return;
+        };
+        let Some(new_block) = table_ops::delete_row(&block, pos.row) else {
+            return;
+        };
+        let row = table_edit::rows(&new_block).len().saturating_sub(1).min(pos.row);
+        self.apply_table_edit(br, &new_block, table_edit::CellPos { row, cell: pos.cell }, cx);
+    }
+
+    fn table_insert_column(
+        &mut self,
+        _: &TableInsertColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let Some((br, block, pos)) = self.table_cursor() else {
+            return;
+        };
+        let new_block = table_ops::insert_column(&block, pos.cell);
+        self.apply_table_edit(br, &new_block, table_edit::CellPos { row: pos.row, cell: pos.cell + 1 }, cx);
+    }
+
+    fn table_delete_column(
+        &mut self,
+        _: &TableDeleteColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        let Some((br, block, pos)) = self.table_cursor() else {
+            return;
+        };
+        let Some(new_block) = table_ops::delete_column(&block, pos.cell) else {
+            return;
+        };
+        let cell = pos.cell.min(table_edit::rows(&new_block)[pos.row].cells.len().saturating_sub(1));
+        self.apply_table_edit(br, &new_block, table_edit::CellPos { row: pos.row, cell }, cx);
+    }
+
+    /// The contiguous run of non-blank lines the cursor sits in — the
+    /// block Renumber List rewrites, and so the block that decides
+    /// whether the right-click menu offers it.
+    fn list_run_around_cursor(&self) -> Range<usize> {
+        let cur_line = self.core.buffer.line_of_byte(self.core.selection.head);
+        let mut start_line = cur_line;
+        while start_line > 0 && !self.core.buffer.line_text(start_line - 1).trim().is_empty() {
+            start_line -= 1;
+        }
+        let last_line = self.core.buffer.line_count().saturating_sub(1);
+        let mut end_line = cur_line;
+        while end_line < last_line && !self.core.buffer.line_text(end_line + 1).trim().is_empty() {
+            end_line += 1;
+        }
+        self.core.buffer.line_range(start_line).start..self.core.buffer.line_range(end_line).end
+    }
+
+    /// What a right-click at `offset` knows, for `menus::items_for`.
+    /// Each fact is the *command's own* precondition, read at the caret
+    /// after the click has placed it: `table_cursor()` for the four
+    /// table commands, `renumber_block` for Renumber List (both skip a
+    /// fenced code block, so a fence offers neither), and a cached-link
+    /// hit for Follow Link. Menu availability and command applicability
+    /// are then the same test, not two that can drift apart.
+    fn menu_context(&self, offset: usize) -> crate::menus::EditorContext {
+        let can_format = self.can_format();
+        if !can_format {
+            return crate::menus::EditorContext::default();
+        }
+        let text = self.core.buffer.text();
+        crate::menus::EditorContext {
+            in_table: self.table_cursor().is_some(),
+            in_ordered_list: lists::renumber_block(&text, self.list_run_around_cursor()).is_some(),
+            on_link: self.link_at_offset(offset).is_some(),
+            can_format,
+        }
+    }
+
+    /// Renumber the ordered-list run around the cursor (the contiguous
+    /// non-blank lines it sits in). A no-op outside an ordered list.
+    ///
+    /// Deliberately does not call `break_undo_group()` before its own
+    /// edit: called right after `newline()`'s Enter-continuation insert,
+    /// it must coalesce into that same undo group so one Enter costs one
+    /// Undo. A caller that needs this isolated as its own undo step
+    /// (`renumber_list` below) breaks the group itself first.
+    fn renumber_current_list(&mut self, cx: &mut Context<Self>) {
+        let head = self.core.selection.head;
+        let cur_line = self.core.buffer.line_of_byte(head);
+        let col = head - self.core.buffer.line_range(cur_line).start;
+        let block = self.list_run_around_cursor();
+
+        let text = self.core.buffer.text();
+        // The list, not the file: a whole-document replacement pushed an
+        // undo entry holding two full copies of it on every Enter, and
+        // the helper already knows the block's own range.
+        let Some(new_block) = lists::renumber_block(&text, block.clone()) else {
+            return;
+        };
+        if new_block == text[block.clone()] {
+            return;
+        }
+        self.core.replace_range(block, &new_block, Instant::now());
+        let new_head = (self.core.buffer.line_range(cur_line).start + col).min(self.core.buffer.len_bytes());
+        self.core.set_cursor(new_head);
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    fn renumber_list(&mut self, _: &RenumberList, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            cx.propagate();
+            return;
+        }
+        self.core.break_undo_group();
+        self.renumber_current_list(cx);
     }
 
     /// Add (or remove, when negative) leading spaces on a line while
@@ -1567,8 +1832,8 @@ impl Editor {
             let mut out = text.clone();
             let paste_plugins = crate::extensions::paste_plugins();
             if !paste_plugins.is_empty() {
-                if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
-                    let mut host = state.0.lock().unwrap();
+                if let Some(state) = self.host.clone() {
+                    let mut host = state.lock().unwrap();
                     for plugin in &paste_plugins {
                         if let Ok(Some(replaced)) = host.process_paste(plugin, &text) {
                             out = replaced;
@@ -1625,10 +1890,9 @@ impl Editor {
         let Some(pending) = self.pending_enrich.as_ref() else {
             return;
         };
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
+        let Some(host) = self.host.clone() else {
             return;
         };
-        let host = state.0.clone();
         let text = pending.pasted.clone();
         let task = cx.background_executor().spawn(async move {
             let mut consent: Option<(String, String)> = None;
@@ -1705,20 +1969,120 @@ impl Editor {
             .unwrap_or(0);
     }
 
-    fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(state) = &self.find {
-            window.focus(&state.input.read(cx).focus_handle);
+    /// Create the find bar if it isn't already open. Shared by
+    /// `open_find` and the replace commands, which may need the bar
+    /// (and its query field) open before they can show their own.
+    fn ensure_find(&mut self, cx: &mut Context<Self>) {
+        if self.find.is_some() {
             return;
         }
         let input = cx.new(|cx| crate::input::TextInput::new("Find…", cx));
+        let replace_input = cx.new(|cx| crate::input::TextInput::new("Replace…", cx));
         let watch = cx.observe(&input, |this: &mut Editor, input, cx| {
             let query = input.read(cx).content.to_string();
             this.recompute_matches(&query);
             cx.notify();
         });
-        window.focus(&input.read(cx).focus_handle);
-        self.find = Some(FindState { input, matches: Vec::new(), active: 0, _watch: watch });
+        self.find = Some(FindState {
+            input,
+            replace_input,
+            replacing: false,
+            matches: Vec::new(),
+            active: 0,
+            _watch: watch,
+        });
+    }
+
+    fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_find(cx);
+        let state = self.find.as_ref().expect("just ensured");
+        window.focus(&state.input.read(cx).focus_handle);
         cx.notify();
+    }
+
+    /// Apply a `ReplaceEdit` as its own undo group, same path
+    /// `formatting.rs` edits already use: one replace, one undo group,
+    /// cursor left at the end of the new text.
+    fn apply_replace(&mut self, edit: replace::ReplaceEdit, cx: &mut Context<Self>) {
+        self.core.break_undo_group();
+        self.core.replace_range(edit.range, &edit.replacement, Instant::now());
+        self.core.selection = Selection::cursor(edit.select.end);
+        self.core.break_undo_group();
+        self.after_edit(cx);
+    }
+
+    /// First press reveals the replace field (and focuses it) without
+    /// touching the buffer; the field is "shown only once the user
+    /// asks for it".
+    ///
+    /// Returns `true` when the field was just revealed, so the caller
+    /// stops there instead of also replacing. This is visibility only
+    /// -- it says nothing about which action asked, or what is in the
+    /// field -- so callers must not treat a `false` return as
+    /// permission to fire; that was the bug (see `replace_next` /
+    /// `replace_all`'s own content gate below).
+    fn reveal_replace_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.ensure_find(cx);
+        let state = self.find.as_mut().expect("just ensured");
+        if state.replacing {
+            return false;
+        }
+        state.replacing = true;
+        window.focus(&state.replace_input.read(cx).focus_handle);
+        cx.notify();
+        true
+    }
+
+    fn replace_next(&mut self, _: &ReplaceNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reveal_replace_field(window, cx) {
+            return;
+        }
+        let Some(state) = self.find.as_ref() else {
+            return;
+        };
+        let with = state.replace_input.read(cx).content.to_string();
+        // An empty replacement field never fires, no matter how many
+        // times a replace shortcut is pressed, and regardless of
+        // which one revealed the field. Silently wiping a match
+        // because a *different* shortcut was pressed while the field
+        // sat empty is exactly the bug this guard exists to prevent;
+        // requiring the field to be non-empty removes the ambiguity
+        // instead of trying to track "which action asked" across
+        // presses. A deliberate "delete every match" is not supported
+        // this way -- type a replacement, don't rely on repetition.
+        if with.is_empty() {
+            return;
+        }
+        let Some(at) = state.matches.get(state.active).cloned() else {
+            return;
+        };
+        let text = self.core.buffer.text();
+        let edit = replace::replace_one(&text, at, &with);
+        self.apply_replace(edit, cx);
+    }
+
+    fn replace_all(&mut self, _: &ReplaceAll, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reveal_replace_field(window, cx) {
+            return;
+        }
+        let Some(state) = self.find.as_ref() else {
+            return;
+        };
+        let query = state.input.read(cx).content.to_string();
+        let with = state.replace_input.read(cx).content.to_string();
+        // Same guard as `replace_next`, and just as load-bearing here:
+        // an empty replacement must never fire Replace All, or one
+        // stray press (from either replace shortcut) wipes every
+        // match in the document. See `replace_next` for the full
+        // rationale.
+        if with.is_empty() {
+            return;
+        }
+        let text = self.core.buffer.text();
+        let Some(edit) = replace::replace_all(&text, &query, &with) else {
+            return;
+        };
+        self.apply_replace(edit, cx);
     }
 
     fn cycle_find(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -1964,6 +2328,64 @@ impl Editor {
         cx.notify();
     }
 
+    /// A right press: place the caret (or keep the selection), then ask
+    /// the workspace to raise the context menu here.
+    ///
+    /// Deliberately *not* a call into `on_line_mouse_down`. That path
+    /// arms `pending_link`, which the next left release follows — a
+    /// right-click must never navigate, and must not leave a primed
+    /// link behind for a later click to trip over either, so it clears
+    /// one rather than setting one. It also does not start a drag: the
+    /// root's `on_mouse_up` only listens for the left button, so a
+    /// `dragging` flag set here would stay set and turn every later
+    /// pointer move into a selection drag.
+    fn on_line_right_mouse_down(
+        &mut self,
+        line_ix: usize,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.diff.is_some() {
+            return; // read-only, same as the left path
+        }
+        self.pending_link = None;
+        self.dragging = false;
+        self.toolbar_visible = false;
+        self.toolbar_task = None;
+
+        let clicked = self
+            .offset_at_point(event.position)
+            .unwrap_or_else(|| self.core.buffer.line_range(line_ix).start);
+        // A right-click *inside* the selection keeps it. Collapsing the
+        // caret here is the classic way this feature breaks: the user
+        // selects a phrase, right-clicks it, picks Bold — and the
+        // selection the command was for is gone.
+        let sel = self.core.selection.range();
+        let caret = if sel.start < sel.end && sel.start <= clicked && clicked < sel.end {
+            self.core.selection.head
+        } else {
+            let offset = self.tidy_table_on_leave(clicked, cx);
+            self.core.set_cursor(offset);
+            self.core.break_undo_group();
+            self.preferred_x = None;
+            offset
+        };
+        // Redundant on paper — gpui's `track_focus` focuses any div it
+        // is on when a mouse button goes down over it, whichever button
+        // — and so untestable in isolation; kept because the left path
+        // states it too and this one must not quietly depend on that.
+        window.focus(&self.focus_handle);
+
+        // An empty menu is worse than none: a code file or the diff
+        // view takes none of these commands, so no overlay opens.
+        let ctx = self.menu_context(caret);
+        if !crate::menus::items_for(crate::menus::Surface::Editor, ctx).is_empty() {
+            cx.emit(EditorEvent::ContextMenu { position: event.position, ctx });
+        }
+        cx.notify();
+    }
+
     fn on_root_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
@@ -1996,11 +2418,29 @@ impl Editor {
     }
 
     fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.finish_mouse_up(true, cx);
+    }
+
+    /// The release landed outside the editor's own bounds. Browsers
+    /// treat that as a cancelled click, not a completed one: a
+    /// pending link must be dropped, not followed.
+    fn on_root_mouse_up_out(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.finish_mouse_up(false, cx);
+    }
+
+    fn finish_mouse_up(&mut self, in_bounds: bool, cx: &mut Context<Self>) {
         let selection_drag_ended = self.dragging && !self.scrollbar_dragging;
         self.dragging = false;
         // The press landed on a followable link and nothing dragged it
-        // away: this release is the click, so navigate now.
+        // away: an in-bounds release is the click, so navigate now.
         if let Some(pending) = self.pending_link.take() {
+            if !in_bounds {
+                // Cancelled: the press still belongs to nothing, and
+                // no caret placement follows a click that never
+                // completed.
+                cx.notify();
+                return;
+            }
             if !self.open_link(&pending.link, cx) {
                 // Refused (an escaping wiki target, say) — the click
                 // still belongs to the document, so place the caret.
@@ -2222,6 +2662,13 @@ impl Editor {
             eprintln!("supermd: cannot record the preview grant: {err}");
             return;
         }
+        // The grant just landed on disk, but `preview_for` never reads
+        // disk itself: without this the cache `PreviewState` holds
+        // stays exactly as stale as it was before the click, and the
+        // popover below would still show `Ungranted`.
+        if let Some(state) = cx.try_global::<crate::preview::PreviewState>() {
+            state.refresh_grants();
+        }
         // Forced: clicking the button requires the pointer inside the
         // popover, which is exactly the state the dwell path refuses to
         // touch. Without this the grant was written to settings and
@@ -2241,10 +2688,13 @@ impl Editor {
 
         match crate::knowledge::classify(link) {
             LinkTarget::External(url) => {
-                let grants = crate::settings::load(&crate::settings::config_dir())
-                    .plugin_grants
-                    .get("supermd")
-                    .cloned()
+                // Cached on `PreviewState`, not read from disk here:
+                // this runs on every dwell, and `settings::load` is a
+                // file read plus a TOML parse the UI thread should
+                // never do that often.
+                let grants = cx
+                    .try_global::<crate::preview::PreviewState>()
+                    .map(|s| s.grants())
                     .unwrap_or_default();
                 // The *visible* text, not `context` — that is the
                 // whole line, which never looks like a hostname and so
@@ -2267,9 +2717,10 @@ impl Editor {
                 }
             }
             LinkTarget::Wiki(name) | LinkTarget::Relative(name) => {
-                let resolved = cx
-                    .try_global::<crate::knowledge::KnowledgeState>()
-                    .and_then(|s| s.0.lock().unwrap().resolve(&self.path, link));
+                let resolved = self
+                    .knowledge
+                    .as_ref()
+                    .and_then(|k| k.lock().unwrap().resolve(&self.path, link));
                 let Some(path) = resolved else {
                     return Preview::Missing { name };
                 };
@@ -3310,12 +3761,29 @@ impl Focusable for Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.inline_gen != crate::extensions::inline_generation()
             && matches!(self.provider, Provider::Markdown)
         {
             let langs = crate::highlight::languages(cx);
             self.restyle(&langs);
+        }
+        if self.blur_subscription.is_none() {
+            // A window is only available from render, so the
+            // subscription cannot be set up any earlier than the
+            // first paint. Idempotent: every later render sees
+            // `Some` and skips this.
+            self.blur_subscription =
+                Some(cx.on_blur(&self.focus_handle, window, |editor, _window, cx| {
+                    editor.pending_link = None;
+                    editor.hover_link = None;
+                    editor.hover_task = None;
+                    editor.hover_at = None;
+                    editor.hover_preview = None;
+                    editor.hover_held = false;
+                    editor.hover_close_task = None;
+                    cx.notify();
+                }));
         }
         self.reproject();
         let entity = cx.weak_entity();
@@ -3702,7 +4170,7 @@ impl Render for Editor {
                 )
                 .child(div().text_color(t.fg_muted).child("esc to close"))
         });
-        let scope_hint = self.git_scope_hint(cx);
+        let scope_hint = self.git_scope_hint();
         let diff_empty: Option<String> = self.diff.as_ref().and_then(|d| {
             use crate::git::Baseline;
             match &d.missing {
@@ -3742,6 +4210,9 @@ impl Render for Editor {
                         .text_color(t.fg_muted)
                         .child(SharedString::from(format!("{current}/{total}"))),
                 )
+                .when(state.replacing, |d| {
+                    d.child(div().flex_1().child(state.replace_input.clone()))
+                })
         });
 
         div()
@@ -3795,9 +4266,16 @@ impl Render for Editor {
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_prev))
             .on_action(cx.listener(Self::close_find))
+            .on_action(cx.listener(Self::replace_next))
+            .on_action(cx.listener(Self::replace_all))
+            .on_action(cx.listener(Self::table_insert_row))
+            .on_action(cx.listener(Self::table_delete_row))
+            .on_action(cx.listener(Self::table_insert_column))
+            .on_action(cx.listener(Self::table_delete_column))
+            .on_action(cx.listener(Self::renumber_list))
             .on_mouse_move(cx.listener(Self::on_root_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_root_mouse_up_out))
             .flex()
             .flex_col()
             .children(diff_header)
@@ -3878,6 +4356,7 @@ impl Render for Editor {
                                 )
                             };
                             let mouse_editor = editor_entity.clone();
+                            let menu_editor = editor_entity.clone();
                             let line_el = LineElement {
                                 editor: editor_entity.clone(),
                                 line_ix,
@@ -3895,6 +4374,13 @@ impl Render for Editor {
                                                 cx: &mut App| {
                                 mouse_editor.update(cx, |editor, cx| {
                                     editor.on_line_mouse_down(line_ix, event, window, cx);
+                                });
+                            };
+                            let on_right = move |event: &MouseDownEvent,
+                                                 window: &mut Window,
+                                                 cx: &mut App| {
+                                menu_editor.update(cx, |editor, cx| {
+                                    editor.on_line_right_mouse_down(line_ix, event, window, cx);
                                 });
                             };
                             if code_mode {
@@ -3927,6 +4413,7 @@ impl Render for Editor {
                                             .min_w_0()
                                             .pr(px(16.))
                                             .on_mouse_down(MouseButton::Left, on_down)
+                                            .on_mouse_down(MouseButton::Right, on_right)
                                             .child(line_el),
                                     )
                                     .into_any_element()
@@ -3945,6 +4432,7 @@ impl Render for Editor {
                                             .when(ix + 1 == item_count, |d| d.pb(px(96.)))
                                             .when(is_code, |d| d.bg(t.code_bg))
                                             .on_mouse_down(MouseButton::Left, on_down)
+                                            .on_mouse_down(MouseButton::Right, on_right)
                                             .child(line_el),
                                     )
                                     .into_any_element()
@@ -4040,8 +4528,38 @@ mod tests {
             let handle = editor.read(app).focus_handle.clone();
             window.focus(&handle);
         });
+        attach_workspace_handles(&editor, cx);
         cx.run_until_parked();
         (Fixture { _files: files, backups, path }, editor, cx)
+    }
+
+    /// Hand the editor the index and host a workspace would give it.
+    /// The test globals stand in for the workspace that does not exist
+    /// here; production wiring is `Workspace::make_editor`.
+    fn attach_workspace_handles(editor: &Entity<Editor>, cx: &mut VisualTestContext) {
+        cx.update(|_, app| {
+            let knowledge = app
+                .try_global::<crate::knowledge::KnowledgeState>()
+                .map(|s| s.0.clone());
+            let host = app
+                .try_global::<crate::extensions::ExtensionState>()
+                .map(|s| s.0.clone());
+            editor.update(app, |editor, cx| {
+                if knowledge.is_some() {
+                    editor.knowledge = knowledge;
+                }
+                if host.is_some() {
+                    editor.host_root = host
+                        .as_ref()
+                        .map(|h| h.lock().unwrap_or_else(|e| e.into_inner()).root_handle());
+                    editor.host = host;
+                    // A workspace-built editor has its host at
+                    // construction, so `from_text_in` already scheduled
+                    // the status widgets against it; re-run that here.
+                    editor.schedule_status(cx);
+                }
+            });
+        });
     }
 
     fn buffer_text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
@@ -4540,6 +5058,194 @@ mod tests {
         });
     }
 
+    /// Replace All is one undo entry. Stepping back through a hundred
+    /// replacements one at a time is not undo.
+    #[gpui::test]
+    fn replace_all_is_a_single_undo_entry(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        editor.update(cx, |ed, cx| {
+            let text = ed.core.buffer.text();
+            let e = crate::editor::replace::replace_all(&text, "cat", "dog").expect("matches");
+            ed.core.replace_range(e.range.clone(), &e.replacement, std::time::Instant::now());
+            cx.notify();
+        });
+        editor.update(cx, |ed, _| {
+            assert_eq!(ed.core.buffer.text(), "a dog b dog c dog\n");
+            ed.core.undo();
+            assert_eq!(
+                ed.core.buffer.text(),
+                "a cat b cat c cat\n",
+                "one undo takes back the whole Replace All"
+            );
+        });
+    }
+
+    /// First press of ⌘⌥E only reveals the replace field; the second
+    /// press, once it has text, replaces the active match.
+    #[gpui::test]
+    fn replace_next_reveals_the_field_then_replaces_the_active_match(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceNext);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.find.as_ref().unwrap().replacing, "field revealed");
+            assert_eq!(ed.core.buffer.text(), "a cat b cat\n", "no edit on the reveal press");
+        });
+
+        editor.update_in(cx, |ed, _, cx| {
+            let replace_input = ed.find.as_ref().unwrap().replace_input.clone();
+            replace_input.update(cx, |input, cx| {
+                input.content = "dog".into();
+                cx.notify();
+            });
+        });
+
+        cx.dispatch_action(ReplaceNext);
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.buffer.text(),
+                "a dog b cat\n",
+                "only the active match is replaced"
+            );
+        });
+    }
+
+    /// ⌘⌥⇧E rewrites every match through the same reveal-then-act flow,
+    /// and the whole thing is one undo entry.
+    #[gpui::test]
+    fn replace_all_reveals_the_field_then_replaces_every_match(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceAll);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.find.as_ref().unwrap().replacing, "field revealed");
+            assert_eq!(ed.core.buffer.text(), "a cat b cat c cat\n", "no edit on the reveal press");
+        });
+
+        editor.update_in(cx, |ed, _, cx| {
+            let replace_input = ed.find.as_ref().unwrap().replace_input.clone();
+            replace_input.update(cx, |input, cx| {
+                input.content = "dog".into();
+                cx.notify();
+            });
+        });
+
+        cx.dispatch_action(ReplaceAll);
+        editor.update(cx, |ed, _| {
+            assert_eq!(ed.core.buffer.text(), "a dog b dog c dog\n");
+            ed.core.undo();
+            assert_eq!(
+                ed.core.buffer.text(),
+                "a cat b cat c cat\n",
+                "one undo takes back the whole Replace All"
+            );
+        });
+    }
+
+    /// A different replace action must not piggyback on a field that
+    /// another action revealed: ReplaceNext reveals the field, then
+    /// ReplaceAll (with nothing typed) must not fire -- the shared
+    /// "is the field visible" flag is not permission to act.
+    #[gpui::test]
+    fn replace_next_then_replace_all_with_an_empty_field_is_a_no_op(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceNext); // reveals the field, no edit
+        cx.dispatch_action(ReplaceAll); // must not fire: field is empty
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.buffer.text(),
+                "a cat b cat c cat\n",
+                "an empty replace field must never wipe every match"
+            );
+        });
+    }
+
+    /// Same bug, other order: ReplaceAll reveals the field, then
+    /// ReplaceNext (with nothing typed) must not fire.
+    #[gpui::test]
+    fn replace_all_then_replace_next_with_an_empty_field_is_a_no_op(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceAll); // reveals the field, no edit
+        cx.dispatch_action(ReplaceNext); // must not fire: field is empty
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.buffer.text(),
+                "a cat b cat c cat\n",
+                "an empty replace field must never wipe a match"
+            );
+        });
+    }
+
+    /// Pressing the very same replace action twice with the field
+    /// left empty is deliberately still a no-op: this codebase does
+    /// not treat "asked twice" as consent to delete every match.
+    /// Typing an actual (even empty-after-edit) intent is the only
+    /// way to confirm a replacement -- see the comment on
+    /// `replace_next`/`replace_all`'s content gate.
+    #[gpui::test]
+    fn the_same_replace_action_twice_with_an_empty_field_stays_a_no_op(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "a cat b cat c cat\n");
+        cx.dispatch_action(OpenFind);
+        editor.update_in(cx, |ed, _, cx| {
+            let input = ed.find.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.content = "cat".into();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(ReplaceAll); // reveals the field, no edit
+        cx.dispatch_action(ReplaceAll); // still empty: still no edit
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.buffer.text(),
+                "a cat b cat c cat\n",
+                "repeating the same shortcut on an empty field is not consent to delete"
+            );
+        });
+    }
+
     #[gpui::test]
     fn markdown_projects_widgets_that_dissolve_under_the_cursor(cx: &mut TestAppContext) {
         let src = "# Title\n\n|a|b|\n|-|-|\n|1|2|\n\n```mermaid\nflowchart LR\n a-->b\n```\n";
@@ -4634,6 +5340,54 @@ mod tests {
         });
     }
 
+    /// A press belongs to the document that was on screen when it
+    /// happened. Neither survives the buffer being swapped or the
+    /// editor leaving the screen.
+    #[gpui::test]
+    fn a_reload_clears_a_pending_press(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "see [[Target]] here\n");
+        editor.update(cx, |ed, _| {
+            ed.pending_link =
+                ed.link_at_offset(6).cloned().map(|link| PendingLink { offset: 6, link });
+            assert!(ed.pending_link.is_some(), "precondition");
+        });
+        editor.update(cx, |ed, cx| ed.reload_from_disk(cx));
+        editor.update(cx, |ed, _| {
+            assert!(ed.pending_link.is_none(), "a reload drops the press");
+            assert!(ed.hover_link.is_none(), "and the hover it belonged to");
+        });
+    }
+
+    /// The other way a press can outlive the document it was made on:
+    /// the editor loses focus (a tab switch, in the app) before the
+    /// release ever reaches it. Returning and releasing over blank
+    /// space must not still be holding that press.
+    #[gpui::test]
+    fn losing_focus_clears_a_pending_press(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "n.md", "see [[Target]] here\n");
+        // `on_blur` only fires for a window the platform considers
+        // active -- true of any real window that has ever been shown,
+        // but a test window starts inactive until told otherwise.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        editor.update(cx, |ed, _| {
+            ed.pending_link =
+                ed.link_at_offset(6).cloned().map(|link| PendingLink { offset: 6, link });
+            ed.hover_link = ed.link_at_offset(6).cloned();
+            assert!(ed.pending_link.is_some(), "precondition");
+            assert!(ed.hover_link.is_some(), "precondition");
+        });
+        // Something else takes focus -- in the app, a tab switch moves
+        // it to the newly active document's own handle.
+        let elsewhere = cx.update(|_, app| app.focus_handle());
+        cx.update(|window, _| window.focus(&elsewhere));
+        cx.run_until_parked();
+        editor.update(cx, |ed, _| {
+            assert!(ed.pending_link.is_none(), "losing focus drops the press");
+            assert!(ed.hover_link.is_none(), "and the hover it belonged to");
+        });
+    }
+
     #[gpui::test]
     fn ime_marked_text_composes_and_commits(cx: &mut TestAppContext) {
         let (_fx, editor, cx) = open_editor(cx, "note.md", "");
@@ -4692,6 +5446,7 @@ mod tests {
             let handle = editor.read(app).focus_handle.clone();
             window.focus(&handle);
         });
+        attach_workspace_handles(&editor, cx);
         cx.run_until_parked();
         (backups, editor, cx)
     }
@@ -4995,6 +5750,232 @@ mod tests {
         opened
     }
 
+    // ── right-click context menu ───────────────────────────────────────
+
+    /// Every `EditorEvent::ContextMenu` an editor raised.
+    fn menu_sink(
+        cx: &mut VisualTestContext,
+        editor: &Entity<Editor>,
+    ) -> Rc<RefCell<Vec<(Point<Pixels>, crate::menus::EditorContext)>>> {
+        let raised: Rc<RefCell<Vec<(Point<Pixels>, crate::menus::EditorContext)>>> = Rc::default();
+        let sink = raised.clone();
+        cx.update(|_, app| {
+            app.subscribe(editor, move |_, event: &EditorEvent, _| {
+                if let EditorEvent::ContextMenu { position, ctx } = event {
+                    sink.borrow_mut().push((*position, *ctx));
+                }
+            })
+            .detach();
+        });
+        raised
+    }
+
+    /// Put the caret at `at` and repaint, so the lines it reveals are
+    /// in the layout cache and can be clicked.
+    fn caret_and_draw(editor: &Entity<Editor>, cx: &mut VisualTestContext, at: usize) {
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(at);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    /// The rows a raised menu would actually draw.
+    fn menu_ids(ctx: crate::menus::EditorContext) -> Vec<&'static str> {
+        crate::menus::items_for(crate::menus::Surface::Editor, ctx)
+            .into_iter()
+            .map(|i| i.id)
+            .collect()
+    }
+
+    /// The reported bug, end to end: the user clicks into a table, gets
+    /// the raw Markdown as designed, right-clicks to add a row — and
+    /// until now nothing happened, because no `MouseButton::Right`
+    /// handler existed anywhere in the editor. The five commands all
+    /// ship with `keys: []`, so this menu is their only pointer surface.
+    #[gpui::test]
+    fn a_right_click_in_a_table_raises_the_table_commands(cx: &mut TestAppContext) {
+        let doc = "intro\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "t.md", doc);
+        let raised = menu_sink(cx, &editor);
+        caret_and_draw(&editor, cx, doc.find('1').unwrap());
+
+        let p = point_for_index(&editor, cx, 4, 2);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+
+        let raised = raised.borrow();
+        let (pos, ctx) = *raised.first().expect("a right-click raises the menu");
+        assert_eq!(pos, p, "the menu opens where the press landed");
+        assert!(ctx.in_table, "the caret is in a table cell: {ctx:?}");
+        let ids = menu_ids(ctx);
+        for expected in [
+            "table_insert_row",
+            "table_delete_row",
+            "table_insert_column",
+            "table_delete_column",
+        ] {
+            assert!(ids.contains(&expected), "{expected} missing from {ids:?}");
+        }
+    }
+
+    /// A right-click inside an existing selection keeps it. Collapsing
+    /// the caret to the press is the usual way this breaks: the user
+    /// selects a phrase, right-clicks it, picks Bold, and the command
+    /// runs on an empty cursor.
+    #[gpui::test]
+    fn a_right_click_inside_the_selection_keeps_it(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "sel.md", "alpha beta gamma\n");
+        let _raised = menu_sink(cx, &editor);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.selection = Selection { anchor: 0, head: 10 };
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let inside = point_for_index(&editor, cx, 0, 5);
+        cx.simulate_mouse_down(inside, MouseButton::Right, Modifiers::none());
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).core.selection.range(),
+                0..10,
+                "the selection the menu is about survives the press that opened it",
+            );
+        });
+
+        // Outside it, the caret does move — the menu is about the new
+        // spot, and leaving a far-away selection standing would be just
+        // as wrong.
+        let outside = point_for_index(&editor, cx, 0, 14);
+        cx.simulate_mouse_down(outside, MouseButton::Right, Modifiers::none());
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.core.selection.is_cursor(), "a press outside collapses");
+            assert_eq!(ed.core.selection.head, 14);
+        });
+    }
+
+    /// A right press must not navigate, and must not leave a primed
+    /// link behind for the next left release to follow.
+    #[gpui::test]
+    fn a_right_click_on_a_link_neither_follows_nor_arms_it(cx: &mut TestAppContext) {
+        let ws = knowledge_fixture(cx);
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "see [[Roadmap]] now\n").unwrap();
+        index_workspace(cx, ws.path());
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+        let raised = menu_sink(cx, &editor);
+        cx.run_until_parked();
+
+        let p = point_for_index(&editor, cx, 0, 7);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(p, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(opened.borrow().is_empty(), "a right-click never navigates");
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.pending_link.is_none(), "no link is left primed for a later release");
+            assert!(!ed.dragging, "a right press is not the start of a drag");
+        });
+
+        // And it clears one it finds: a left press arms the link and
+        // starts a drag, both of which the release acts on. A right
+        // press in between ends that interaction — the release that
+        // follows must not navigate on a press the user abandoned.
+        // (The caret goes back off the link first: a *revealed* link is
+        // being edited and a plain left click does not arm it.)
+        caret_and_draw(&editor, cx, 0);
+        let p = point_for_index(&editor, cx, 0, 7);
+        cx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+        cx.update(|_, app| assert!(editor.read(app).pending_link.is_some(), "the left press armed it"));
+        let elsewhere = point_for_index(&editor, cx, 0, 13);
+        cx.simulate_mouse_down(elsewhere, MouseButton::Right, Modifiers::none());
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert!(ed.pending_link.is_none(), "the right press cleared the primed link");
+            assert!(!ed.dragging, "and ended the drag it would have extended");
+        });
+        cx.simulate_mouse_up(elsewhere, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(opened.borrow().is_empty(), "the abandoned press still never navigates");
+        let ctx = raised.borrow().first().expect("the menu opened").1;
+        assert!(ctx.on_link, "the press was on a link: {ctx:?}");
+        assert!(menu_ids(ctx).contains(&"follow_link"), "{:?}", menu_ids(ctx));
+    }
+
+    /// Off a link, Follow Link is not offered — a dead row is exactly
+    /// the Format-menu failure this whole menu exists to fix.
+    #[gpui::test]
+    fn prose_offers_the_toggles_and_nothing_dead(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "prose.md", "just some words here\n");
+        let raised = menu_sink(cx, &editor);
+        // The menu's rows dispatch their action through the window, so
+        // they land wherever focus is. A right-click in a document the
+        // user was not typing in (the sidebar had focus) has to take it.
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            assert!(!editor.read(app).focus_handle.is_focused(window), "the premise: focus is elsewhere");
+        });
+        let p = point_for_index(&editor, cx, 0, 5);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+
+        let ctx = raised.borrow().first().expect("the menu opened").1;
+        assert_eq!(menu_ids(ctx), vec!["bold", "italic"], "{ctx:?}");
+        cx.update(|window, app| {
+            assert!(
+                editor.read(app).focus_handle.is_focused(window),
+                "the press focused the editor, so the row it opens can reach it",
+            );
+        });
+    }
+
+    /// An ordered list offers Renumber List; a fenced code block that
+    /// happens to hold numbers does not — `renumber_block` skips fence
+    /// bodies, and the menu asks it rather than guessing.
+    #[gpui::test]
+    fn an_ordered_list_offers_renumber_but_a_fence_does_not(cx: &mut TestAppContext) {
+        let doc = "1. one\n1. two\n\n```\n1. not a list\n```\n";
+        let (_fx, editor, cx) = open_editor(cx, "list.md", doc);
+        let raised = menu_sink(cx, &editor);
+
+        caret_and_draw(&editor, cx, 3);
+        let p = point_for_index(&editor, cx, 0, 3);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+        let ctx = raised.borrow().last().expect("the menu opened").1;
+        assert!(ctx.in_ordered_list, "{ctx:?}");
+        assert!(menu_ids(ctx).contains(&"renumber_list"), "{:?}", menu_ids(ctx));
+
+        // Inside the fence: numbers there are the user's literal text.
+        let inside = doc.find("not a list").unwrap();
+        caret_and_draw(&editor, cx, inside);
+        let fence_line = cx.update(|_, app| editor.read(app).core.buffer.line_of_byte(inside));
+        let p = point_for_index(&editor, cx, fence_line, 2);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+        let ctx = raised.borrow().last().expect("the menu opened").1;
+        assert!(!ctx.in_ordered_list, "a fence is not a list: {ctx:?}");
+        let ids = menu_ids(ctx);
+        assert!(!ids.contains(&"renumber_list"), "{ids:?}");
+        assert!(!ids.contains(&"table_insert_row"), "{ids:?}");
+    }
+
+    /// A code file takes none of these commands (`can_format()` is
+    /// false for every one of them), so no menu opens at all: an empty
+    /// overlay is worse than none.
+    #[gpui::test]
+    fn a_code_file_raises_no_menu(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "main.rs", "fn main() {}\n");
+        let raised = menu_sink(cx, &editor);
+        let p = point_for_index(&editor, cx, 0, 3);
+        cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+        assert!(raised.borrow().is_empty(), "a code file offers no editor commands");
+        cx.update(|_, app| {
+            let ctx = editor.read(app).menu_context(3);
+            assert!(menu_ids(ctx).is_empty(), "{ctx:?}");
+        });
+    }
+
     /// Following `[[drafts/secret]]` must never zero the file it names.
     /// `drafts/` is gitignored, so the scan never indexes it and the
     /// wiki target resolves to `None` — straight into the create branch,
@@ -5135,6 +6116,36 @@ mod tests {
         cx.update(|_, app| {
             let sel = editor.read(app).core.selection.range();
             assert!(!sel.is_empty(), "the drag must have selected text (got {sel:?})");
+        });
+    }
+
+    /// A browser treats a release outside the element as a cancelled
+    /// click, not a completed one -- so must this editor.
+    #[gpui::test]
+    fn a_release_outside_the_editor_cancels_the_pending_link(cx: &mut TestAppContext) {
+        let ws = knowledge_fixture(cx);
+        let note = ws.path().join("note.md");
+        std::fs::write(&note, "go [[Roadmap]] or here").unwrap();
+        let (_bk, editor, cx) = open_editor_path(cx, &note);
+        let opened = open_path_sink(cx, &editor);
+
+        // Display text is "go Roadmap or here": press inside the link.
+        let start = point_for_index(&editor, cx, 0, 4);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        editor.update(cx, |ed, _| {
+            assert!(ed.pending_link.is_some(), "precondition: the press is pending");
+        });
+
+        // The release lands well outside the editor's own bounds.
+        cx.simulate_mouse_up(point(px(-500.), px(-500.)), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            opened.borrow().is_empty(),
+            "a release outside the editor must not navigate: {opened:?}"
+        );
+        editor.update(cx, |ed, _| {
+            assert!(ed.pending_link.is_none(), "the press must be cancelled, not merely unactioned");
         });
     }
 
@@ -5392,9 +6403,10 @@ mod tests {
     /// through an injected transport, so no test touches the network.
     #[gpui::test]
     fn enabling_a_site_is_what_triggers_the_first_fetch(cx: &mut TestAppContext) {
-        let home = tempfile::tempdir().unwrap();
-        // Settings are written by the grant, so redirect HOME.
-        unsafe { std::env::set_var("HOME", home.path()) };
+        // Settings are written by the grant, so redirect HOME -- through
+        // the crate's one lock-guarded helper, since HOME is process-wide
+        // and another test file swapping it concurrently would race.
+        let _home = crate::workspace::tests::temp_home();
 
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let c = calls.clone();
@@ -5630,6 +6642,183 @@ mod tests {
         assert_eq!(buffer_text(&editor, cx), "let * = 1;");
     }
 
+    /// The single table block a text holds, exactly as the projection
+    /// scanner sees it -- the thing that decides whether a line renders
+    /// as part of the table or as a stray paragraph of pipes.
+    fn one_table(text: &str) -> String {
+        let blocks = crate::editor::blocks::blocks(text);
+        let tables: Vec<_> = blocks
+            .iter()
+            .filter(|b| b.kind == crate::editor::blocks::BlockKind::Table)
+            .collect();
+        assert_eq!(tables.len(), 1, "exactly one table block in {text:?}");
+        text[tables[0].range.clone()].to_string()
+    }
+
+    /// The most natural first use of a brand-new command is with the
+    /// cursor still in the header row. A row wedged between the header
+    /// and its separator drops the header out of the table entirely.
+    #[gpui::test]
+    fn insert_row_from_the_header_lands_below_the_separator(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "hdr.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(2); // inside the header cell "a"
+            cx.notify();
+        });
+        cx.dispatch_action(TableInsertRow);
+        let text = buffer_text(&editor, cx);
+        let table = one_table(&text);
+        assert_eq!(table.lines().count(), 4, "header, separator and two body rows: {table:?}");
+        assert!(table.lines().next().unwrap().contains('a'), "the header is still row 0: {table:?}");
+        assert!(table_edit::rows(&table)[1].is_separator, "separator still row 1: {table:?}");
+        // The cursor follows the new row, so typing lands in it.
+        cx.simulate_input("x");
+        let text = buffer_text(&editor, cx);
+        assert!(text.lines().nth(2).unwrap().contains('x'), "typed into the new row: {text:?}");
+        assert!(
+            crate::editor::blocks::is_separator_row(text.lines().nth(1).unwrap()),
+            "not into the separator: {text:?}"
+        );
+    }
+
+    /// The commands insert next to the *cursor*. Nothing else in the
+    /// suite pins that down: an insert hard-wired to the top of the
+    /// table passes every other table test.
+    #[gpui::test]
+    fn table_inserts_land_at_the_cursor(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n";
+
+        // A row, from the last body row: the new row goes below it.
+        let (_fx, editor, cx) = open_editor(cx, "ins.md", doc);
+        let at = doc.find('3').unwrap();
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(at));
+        cx.dispatch_action(TableInsertRow);
+        cx.simulate_input("z");
+        let text = buffer_text(&editor, cx);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[3].contains('3'), "the row below the cursor is still row 3: {text:?}");
+        assert!(lines[4].contains('z'), "the new row is row 4: {text:?}");
+
+        // A column, from the second column: the new column goes right.
+        let (_fx, editor, cx) = open_editor(cx, "ins2.md", doc);
+        let at = doc.find('b').unwrap();
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(at));
+        cx.dispatch_action(TableInsertColumn);
+        cx.simulate_input("z");
+        let text = buffer_text(&editor, cx);
+        assert_eq!(
+            text.lines().next().unwrap().replace(' ', ""),
+            "|a|b|z|",
+            "the new column follows the cursor's own: {text:?}"
+        );
+    }
+
+    /// The other three commands, from the header and from the separator
+    /// line: each must leave something the scanner still reads as one
+    /// whole table.
+    #[gpui::test]
+    fn table_commands_from_header_and_separator_keep_the_table_whole(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let sep_cell = doc.find("---").unwrap();
+
+        // Delete Row from the header: the header is structure too.
+        let (_fx, editor, cx) = open_editor(cx, "t1.md", doc);
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(2));
+        cx.dispatch_action(TableDeleteRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "the header cannot be deleted away");
+        // ... and from the separator, as before.
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(sep_cell));
+        cx.dispatch_action(TableDeleteRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "nor the separator");
+
+        // Insert Row from the separator line: the new row is the first
+        // body row, and the separator keeps its place.
+        let (_fx, editor, cx) = open_editor(cx, "t2.md", doc);
+        editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(sep_cell));
+        cx.dispatch_action(TableInsertRow);
+        let text = buffer_text(&editor, cx);
+        let table = one_table(&text);
+        assert_eq!(table.lines().count(), 4, "{table:?}");
+        assert!(table_edit::rows(&table)[1].is_separator, "{table:?}");
+
+        // Insert Column, from the header and from the separator.
+        for (name, at) in [("t3.md", 2), ("t4.md", sep_cell)] {
+            let (_fx, editor, cx) = open_editor(cx, name, doc);
+            editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(at));
+            cx.dispatch_action(TableInsertColumn);
+            let text = buffer_text(&editor, cx);
+            let table = one_table(&text);
+            assert_eq!(table.lines().count(), 3, "{table:?}");
+            for line in table.lines() {
+                assert_eq!(line.matches('|').count(), 4, "three cells now: {line:?}");
+            }
+            assert!(table_edit::rows(&table)[1].is_separator, "{table:?}");
+        }
+
+        // Delete Column, from the header and from the separator.
+        for (name, at) in [("t5.md", 2), ("t6.md", sep_cell)] {
+            let (_fx, editor, cx) = open_editor(cx, name, doc);
+            editor.update_in(cx, |ed, _, cx| ed.core.set_cursor(at));
+            cx.dispatch_action(TableDeleteColumn);
+            let text = buffer_text(&editor, cx);
+            let table = one_table(&text);
+            assert_eq!(table.lines().count(), 3, "{table:?}");
+            for line in table.lines() {
+                assert_eq!(line.matches('|').count(), 2, "one cell left: {line:?}");
+            }
+            assert!(table_edit::rows(&table)[1].is_separator, "{table:?}");
+        }
+    }
+
+    #[gpui::test]
+    fn table_command_on_a_pipe_line_in_a_code_file_is_a_no_op(cx: &mut TestAppContext) {
+        // rustfmt's own style puts a leading `|` on an or-pattern arm —
+        // this must never be mistaken for a markdown table row just
+        // because the line starts with `|`.
+        let doc = "match x {\n    Foo::A\n    | Foo::B => 1,\n    _ => 0,\n}\n";
+        let (_fx, editor, cx) = open_editor(cx, "match.rs", doc);
+        let pipe_line_start = doc.find("| Foo::B").unwrap();
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(pipe_line_start + 2); // inside "| Foo::B => 1,"
+            cx.notify();
+        });
+        cx.dispatch_action(TableInsertRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "not a table — the code is untouched");
+        cx.dispatch_action(TableDeleteRow);
+        assert_eq!(buffer_text(&editor, cx), doc);
+        cx.dispatch_action(TableInsertColumn);
+        assert_eq!(buffer_text(&editor, cx), doc);
+        cx.dispatch_action(TableDeleteColumn);
+        assert_eq!(buffer_text(&editor, cx), doc);
+    }
+
+    #[gpui::test]
+    fn table_command_under_diff_view_leaves_the_buffer_untouched(cx: &mut TestAppContext) {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        let file = repo.path().join("table.md");
+        let doc = "| a | b |\n| - | - |\n| 1 | 2 |\n";
+        std::fs::write(&file, doc).unwrap();
+        commit_all(repo.path());
+
+        let (_bk, editor, cx) = open_editor_path(cx, &file);
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(3); // inside "a", real buffer's selection
+            cx.notify();
+        });
+        cx.dispatch_action(TableInsertRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "the real buffer is read-only under a diff");
+        cx.update(|_, app| {
+            assert!(editor.read(app).diff.is_some(), "still in diff mode");
+        });
+    }
+
     #[gpui::test]
     fn tab_hops_table_cells_aligning_and_appending_rows(cx: &mut TestAppContext) {
         let doc = "| h1 | h2 |\n|---|---|\n| a | bbbb |";
@@ -5664,6 +6853,172 @@ mod tests {
         // One undo drops the appended row (single group per press).
         cx.dispatch_action(Undo);
         assert_eq!(buffer_text(&editor, cx), aligned);
+    }
+
+    /// Numbers inside a fenced code block are the user's literal text.
+    /// Enter-continuation in the list *around* a fence must not reach
+    /// inside it -- the file on disk is the source of truth, and this
+    /// rewrote lines the user never touched, with no indication.
+    #[gpui::test]
+    fn enter_in_a_list_does_not_renumber_inside_a_fence(cx: &mut TestAppContext) {
+        let doc = "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n2. Done\n";
+        let (_fx, editor, cx) = open_editor(cx, "fence.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(doc.find('\n').unwrap()); // end of "1. Steps:"
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "1. Steps:\n2. \n   ```text\n   1. alpha\n   1. beta\n   ```\n3. Done\n",
+            "the fence body is byte-for-byte what the user wrote"
+        );
+    }
+
+    /// Same for the explicit command, which renumbers without inserting.
+    #[gpui::test]
+    fn the_renumber_command_does_not_renumber_inside_a_fence(cx: &mut TestAppContext) {
+        let doc = "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n1. Done\n";
+        let (_fx, editor, cx) = open_editor(cx, "fence2.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(3); // inside "Steps:"
+            cx.notify();
+        });
+        cx.dispatch_action(RenumberList);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n2. Done\n",
+            "only the outer list renumbers"
+        );
+    }
+
+    #[gpui::test]
+    fn enter_continuation_renumber_is_one_undo(cx: &mut TestAppContext) {
+        let doc = "1. one\n2. two\n";
+        let (_fx, editor, cx) = open_editor(cx, "list.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(6); // right after "one"
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "1. one\n2. \n3. two\n", "the run renumbers");
+        cx.dispatch_action(Undo);
+        assert_eq!(buffer_text(&editor, cx), doc, "one Enter costs exactly one Undo");
+    }
+
+    /// The explicit command is its own undo step. It shares its helper
+    /// with Enter-continuation, which deliberately coalesces into the
+    /// Enter's group -- so without its own break, Renumber List
+    /// coalesces into whatever typing is still in the window and one
+    /// Undo takes the user's words with it.
+    #[gpui::test]
+    fn the_renumber_command_is_its_own_undo_step(cx: &mut TestAppContext) {
+        let doc = "1. one\n1. two\n";
+        let (_fx, editor, cx) = open_editor(cx, "cmd.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(6); // right after "one"
+            cx.notify();
+        });
+        cx.simulate_input("!");
+        assert_eq!(buffer_text(&editor, cx), "1. one!\n1. two\n");
+        cx.dispatch_action(RenumberList);
+        assert_eq!(buffer_text(&editor, cx), "1. one!\n2. two\n", "the run renumbers");
+        cx.dispatch_action(Undo);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "1. one!\n1. two\n",
+            "one Undo takes the renumber and leaves the typing"
+        );
+    }
+
+    /// Redo has to put the cursor back where the edit left it. The
+    /// renumber's replacement is not where the user is typing, so
+    /// redoing an Enter threw the cursor to the end of the document.
+    #[gpui::test]
+    fn redo_of_an_ordered_list_enter_restores_the_cursor(cx: &mut TestAppContext) {
+        let doc = "1. one\n2. two\n";
+        let (_fx, editor, cx) = open_editor(cx, "redo.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(6); // right after "one"
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        let landed = head(&editor, cx);
+        assert_eq!(landed, 10, "after the new \"2. \" marker");
+        cx.dispatch_action(Undo);
+        cx.dispatch_action(Redo);
+        assert_eq!(buffer_text(&editor, cx), "1. one\n2. \n3. two\n");
+        assert_eq!(head(&editor, cx), landed, "redo puts the cursor back, not at the end");
+    }
+
+    /// And the renumber rewrites the list, not the file: an Enter in a
+    /// three-line list inside a long document must not push an undo
+    /// entry holding two whole copies of it.
+    #[gpui::test]
+    fn the_renumber_edit_is_scoped_to_the_list(cx: &mut TestAppContext) {
+        let filler = "lorem ipsum dolor sit amet\n\n".repeat(200);
+        let doc = format!("{filler}1. one\n2. two\n");
+        let (_fx, editor, cx) = open_editor(cx, "big.md", &doc);
+        let at = doc.find("1. one").unwrap() + 6;
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(at);
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        let bytes = cx.update(|_, app| editor.read(app).core.last_group_bytes());
+        assert!(
+            bytes < doc.len(),
+            "the undo entry is the list, not the document: {bytes} vs {}",
+            doc.len()
+        );
+    }
+
+    /// The opposite side of the same bug: typing right up against the
+    /// Enter (no pause, no separate group of its own) must not let the
+    /// renumber's coalesced group reach back and undo the typing too.
+    #[gpui::test]
+    fn enter_continuation_renumber_does_not_undo_prior_typing(cx: &mut TestAppContext) {
+        let doc = "1. one\n2. two\n";
+        let (_fx, editor, cx) = open_editor(cx, "list.md", doc);
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.set_cursor(6); // right after "one"
+            cx.notify();
+        });
+        cx.simulate_input("!!!");
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "1. one!!!\n2. \n3. two\n", "the run renumbers");
+        cx.dispatch_action(Undo);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "1. one!!!\n2. two\n",
+            "the typing survives — only the Enter and its renumber are undone"
+        );
+    }
+
+    /// A third side of the same bug: Enter *replacing a selection*
+    /// (not just continuing after a collapsed cursor) must also start
+    /// its own undo group, or it coalesces with whatever typing is
+    /// still in its coalescing window. The selection is set directly
+    /// (not via the `SelectAll` action, whose own handler already
+    /// calls `break_undo_group()` and would mask the gap this covers)
+    /// so this exercises exactly the fallthrough path `newline()` takes
+    /// when the selection isn't a collapsed cursor.
+    #[gpui::test]
+    fn enter_replacing_a_selection_does_not_undo_prior_typing(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "note.md", "");
+        cx.simulate_input("hello");
+        editor.update_in(cx, |ed, _, cx| {
+            ed.core.selection = Selection { anchor: 0, head: 5 };
+            cx.notify();
+        });
+        cx.dispatch_action(Newline);
+        assert_eq!(buffer_text(&editor, cx), "\n");
+        cx.dispatch_action(Undo);
+        assert_eq!(
+            buffer_text(&editor, cx),
+            "hello",
+            "the typed text survives — Enter alone is undone, not the whole document"
+        );
     }
 
     #[gpui::test]

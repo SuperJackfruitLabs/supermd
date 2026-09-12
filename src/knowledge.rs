@@ -70,9 +70,21 @@ pub struct Index {
     notes: BTreeMap<PathBuf, NoteData>,
 }
 
-/// The workspace's shared index. Absent until a folder is open.
+/// One workspace's index, shared between the workspace entity and the
+/// editors and readers it owns. Every window has its own; the handle is
+/// created once per workspace and its *contents* are replaced when the
+/// folder changes, so anything holding a clone stays current.
+pub type KnowledgeHandle = std::sync::Arc<std::sync::Mutex<Index>>;
+
+/// Test-only carrier for a [`KnowledgeHandle`]: the editor and reader
+/// test helpers install one so they can hand an editor the same handle
+/// a workspace would. **Never a production global** -- the index is
+/// per-workspace state (`Workspace::knowledge`), and a process-wide one
+/// is exactly the bug that made a second window show the first
+/// window's backlinks. The `cfg(test)` gate is what keeps it that way.
+#[cfg(test)]
 #[derive(Clone)]
-pub struct KnowledgeState(pub std::sync::Arc<std::sync::Mutex<Index>>);
+pub struct KnowledgeState(pub KnowledgeHandle);
 /// GitHub's heading slug: alphanumerics lowercased, spaces and hyphens
 /// become hyphens, everything else is dropped. Must match the `toc`
 /// plugin's `slug`, since that is what writes the anchors people click.
@@ -119,6 +131,7 @@ pub fn heading_offset(text: &str, anchor: &str) -> Option<usize> {
     None
 }
 
+#[cfg(test)]
 impl gpui::Global for KnowledgeState {}
 
 /// Extract wiki + markdown links. Fenced code blocks and inline code
@@ -326,24 +339,109 @@ fn stem_of(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// Which of `files` (every real, non-symlink file the workspace walk
+/// found) name an inode with a link the walk never reached -- i.e.
+/// `nlink`, the inode's *total* link count, exceeds how many of these
+/// paths share that inode. `ln ~/.ssh/id_rsa ws/leak.md` has no symlink
+/// for `is_symlink()` to catch, but reads the exact same bytes as a
+/// file outside the workspace, so it is excluded here.
+///
+/// Comparing counts rather than testing `nlink() > 1` alone is what
+/// keeps this exact instead of merely cautious: a user who names one
+/// note twice (`ln Roadmap.md Alias.md`), or whose vault sits inside a
+/// `cp -al` style backup tree, has in-workspace files with `nlink > 1`
+/// too. Flagging on `nlink` alone would drop those from the index with
+/// no error -- no backlinks, no wiki-completion, silently -- which is
+/// worse than the vector this closes, since git cannot carry a
+/// hardlink across a clone in the first place. Every link this walk
+/// observed is accounted for; only a link it *didn't* see (because it
+/// lives outside `root`) makes the count come up short.
+#[cfg(unix)]
+fn hardlinked_outside_the_workspace(files: &[PathBuf]) -> std::collections::HashSet<PathBuf> {
+    use std::collections::HashMap;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut by_inode: HashMap<(u64, u64), (u64, usize)> = HashMap::new();
+    let mut inode_of: Vec<(&PathBuf, (u64, u64))> = Vec::with_capacity(files.len());
+    for path in files {
+        let Ok(meta) = std::fs::metadata(path) else { continue };
+        let key = (meta.dev(), meta.ino());
+        by_inode.entry(key).or_insert((meta.nlink(), 0)).1 += 1;
+        inode_of.push((path, key));
+    }
+    inode_of
+        .into_iter()
+        .filter_map(|(path, key)| {
+            let (nlink, observed) = by_inode[&key];
+            (observed < nlink as usize).then(|| path.clone())
+        })
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn hardlinked_outside_the_workspace(_files: &[PathBuf]) -> std::collections::HashSet<PathBuf> {
+    std::collections::HashSet::new()
+}
+
+/// The same rule, asked about one path instead of a whole walk: does
+/// `path` name an inode with a link outside `root`?
+///
+/// `Index::scan` can only answer this after its walk, so the watcher --
+/// which sees files created *after* the scan, hardlinks included -- had
+/// no way to apply it and admitted them. Cheap in the ordinary case
+/// (one link, no walk); a file with several links costs one workspace
+/// walk, which a notes vault essentially never pays.
+pub fn escapes_via_hardlink(root: &Path, path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        if meta.nlink() <= 1 {
+            return false;
+        }
+        let files: Vec<PathBuf> = crate::files::workspace_walk(root)
+            .flatten()
+            .filter(|item| item.file_type().is_some_and(|t| t.is_file()))
+            .map(|item| item.path().to_path_buf())
+            .collect();
+        hardlinked_outside_the_workspace(&files).contains(path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, path);
+        false
+    }
+}
+
 impl Index {
     /// Scan every markdown file under `root`.
     pub fn scan(root: &Path) -> Self {
         let mut index = Index { root: root.to_path_buf(), notes: BTreeMap::new() };
-        for item in crate::files::workspace_walk(root).flatten() {
-            // Only real files that live under `root` may be indexed. A
-            // symlink inside the workspace can point anywhere on disk and
-            // `read_to_string` would follow it, so `<root>/leak.md ->
-            // ~/.ssh/id_rsa` would otherwise be indexed under an in-root
-            // path — and every lookup answers from the index before any
-            // escape guard runs. The walker does not follow links
-            // (`follow_links(false)`), so a symlink arrives here as an
-            // entry of its own with `is_symlink()` set; dropping it is
-            // what makes the in-index short-circuit in `resolve` safe.
-            if !item.file_type().is_some_and(|t| t.is_file()) {
+        // Only real files that live under `root` may be indexed. A
+        // symlink inside the workspace can point anywhere on disk and
+        // `read_to_string` would follow it, so `<root>/leak.md ->
+        // ~/.ssh/id_rsa` would otherwise be indexed under an in-root
+        // path — and every lookup answers from the index before any
+        // escape guard runs. The walker does not follow links
+        // (`follow_links(false)`), so a symlink arrives here as an
+        // entry of its own with `is_symlink()` set; dropping it is
+        // what makes the in-index short-circuit in `resolve` safe.
+        let files: Vec<PathBuf> = crate::files::workspace_walk(root)
+            .flatten()
+            .filter(|item| item.file_type().is_some_and(|t| t.is_file()))
+            .map(|item| item.path().to_path_buf())
+            .collect();
+        // A hardlink is not a symlink -- the filter above never sees
+        // it -- but deciding whether one escapes the workspace needs
+        // every path the walk found, so it can't run until the walk
+        // above has finished.
+        let excluded = hardlinked_outside_the_workspace(&files);
+        for path in &files {
+            if excluded.contains(path) {
                 continue;
             }
-            let path = item.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Ok(text) = std::fs::read_to_string(path) {
                     index.update_file(path, &text);
@@ -968,6 +1066,77 @@ mod tests {
         assert_eq!(
             index.resolve(&root.join("note.md"), &wiki), None,
             "a wiki link to a symlinked note must not resolve"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hardlinked_markdown_file_is_not_indexed() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&outside, "secret").unwrap();
+        // `ln outside.md ws/leak.md`: no symlink at all, so the
+        // walker's `is_symlink()` filter never sees it, and
+        // `read_to_string` reads the *same inode* as the file outside
+        // the workspace -- git cannot carry this (hardlinks do not
+        // survive a clone), but the property claimed is that nothing
+        // outside the workspace is read.
+        let leak = root.join("leak.md");
+        std::fs::hard_link(&outside, &leak).unwrap();
+        assert!(
+            std::fs::metadata(&leak).unwrap().nlink() > 1,
+            "precondition: the walked path really is a hardlink"
+        );
+        let index = Index::scan(&root);
+        assert!(
+            !index.notes.contains_key(&leak),
+            "a hardlinked note must never enter the index"
+        );
+    }
+
+    /// The failure mode `nlink() > 1` alone would cause: a note
+    /// hardlinked to another name *inside* the workspace (two note
+    /// titles for the same file, or a `cp -al` style backup of the
+    /// vault) must stay indexed. Every one of its links was seen by
+    /// this walk, so nothing outside the workspace is implicated.
+    #[cfg(unix)]
+    #[test]
+    fn a_hardlink_entirely_inside_the_workspace_stays_indexed() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Ideas.md"), "see [[Roadmap]] often\n").unwrap();
+        let original = root.join("Roadmap.md");
+        std::fs::write(&original, "the plan\n").unwrap();
+        // `ln Roadmap.md Alias.md`: same inode, two names, both inside
+        // the workspace this walk already covers in full.
+        let alias = root.join("Alias.md");
+        std::fs::hard_link(&original, &alias).unwrap();
+        assert!(
+            std::fs::metadata(&alias).unwrap().nlink() > 1,
+            "precondition: the two paths really do share an inode"
+        );
+
+        let index = Index::scan(&root);
+        assert!(
+            index.notes.contains_key(&original),
+            "an in-workspace hardlink target must stay indexed"
+        );
+        assert!(
+            index.notes.contains_key(&alias),
+            "and so must the alias sharing its inode -- every link landed inside the workspace"
+        );
+        let back = index.backlinks(&original);
+        assert!(
+            back.iter().any(|(p, _)| p.ends_with("Ideas.md")),
+            "backlinks must still resolve through it: {back:?}"
         );
     }
 

@@ -148,8 +148,31 @@ commands! {
     // ── File ───────────────────────────────────────────────────────────
     ws::NewFile => { id: "new_file", label: "New File", keys: ["cmd-n"],
         ctx: None, menu: Some((File, 0)), help: Some(General) },
+    // ⌘⇧N is also New Folder Here while the sidebar has focus. The two
+    // bindings tie on context depth — gpui scores a context-free
+    // binding at the depth of the *deepest* context, so "Sidebar" does
+    // not outrank "no context" — and the tie is broken by declaration
+    // order, later wins. `SidebarNewFolder` is declared further down
+    // this table, which is the only reason the sidebar binding is still
+    // reachable. `new_window_yields_cmd_shift_n_to_a_focused_sidebar`
+    // asserts both halves; do not reorder without re-running it.
+    //
+    // It also holds only while "Sidebar" is the *deepest* key_context
+    // under sidebar focus. Nest another `key_context` anywhere in the
+    // sidebar subtree -- "SidebarEdit" already does exactly that while
+    // a row is being renamed -- and `depth_of("Sidebar")` drops below
+    // `contexts.len()`, the context-free binding outranks it outright,
+    // and declaration order cannot save it. A new context in that
+    // subtree needs its own ⌘⇧N binding, or this one moves.
+    ws::NewWindow => { id: "new_window", label: "New Window",
+        keys: ["cmd-shift-n"], ctx: None, menu: Some((File, 0)), help: Some(General) },
     ws::OpenDialog => { id: "open", label: "Open…", keys: ["cmd-o"],
         ctx: None, menu: Some((File, 0)), help: Some(General) },
+    // No keystroke, so no ⌘/ row (`help_sections` lists only commands
+    // with a key) -- `help: None`, like every other keyless command.
+    ws::OpenFolderInNewWindow => { id: "open_folder_new_window",
+        label: "Open Folder in New Window…", keys: [],
+        ctx: None, menu: Some((File, 0)), help: None },
     ed::SaveNow => { id: "save", label: "Save Now", keys: ["cmd-s"],
         ctx: Some("Editor"), menu: Some((File, 1)), help: Some(General) },
     ws::CloseTab => { id: "close_tab", label: "Close Tab", keys: ["cmd-w"],
@@ -200,8 +223,12 @@ commands! {
         ctx: None, menu: Some((Go, 2)), help: Some(General) },
 
     // ── Tools ──────────────────────────────────────────────────────────
+    // Declared here (with the graph's own commands) but shown in Go,
+    // after Back/Forward -- hence group 3, not group 0: `menus` emits a
+    // separator when the group changes as it walks *declaration* order,
+    // so the number has to agree with where the entry actually lands.
     ws::ToggleGraph => { id: "graph", label: "Graph View", keys: ["cmd-shift-g"],
-        ctx: None, menu: Some((Go, 0)), help: Some(General) },
+        ctx: None, menu: Some((Go, 3)), help: Some(General) },
     ws::GraphFit => { id: "graph_fit", label: "Fit Graph to Window",
         keys: ["cmd-0"], ctx: Some("GraphView"), menu: None, help: Some(General) },
     ws::GraphColorBy => { id: "graph_color_by", label: "Graph Colour: Folder / Tag / None",
@@ -233,6 +260,12 @@ commands! {
         keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
     ws::ReloadPlugins => { id: "reload_plugins", label: "Reload Plugins",
         keys: [], ctx: None, menu: Some((Tools, 1)), help: None },
+    // No keystroke: reached from the offer banner after the third
+    // Markdown file, or here for anyone who said no and changed their
+    // mind.
+    ws::MakeDefaultMarkdownApp => { id: "make_default_app",
+        label: "Use SuperMD for Markdown Files", keys: [],
+        ctx: None, menu: Some((Tools, 4)), help: None },
 
     // ── Help ───────────────────────────────────────────────────────────
     ws::ToggleShortcuts => { id: "shortcuts", label: "Keyboard Shortcuts",
@@ -269,6 +302,10 @@ commands! {
     ed::FindPrev => { id: "find_prev", label: "Find Previous",
         keys: ["cmd-shift-g"], ctx: Some("Editor"), menu: Some((Edit, 2)),
         help: Some(HEditor) },
+    ed::ReplaceNext => { id: "replace_next", label: "Replace",
+        keys: ["cmd-alt-e"], ctx: Some("Editor"), menu: Some((Edit, 6)), help: Some(HEditor) },
+    ed::ReplaceAll => { id: "replace_all", label: "Replace All",
+        keys: ["cmd-alt-shift-e"], ctx: Some("Editor"), menu: Some((Edit, 7)), help: Some(HEditor) },
 
     // ── Format ─────────────────────────────────────────────────────────
     ed::ToggleBold => { id: "bold", label: "Bold", keys: ["cmd-b"],
@@ -285,6 +322,16 @@ commands! {
         ctx: Some("Editor"), menu: Some((Format, 1)), help: None },
     ed::ToggleQuote => { id: "quote", label: "Quote", keys: [],
         ctx: Some("Editor"), menu: Some((Format, 1)), help: None },
+    ed::TableInsertRow => { id: "table_insert_row", label: "Insert Row Below",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 8)), help: Some(HEditor) },
+    ed::TableDeleteRow => { id: "table_delete_row", label: "Delete Row",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 9)), help: Some(HEditor) },
+    ed::TableInsertColumn => { id: "table_insert_column", label: "Insert Column Right",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 10)), help: Some(HEditor) },
+    ed::TableDeleteColumn => { id: "table_delete_column", label: "Delete Column",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 11)), help: Some(HEditor) },
+    ed::RenumberList => { id: "renumber_list", label: "Renumber List",
+        keys: [], ctx: Some("Editor"), menu: Some((Format, 12)), help: Some(HEditor) },
 
     // ── Sidebar (context-scoped; no menu placement) ────────────────────
     ws::SidebarNewFile => { id: "sidebar_new_file", label: "New File Here",
@@ -297,6 +344,10 @@ commands! {
         keys: ["cmd-backspace"], ctx: Some("Sidebar"), menu: None, help: Some(HSidebar) },
     ws::SidebarMoveTo => { id: "sidebar_move", label: "Move to Folder…",
         keys: ["cmd-shift-m"], ctx: Some("Sidebar"), menu: None, help: Some(HSidebar) },
+    ws::RevealInFinder => { id: "reveal_in_finder", label: "Reveal in Finder",
+        keys: [], ctx: Some("Sidebar"), menu: None, help: None },
+    ws::CopyPath => { id: "copy_path", label: "Copy Path",
+        keys: [], ctx: Some("Sidebar"), menu: None, help: None },
 
     // ── Reader (context-scoped) ────────────────────────────────────────
     rd::ScrollUp => { id: "reader_up", label: "Scroll Up", keys: ["up"],
@@ -366,15 +417,33 @@ pub fn menu_title(id: MenuId) -> &'static str {
     }
 }
 
-/// Commands in one menu, in declaration order — which the table keeps
-/// grouped, so group indices come out ascending.
-pub fn items_for(id: MenuId) -> Vec<&'static Command> {
+/// Platform-independent core of `items_for` (testable everywhere):
+/// About is filtered out here when it lives in the app menu instead,
+/// and `make_default_app` is filtered out wherever there is no
+/// Markdown-default-handler concept to reach for -- it would otherwise
+/// sit in the Tools menu as a dead command that always answers "not
+/// supported".
+fn items_for_platform(
+    id: MenuId,
+    about_in_app_menu: bool,
+    has_markdown_handler: bool,
+) -> Vec<&'static Command> {
     COMMANDS
         .iter()
         .filter(|c| matches!(c.menu, Some((m, _)) if m == id))
-        // About is a macOS app-menu item there, and a Help item elsewhere.
-        .filter(|c| !(c.id == "about" && crate::platform::ABOUT_IN_APP_MENU))
+        .filter(|c| !(c.id == "about" && about_in_app_menu))
+        .filter(|c| !(c.id == "make_default_app" && !has_markdown_handler))
         .collect()
+}
+
+/// Commands in one menu, in declaration order — which the table keeps
+/// grouped, so group indices come out ascending.
+pub fn items_for(id: MenuId) -> Vec<&'static Command> {
+    items_for_platform(
+        id,
+        crate::platform::ABOUT_IN_APP_MENU,
+        crate::platform::HAS_MARKDOWN_DEFAULT_HANDLER,
+    )
 }
 
 /// The About command, for the macOS app menu.
@@ -532,6 +601,39 @@ mod tests {
         assert_eq!(bindings().len(), total, "one binding per declared key");
     }
 
+    /// A context-scoped binding does NOT outrank a context-free one on
+    /// the same keystroke: gpui scores a binding with no context at the
+    /// depth of the *deepest* context in the dispatch path, so the two
+    /// tie and the tie is broken by the order they were added — later
+    /// wins, and that order is this table's order. ⌘⇧N is both New
+    /// Window (global) and New Folder Here (Sidebar); the sidebar only
+    /// keeps it because it is declared further down.
+    ///
+    /// This is the same class of bug that made ⌘⇧G unreachable, and
+    /// `no_two_commands_claim_one_key_in_the_same_context` cannot see
+    /// it, because the contexts differ.
+    #[test]
+    fn a_scoped_command_sharing_a_key_with_a_global_one_is_declared_later() {
+        for (ix, scoped) in COMMANDS.iter().enumerate() {
+            let Some(ctx) = scoped.context else { continue };
+            for key in scoped.keys {
+                if let Some((jx, global)) = COMMANDS
+                    .iter()
+                    .enumerate()
+                    .find(|(_, c)| c.context.is_none() && c.keys.contains(key))
+                {
+                    assert!(
+                        jx < ix,
+                        "{} ({ctx}) shares {key:?} with the global {} but is declared \
+                         first, so the global shadows it",
+                        scoped.id,
+                        global.id
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn no_two_commands_claim_one_key_in_the_same_context() {
         let mut seen: Vec<(&str, Option<&str>)> = Vec::new();
@@ -590,12 +692,45 @@ mod tests {
 
     #[test]
     fn items_for_a_menu_come_back_in_group_order() {
-        let view = items_for(MenuId::View);
-        assert!(!view.is_empty(), "the View menu has entries");
-        let groups: Vec<u8> = view.iter().map(|c| c.menu.unwrap().1).collect();
-        let mut sorted = groups.clone();
-        sorted.sort_unstable();
-        assert_eq!(groups, sorted, "entries are grouped in order");
+        // Every menu, not just View: `menus` emits a separator whenever
+        // the group changes as it walks declaration order, so a command
+        // declared out of group order scatters separators through the
+        // menu it lands in.
+        for id in MENU_ORDER {
+            let cmds = items_for(id);
+            let groups: Vec<u8> = cmds.iter().map(|c| c.menu.unwrap().1).collect();
+            let mut sorted = groups.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                groups,
+                sorted,
+                "{:?} entries are declared in group order: {:?}",
+                id,
+                cmds.iter().map(|c| c.id).collect::<Vec<_>>()
+            );
+        }
+        assert!(!items_for(MenuId::View).is_empty(), "the View menu has entries");
+    }
+
+    /// SuperMD can only ever be a LaunchServices default handler on
+    /// macOS; showing this elsewhere would be a dead menu item that
+    /// always answers "not supported". Exercised on the platform-
+    /// independent core so both branches are checked on any host,
+    /// not only whichever OS happens to run this test.
+    #[test]
+    fn make_default_app_only_appears_when_the_platform_has_a_handler() {
+        let with = items_for_platform(MenuId::Tools, true, true);
+        assert!(with.iter().any(|c| c.id == "make_default_app"), "present when the platform has one");
+        let without = items_for_platform(MenuId::Tools, true, false);
+        assert!(!without.iter().any(|c| c.id == "make_default_app"), "absent otherwise");
+    }
+
+    /// And the real, wired-up `items_for` agrees with whatever this
+    /// host actually is.
+    #[test]
+    fn make_default_app_is_macos_only() {
+        let present = items_for(MenuId::Tools).iter().any(|c| c.id == "make_default_app");
+        assert_eq!(present, crate::platform::MACOS, "needs a handler concept to reach");
     }
 
     #[test]
@@ -743,11 +878,26 @@ mod tests {
     /// but no user can find it. This is the property the old
     /// `assert_eq!(bindings.len(), N)` counter could never express — it
     /// stayed green while 44 bindings moved and three panels rebound.
+    ///
+    /// A right-click menu counts too: `reveal_in_finder` and `copy_path`
+    /// are deliberately menu-only and keyless — the sidebar context
+    /// menu (`menus::items_for`) is their only surface, same as a menu
+    /// bar entry or a keystroke would be for anything else.
     #[test]
     fn every_command_is_reachable_from_some_surface() {
+        let in_a_context_menu = |id: &str| {
+            crate::menus::Surface::ALL
+                .iter()
+                .any(|s| {
+                    crate::menus::items_for(*s, crate::menus::EditorContext::permissive())
+                        .iter()
+                        .any(|i| i.id == id)
+                })
+        };
         let unreachable: Vec<&str> = COMMANDS
             .iter()
             .filter(|c| c.menu.is_none() && c.help.is_none() && c.keys.is_empty())
+            .filter(|c| !in_a_context_menu(c.id))
             .map(|c| c.id)
             .collect();
         assert!(unreachable.is_empty(), "unreachable commands: {unreachable:?}");

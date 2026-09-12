@@ -23,6 +23,8 @@ actions!(
     workspace,
     [
         NewFile,
+        NewWindow,
+        OpenFolderInNewWindow,
         OpenDialog,
         CloseTab,
         NextTab,
@@ -44,6 +46,7 @@ actions!(
         ToggleGraph,
         ToggleFlux,
         InstallPlugins,
+        MakeDefaultMarkdownApp,
         GraphDismiss,
         GraphFit,
         GraphColorBy,
@@ -61,6 +64,8 @@ actions!(
         SidebarNewFile,
         SidebarNewFolder,
         SidebarMoveTo,
+        RevealInFinder,
+        CopyPath,
         SidebarEditCommit,
         SidebarEditCancel,
         SidebarExpand,
@@ -89,6 +94,239 @@ actions!(
         NavigateForward,
     ]
 );
+
+/// Where the nth window of this session opens. A cascade, so a second
+/// window never lands exactly on top of the one that spawned it and
+/// look like nothing happened; it wraps after ten so a long session
+/// cannot walk windows off the bottom of the screen.
+pub fn cascade_origin(n: usize) -> (f32, f32) {
+    let step = (n % 10) as f32 * 24.0;
+    (100.0 + step, 60.0 + step)
+}
+
+/// How many windows this session has opened, for the cascade.
+static WINDOWS_OPENED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The window chrome every SuperMD window wears. One place, so the
+/// second window is the same window as the first.
+pub fn window_options() -> gpui::WindowOptions {
+    let n = WINDOWS_OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (x, y) = cascade_origin(n);
+    gpui::WindowOptions {
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some("SuperMD".into()),
+            // Client-side decorations: we draw the top bar, native
+            // traffic lights overlay it.
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(12.), px(10.))),
+        }),
+        window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
+            origin: gpui::point(px(x), px(y)),
+            size: gpui::size(px(1200.), px(800.)),
+        })),
+        // Linux: ask for client-side decorations; we draw our own
+        // window controls when the compositor grants them.
+        window_decorations: if cfg!(target_os = "linux") {
+            Some(gpui::WindowDecorations::Client)
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+}
+
+/// Open another window on `path` (None = an empty window with the
+/// welcome document). Each window builds its own `Workspace`, and so
+/// its own knowledge index, tabs, graph and plugin sandbox root: two
+/// vaults open at once never see each other's notes.
+pub fn open_in_new_window(
+    path: Option<PathBuf>,
+    cx: &mut App,
+) -> Option<gpui::WindowHandle<Workspace>> {
+    let handle = cx
+        .open_window(window_options(), move |_window, cx| {
+            cx.new(|cx| {
+                let mut workspace = Workspace::new(path, cx);
+                workspace.setup_watcher(cx);
+                workspace
+            })
+        })
+        .ok()?;
+    handle
+        .update(cx, |workspace, window, cx| {
+            crate::apply_system_appearance(window.appearance(), cx);
+            window
+                .observe_window_appearance(|window, cx| {
+                    crate::apply_system_appearance(window.appearance(), cx);
+                    window.refresh();
+                })
+                .detach();
+            window.focus(&workspace.focus_handle(cx));
+            cx.activate(true);
+        })
+        .ok();
+    Some(handle)
+}
+
+/// What to say when *Open Folder in New Window* opened fewer windows
+/// than the user chose folders. `None` when everything opened.
+///
+/// Pure, because the call site lives behind `cx.prompt_for_paths`,
+/// which the test platform does not implement -- the same reason
+/// `open_folders_in_new_windows` was split out of it.
+pub fn shortfall_message(opened: usize, wanted: usize) -> Option<String> {
+    match opened {
+        _ if opened >= wanted => None,
+        0 => Some("Could not open that folder in a new window".to_string()),
+        n => Some(format!("Opened {n} of {wanted} folders")),
+    }
+}
+
+/// One window per chosen folder. Anything that is not a directory is
+/// skipped rather than opened as a single-file window: this is the
+/// *folder* picker, and a file slipping through would give the new
+/// window no sidebar, no index and no sandbox root. Returns how many
+/// windows opened.
+pub fn open_folders_in_new_windows(paths: Vec<PathBuf>, cx: &mut App) -> usize {
+    paths
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .filter_map(|path| open_in_new_window(Some(path), cx))
+        .count()
+}
+
+/// Flush every dirty editor in every open window. The app-quit hook's
+/// whole job, extracted so it is a function with a test rather than a
+/// closure inside `main`.
+///
+/// Returns how many windows it flushed. With one window this used to
+/// be a single captured handle; a second window's unsaved edits must
+/// not be the price of ⌘Q.
+pub fn flush_all_windows(cx: &mut App) -> usize {
+    let mut flushed = 0;
+    for handle in cx.windows() {
+        let Some(handle) = handle.downcast::<Workspace>() else {
+            continue;
+        };
+        if handle
+            .update(cx, |workspace, _window, cx| workspace.flush_all(cx))
+            .is_ok()
+        {
+            flushed += 1;
+        }
+    }
+    flushed
+}
+
+/// Put a one-line plugin error in front of the user, in whichever
+/// window is in front. Returns whether a window took it.
+///
+/// The background plugin surfaces have no window of their own — inline
+/// rendering is drained by a process-level task — so `eprintln!` was
+/// the only report they made, and a Finder- or Dock-launched app sends
+/// that to Console.app where the plugin author who needs it never
+/// looks.
+pub fn report_plugin_error(message: String, cx: &mut App) -> bool {
+    let active = cx.active_window().into_iter();
+    for handle in active.chain(cx.windows()) {
+        let Some(handle) = handle.downcast::<Workspace>() else {
+            continue;
+        };
+        if handle
+            .update(cx, |workspace, _window, cx| {
+                workspace.show_command_error(message.clone(), cx)
+            })
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Hand one drained batch of external opens to a live window: the
+/// active one if it is a workspace, otherwise any surviving workspace
+/// window. Returns the batch back when *no* window could take it, so
+/// the caller requeues instead of dropping what it just drained.
+///
+/// Window-agnostic on purpose. This used to be a per-window task
+/// wired only to the window `main()` opened, which was fine while that
+/// was the only window there could be: once ⌘⇧N exists, closing the
+/// first window would have killed Finder opens, "Open With", and every
+/// `supermd://` link for the rest of the session.
+pub fn deliver_external_opens(
+    queued: Vec<crate::PendingOpen>,
+    cx: &mut App,
+) -> Option<Vec<crate::PendingOpen>> {
+    let mut paths = Vec::new();
+    let mut installs = Vec::new();
+    for item in &queued {
+        match item {
+            crate::PendingOpen::Path(p) => paths.push(p.clone()),
+            crate::PendingOpen::InstallPlugin(name) => installs.push(name.clone()),
+        }
+    }
+    // The window the user is looking at first; then any other, so a
+    // batch that arrives while nothing is focused still lands.
+    let active = cx.active_window().into_iter();
+    for handle in active.chain(cx.windows()) {
+        let Some(handle) = handle.downcast::<Workspace>() else {
+            continue;
+        };
+        let delivered = handle
+            .update(cx, |workspace, window, cx| {
+                if !paths.is_empty() {
+                    workspace.open_external_paths(std::mem::take(&mut paths), window, cx);
+                }
+                for name in std::mem::take(&mut installs) {
+                    workspace.request_plugin_install(name, window, cx);
+                }
+            })
+            .is_ok();
+        if delivered {
+            return None;
+        }
+    }
+    Some(queued)
+}
+
+/// Poll the shared open-event queue (fed by `on_open_urls`) and route
+/// each batch into a live window. App-level, and it never exits while
+/// the app is alive: windows come and go under it.
+pub fn watch_external_opens(
+    pending: std::sync::Arc<std::sync::Mutex<Vec<crate::PendingOpen>>>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            let queued: Vec<crate::PendingOpen> = {
+                let mut guard = pending.lock().unwrap_or_else(|e| e.into_inner());
+                std::mem::take(&mut *guard)
+            };
+            if queued.is_empty() {
+                continue;
+            }
+            // `cx.update` failing means the app itself is gone, which
+            // is the only reason to stop polling.
+            let Ok(undelivered) = cx.update(|cx| deliver_external_opens(queued, cx)) else {
+                break;
+            };
+            // No window took it (none open yet, or all closing): put it
+            // back at the front rather than losing a Finder open.
+            if let Some(batch) = undelivered {
+                let mut guard = pending.lock().unwrap_or_else(|e| e.into_inner());
+                let rest = std::mem::take(&mut *guard);
+                guard.extend(batch);
+                guard.extend(rest);
+            }
+        }
+    })
+    .detach();
+}
 
 /// The welcome tour must be editable (it promises clickable checkboxes),
 /// so it lives as a real file the user owns. Written once; never
@@ -120,15 +358,46 @@ pub fn repo_root_may_be_out_of_scope(workspace_root: &Path) -> bool {
     crate::bookmarks::needs_scope() && !workspace_root.join(".git").exists()
 }
 
-/// Persist a just-opened workspace root into the recents list.
-fn record_recent(root: &Path) {
+/// Persist a just-opened workspace root into the recents list. Returns
+/// a message when the on-disk settings could not be read: this
+/// function immediately saves over whatever it loaded, so a caller
+/// that can reach the user must surface the corruption here or lose
+/// the chance -- by the next line the preserved copy is the only
+/// record that anything was lost.
+/// Persist a single setting the user just changed, without clobbering
+/// whatever else has reached disk since launch.
+///
+/// `ThemeState.settings` is seeded once at startup and never refreshed,
+/// while recents, workspace bookmarks, plugin grants and net-domain
+/// grants are all read-modify-written straight against the file as the
+/// session runs. Saving the global back whole reverts every one of
+/// them -- and under the sandbox, dropping `recent_workspaces` drops
+/// the security-scoped bookmarks keyed off it, costing the user access
+/// to every folder opened this session.
+///
+/// So `edit` runs twice: once on the global, for the in-session readers
+/// of the field, and once on a copy loaded fresh from disk, which is
+/// the copy that gets saved. It must therefore set its field to an
+/// absolute value -- never flip one, or the two copies diverge.
+fn persist_setting(cx: &mut App, edit: impl Fn(&mut crate::settings::Settings)) {
+    edit(&mut cx.global_mut::<crate::theme::ThemeState>().settings);
     let dir = crate::settings::config_dir();
-    let mut settings = crate::settings::load(&dir);
+    let mut on_disk = crate::settings::load(&dir);
+    edit(&mut on_disk);
+    if let Err(err) = crate::settings::save(&dir, &on_disk) {
+        eprintln!("supermd: cannot save settings: {err}");
+    }
+}
+
+fn record_recent(root: &Path) -> Option<String> {
+    let dir = crate::settings::config_dir();
+    let (mut settings, corrupt) = crate::settings::load_reporting(&dir);
     let blob = crate::bookmarks::create(root);
     settings.note_workspace(root, blob);
     if let Err(err) = crate::settings::save(&dir, &settings) {
         eprintln!("supermd: cannot save settings: {err}");
     }
+    corrupt
 }
 
 /// How an editor tab presents its buffer.
@@ -188,8 +457,34 @@ pub(crate) fn preview_plan(preview: Option<usize>, existing_ix: Option<usize>) -
     }
 }
 
+/// The third Markdown file opened this session is the trigger for the
+/// "make SuperMD the default" offer -- not the first (an app demanding
+/// to be the default before it has been used is the behaviour people
+/// resent), and not every one after the third (a prompt that keeps
+/// reappearing before the user has even answered it is worse than one
+/// that waits). The caller only calls this once `default_handler_asked`
+/// is already known false; a fourth or later open is a no-op that
+/// leaves an already-open banner alone rather than reopening it.
+pub(crate) fn should_offer_default_handler(markdown_opens_this_session: u32) -> bool {
+    markdown_opens_this_session == 3
+}
+
 /// Seti's 12 palette variables mapped onto our theme so icons read well
 /// in both appearances.
+/// The colour a sidebar row's name draws in. Ignored files -- the ones
+/// a `.gitignore` keeps out of the index -- are listed but recede:
+/// present when you need them, never competing with the notes, and the
+/// only affordance saying "this file is not in your graph".
+pub(crate) fn sidebar_row_color(ignored: bool, is_dir: bool, t: &Theme) -> gpui::Hsla {
+    if ignored {
+        t.fg_muted
+    } else if is_dir {
+        t.fg_strong
+    } else {
+        t.fg
+    }
+}
+
 pub(crate) fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
     let s = &t.syntax;
     match color {
@@ -221,6 +516,15 @@ enum OutlineTarget {
 
 pub struct Workspace {
     pub tree: Option<FileTree>,
+    /// This window's knowledge index. Per-workspace, never a process
+    /// global: two windows on two folders must not see each other's
+    /// notes in backlinks, completion or the graph.
+    pub knowledge: crate::knowledge::KnowledgeHandle,
+    /// This window's plugin host. One host per workspace, because the
+    /// host carries the `workspace-read` preopen root: a shared host
+    /// would let a plugin invoked from this window read another
+    /// window's folder.
+    pub host: crate::extensions::HostHandle,
     tabs: Vec<Tab>,
     active: usize,
     show_sidebar: bool,
@@ -250,6 +554,25 @@ pub struct Workspace {
     startup_recents: Vec<PathBuf>,
     /// Move-to-Applications offer (Some = banner visible with message).
     install_banner: Option<SharedString>,
+    /// Markdown files opened so far this session. Counted only to
+    /// decide when to show the "make SuperMD the default" offer --
+    /// never on first launch, an app demanding to be the default before
+    /// it has been used is the behaviour people resent.
+    markdown_opens: u32,
+    /// "Make SuperMD the default Markdown app" offer banner.
+    show_default_handler_offer: bool,
+    /// Result of the most recent `MakeDefaultMarkdownApp` command,
+    /// shown once then cleared -- covers both the banner's Yes and the
+    /// Tools-menu command reached after an earlier no.
+    ///
+    /// This deliberately does not reuse `command_error`/
+    /// `show_command_error`: that mechanism auto-dismisses after 4
+    /// seconds, which is fine for a short one-line status but would
+    /// cut off the sandboxed-refusal message before a user finishes
+    /// reading the multi-sentence Finder "Open with -> Change All…"
+    /// instructions in `describe_default_handler_status`. This banner
+    /// instead stays up until the user dismisses it.
+    default_handler_result: Option<SharedString>,
     /// ☰ popover on platforms without a global menu bar.
     app_menu_open: bool,
     focus_handle: FocusHandle,
@@ -285,6 +608,17 @@ pub struct Workspace {
     /// a file records one now, so suppression is explicit rather than a
     /// matter of which call happens to come first.
     navigating: bool,
+    /// The open right-click menu: where it was raised, and for what.
+    /// The target itself (which sidebar row, which tab, which graph
+    /// node) is whatever selection/active state the raise already set
+    /// — `sidebar_selected`, `active`, `graph.hovered` — so dispatch
+    /// reads the same state the keyboard shortcuts do. That claim was
+    /// once true of the sidebar and tabs only: the graph raise set
+    /// `graph.hovered` and nothing but the hover highlight read it, so
+    /// the node menu acted on the active tab. `graph_local` reads it
+    /// now — anything added to a graph surface must too.
+    context_menu:
+        Option<(gpui::Point<gpui::Pixels>, crate::menus::Surface, crate::menus::EditorContext)>,
 }
 
 enum SidebarEditKind {
@@ -361,9 +695,14 @@ fn make_editor(
     path: &Path,
     text: String,
     langs: &crate::highlight::Languages,
+    knowledge: &crate::knowledge::KnowledgeHandle,
+    host: &crate::extensions::HostHandle,
     cx: &mut Context<Workspace>,
 ) -> Entity<Editor> {
-    let editor = cx.new(|cx| Editor::from_text(path, text, langs, cx));
+    let (knowledge, host) = (knowledge.clone(), host.clone());
+    let editor = cx.new(|cx| {
+        Editor::from_text_in(path, text, langs, Some(knowledge), Some(host), cx)
+    });
     cx.subscribe(&editor, |this, _editor, event, cx| match event {
         EditorEvent::ConsentNeeded { plugin, cap } => {
             this.consent_request = Some((plugin.clone(), cap.clone()));
@@ -372,6 +711,12 @@ fn make_editor(
         // No window here; render drains the queue with one in hand.
         EditorEvent::OpenPath(path) => {
             this.pending_link_opens.push(path.clone());
+            cx.notify();
+        }
+        // The editor decided *whether* there is a menu and *what* it
+        // knows; the workspace owns the single overlay that draws one.
+        EditorEvent::ContextMenu { position, ctx } => {
+            this.context_menu = Some((*position, crate::menus::Surface::Editor, *ctx));
             cx.notify();
         }
     })
@@ -389,9 +734,15 @@ fn make_reader(
     title: SharedString,
     source: &str,
     langs: &crate::highlight::Languages,
+    knowledge: &crate::knowledge::KnowledgeHandle,
     cx: &mut Context<Workspace>,
 ) -> Entity<Reader> {
-    let reader = cx.new(|cx| Reader::from_source_at(path, title, source, langs, cx));
+    let knowledge = knowledge.clone();
+    let reader = cx.new(|cx| {
+        let mut reader = Reader::from_source_at(path, title, source, langs, cx);
+        reader.set_knowledge(knowledge);
+        reader
+    });
     cx.subscribe(&reader, |this, _reader, event, cx| {
         let crate::reader::ReaderEvent::Follow(dest) = event;
         this.follow_from_reader(dest, cx);
@@ -428,9 +779,7 @@ impl Workspace {
                 let Some(base) = self.tabs.get(self.active).and_then(|t| t.path(cx)) else {
                     return;
                 };
-                let resolved = cx
-                    .try_global::<crate::knowledge::KnowledgeState>()
-                    .and_then(|s| s.0.lock().unwrap().resolve(&base, &link));
+                let resolved = self.knowledge.lock().unwrap().resolve(&base, &link);
                 if let Some(path) = resolved {
                     self.pending_link_opens.push(path);
                     cx.notify();
@@ -442,19 +791,34 @@ impl Workspace {
     pub fn new(arg: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut tree = None;
         let mut tabs = Vec::new();
+        // Set the first time any settings::load call during startup
+        // finds a file it could not use, so it can be surfaced once
+        // the workspace exists to show it -- by then a load-mutate-save
+        // elsewhere in this function may already have overwritten the
+        // preserved copy with defaults, so this must be captured at the
+        // point of loading, not re-derived afterward.
+        let mut settings_corrupt: Option<String> = None;
+        // Both handles belong to this workspace alone. Their
+        // *contents* are replaced when the folder changes, so editors
+        // and readers holding a clone never go stale.
+        let knowledge = crate::knowledge::KnowledgeHandle::default();
+        let host: crate::extensions::HostHandle = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::extensions::ExtensionHost::load(
+                &crate::settings::config_dir().join("plugins"),
+            ),
+        ));
 
         match arg {
             Some(path) if path.is_dir() => {
-                record_recent(&path);
-                cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
-                    std::sync::Mutex::new(crate::knowledge::Index::scan(&path)),
-                )));
+                settings_corrupt = record_recent(&path);
+                *knowledge.lock().unwrap() = crate::knowledge::Index::scan(&path);
+                host.lock().unwrap().set_workspace_root(Some(path.clone()));
                 tree = Some(FileTree::new(path));
             }
             Some(path) => match Editor::read_file(&path) {
                 Ok(text) => {
                     let langs = languages(cx);
-                    let editor = make_editor(&path, text, &langs, cx);
+                    let editor = make_editor(&path, text, &langs, &knowledge, &host, cx);
                     tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 }
                 Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
@@ -467,7 +831,7 @@ impl Workspace {
                 match Editor::read_file(&path) {
                     Ok(text) => {
                         let langs = languages(cx);
-                        let editor = make_editor(&path, text, &langs, cx);
+                        let editor = make_editor(&path, text, &langs, &knowledge, &host, cx);
                         tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                     }
                     Err(_) => {
@@ -479,8 +843,20 @@ impl Workspace {
             }
         }
 
+        // Whichever branch above ran, its `settings::load*` call was
+        // this startup's only chance to observe a corrupt file before
+        // it might get silently overwritten with defaults; the field
+        // below reads the same file again after that has possibly
+        // already happened. `or` keeps whichever call actually saw it.
+        let (startup_settings, startup_corrupt) =
+            crate::settings::load_reporting(&crate::settings::config_dir());
+        settings_corrupt = settings_corrupt.or(startup_corrupt);
+        host.lock().unwrap().set_grants(startup_settings.plugin_grants.clone());
+
         let mut workspace = Self {
             tree,
+            knowledge,
+            host,
             tabs,
             active: 0,
             show_sidebar: true,
@@ -497,7 +873,7 @@ impl Workspace {
             install_request: None,
             preview_tab: None,
             update_available: None,
-            startup_recents: crate::settings::load(&crate::settings::config_dir())
+            startup_recents: startup_settings
                 .recent_workspaces
                 .iter()
                 .map(PathBuf::from)
@@ -508,6 +884,9 @@ impl Workspace {
                 .ok()
                 .filter(|exe| crate::install::needs_install(exe))
                 .map(|_| "SuperMD is running from the disk image.".into()),
+            markdown_opens: 0,
+            show_default_handler_offer: false,
+            default_handler_result: None,
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             sidebar_selected: 0,
@@ -529,8 +908,17 @@ impl Workspace {
             _watcher: None,
             history: crate::nav::History::default(),
             navigating: false,
+            context_menu: None,
         };
         workspace.refresh_git_status();
+
+        if let Some(msg) = settings_corrupt {
+            // A console eprintln! reaches nobody in a packaged app with
+            // no console -- and the very next settings save (a theme
+            // change, a plugin grant) would otherwise overwrite the
+            // preserved copy with defaults for good.
+            workspace.show_command_error(msg, cx);
+        }
 
         // One quiet update check per launch; failures are silent. The
         // App Store build ships no checker, so it spawns no task either.
@@ -631,10 +1019,17 @@ impl Workspace {
 
     fn on_fs_events(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         // Ignore churn from ignored paths (target/, node_modules/, …) so
-        // builds in an open workspace don't hammer the UI.
-        if let Some(tree) = &self.tree {
-            let root = tree.root.clone();
-            if !paths.iter().any(|p| crate::files::is_visible(&root, p)) {
+        // builds in an open workspace don't hammer the UI. This is only
+        // a whole-batch shortcut for the common case of an irrelevant
+        // batch; it must never stand in for the per-path check below,
+        // or one visible path in a batch would wave through every
+        // ignored path riding alongside it.
+        let root = self.tree.as_ref().map(|tree| tree.root.clone());
+        // One matcher for the batch: it caches the ignore files of each
+        // directory it walks through, and a batch is a snapshot anyway.
+        let mut ignores = root.as_ref().map(|root| crate::files::index_matcher(root));
+        if let Some(ignores) = ignores.as_mut() {
+            if !paths.iter().any(|p| ignores.allows(p)) {
                 return;
             }
         }
@@ -643,10 +1038,22 @@ impl Workspace {
         }
         self.refresh_git_status();
         // Keep the knowledge index warm: saves re-index, deletions drop.
-        if let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() {
-            let mut index = state.0.lock().unwrap();
+        {
+            let mut index = self.knowledge.lock().unwrap();
             for path in paths {
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                // Same admission rule `Index::scan` applies at its own
+                // walk -- literally the same matcher: a path under
+                // `.git`/`target`/hidden, or excluded by any ignore file
+                // that walk honours (nested `.gitignore`s,
+                // `.git/info/exclude`, `.ignore`), never enters the
+                // index, however the watcher heard about it. Without
+                // this, a batch that also touched one visible file would
+                // index every ignored `.md` path riding alongside it.
+                if ignores.as_mut().is_some_and(|ignores| !ignores.allows(path)) {
+                    index.remove_file(path);
                     continue;
                 }
                 // Same rule as Index::scan: a symlink never enters the
@@ -657,6 +1064,18 @@ impl Workspace {
                 // escape check. Drop any entry the path may already have.
                 if std::fs::symlink_metadata(path)
                     .is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    index.remove_file(path);
+                    continue;
+                }
+                // And the same rule again for the link kind that is not
+                // a symlink: `ln ~/.ssh/id_rsa <root>/leak.md` reads the
+                // outside file's bytes under an in-root path. `scan`
+                // drops those after its walk; a hardlink made while the
+                // workspace is open only ever reaches the index here.
+                if root
+                    .as_ref()
+                    .is_some_and(|root| crate::knowledge::escapes_via_hardlink(root, path))
                 {
                     index.remove_file(path);
                     continue;
@@ -781,48 +1200,6 @@ impl Workspace {
         }
     }
 
-    /// Poll the shared open-event queue (fed by `on_open_urls`).
-    pub fn watch_external_opens(
-        &mut self,
-        pending: std::sync::Arc<std::sync::Mutex<Vec<crate::PendingOpen>>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(300))
-                    .await;
-                let queued: Vec<crate::PendingOpen> =
-                    std::mem::take(&mut *pending.lock().unwrap());
-                if queued.is_empty() {
-                    continue;
-                }
-                let mut paths = Vec::new();
-                let mut installs = Vec::new();
-                for item in queued {
-                    match item {
-                        crate::PendingOpen::Path(p) => paths.push(p),
-                        crate::PendingOpen::InstallPlugin(name) => installs.push(name),
-                    }
-                }
-                let live = this
-                    .update_in(cx, |workspace, window, cx| {
-                        if !paths.is_empty() {
-                            workspace.open_external_paths(paths, window, cx);
-                        }
-                        for name in installs {
-                            workspace.request_plugin_install(name, window, cx);
-                        }
-                    })
-                    .is_ok();
-                if !live {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
 
     fn close_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.tabs.len() {
@@ -884,7 +1261,8 @@ impl Workspace {
                 Ok(text) => {
                     let langs = languages(cx);
                     let path_buf = path.to_path_buf();
-                    let editor = make_editor(&path_buf, text, &langs, cx);
+                    let (k, h) = (self.knowledge.clone(), self.host.clone());
+                    let editor = make_editor(&path_buf, text, &langs, &k, &h, cx);
                     Tab::Editor { editor, view: EditorView::Edit }
                 }
                 Err(err) => {
@@ -944,13 +1322,21 @@ impl Workspace {
             // that is no longer open, and under the App Store sandbox
             // they are outside the active security-scoped bookmark.
             self.history.clear();
-            record_recent(path);
-            if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
-                state.0.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
+            if let Some(msg) = record_recent(path) {
+                self.show_command_error(msg, cx);
             }
-            cx.set_global(crate::knowledge::KnowledgeState(std::sync::Arc::new(
-                std::sync::Mutex::new(crate::knowledge::Index::scan(path)),
-            )));
+            self.host.lock().unwrap().set_workspace_root(Some(path.to_path_buf()));
+            // Every cached plugin diagram was rendered against the
+            // folder we just left. `DiagramKey` carries the root, so
+            // they can never be *served* to the new one -- but they are
+            // dead weight in a process-wide, capped cache, and leaving
+            // them keeps a render of the previous vault's files alive
+            // in memory for no reason. Reload Plugins already does
+            // this; re-rooting is the same event.
+            if cx.try_global::<crate::diagram::DiagramCache>().is_some() {
+                cx.global_mut::<crate::diagram::DiagramCache>().clear();
+            }
+            *self.knowledge.lock().unwrap() = crate::knowledge::Index::scan(path);
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
@@ -999,7 +1385,8 @@ impl Workspace {
                 }
                 let langs = languages(cx);
                 let path = path.to_path_buf();
-                let editor = make_editor(&path, text, &langs, cx);
+                let (k, h) = (self.knowledge.clone(), self.host.clone());
+                let editor = make_editor(&path, text, &langs, &k, &h, cx);
                 self.tabs.push(Tab::Editor { editor, view: EditorView::Edit });
                 self.active = self.tabs.len() - 1;
                 if let Some(viewer) = path
@@ -1009,11 +1396,59 @@ impl Workspace {
                 {
                     self.spawn_viewer_render(viewer, self.tabs.len() - 1, window, cx);
                 }
+                self.note_markdown_open(&path, cx);
                 self.focus_active(window, cx);
                 cx.notify();
             }
             Err(err) => eprintln!("supermd: cannot open {}: {err}", path.display()),
         }
+    }
+
+    /// Counts Markdown files opened this session, and on the third one
+    /// -- never on the first, an app demanding to be the default before
+    /// it has been used is the behaviour people resent -- offers to
+    /// make SuperMD the default Markdown app, unless the user has
+    /// already answered that offer (yes or no).
+    fn note_markdown_open(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if !crate::platform::MACOS {
+            return;
+        }
+        if !matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("md" | "markdown" | "mdown" | "mdx")
+        ) {
+            return;
+        }
+        if cx.global::<crate::theme::ThemeState>().settings.default_handler_asked {
+            return;
+        }
+        self.markdown_opens += 1;
+        if should_offer_default_handler(self.markdown_opens) {
+            self.show_default_handler_offer = true;
+        }
+    }
+
+    /// Persist the user's answer (yes or no) so the offer never returns
+    /// -- a prompt that comes back is worse than no prompt.
+    fn record_default_handler_answer(&mut self, cx: &mut Context<Self>) {
+        self.show_default_handler_offer = false;
+        persist_setting(cx, |s| s.default_handler_asked = true);
+    }
+
+    fn make_default_markdown_app(
+        &mut self,
+        _: &MakeDefaultMarkdownApp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.record_default_handler_answer(cx);
+        self.default_handler_result = Some(
+            match crate::platform::request_default_markdown_handler() {
+                Ok(()) => "SuperMD is now the default app for Markdown files.".into(),
+                Err(err) => err.into(),
+            },
+        );
+        cx.notify();
     }
 
     fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
@@ -1076,6 +1511,45 @@ impl Workspace {
         self.open_path(&path, window, cx);
     }
 
+    /// A second window on nothing in particular.
+    fn new_window(&mut self, _: &NewWindow, _window: &mut Window, cx: &mut Context<Self>) {
+        if open_in_new_window(None, cx).is_none() {
+            // Rare (the platform refused a window), but ⌘⇧N doing
+            // nothing at all with no message is the worse answer.
+            self.show_command_error("Could not open a new window".to_string(), cx);
+        }
+    }
+
+    /// Pick a folder and open it *beside* this window rather than
+    /// replacing what is already here.
+    fn open_folder_in_new_window(
+        &mut self,
+        _: &OpenFolderInNewWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let wanted = paths.len();
+            let Ok(opened) = cx.update(|_, cx| open_folders_in_new_windows(paths, cx)) else {
+                return;
+            };
+            // Silently doing nothing is the failure mode this whole
+            // command class keeps falling into: a path that is not a
+            // directory, or a platform that refused the window.
+            if let Some(message) = shortfall_message(opened, wanted) {
+                this.update(cx, |this, cx| this.show_command_error(message, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     fn open_dialog(&mut self, _: &OpenDialog, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -1127,10 +1601,7 @@ impl Workspace {
             return;
         };
         let editor = editor.clone();
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
-            return;
-        };
-        let host = state.0.clone();
+        let host = self.host.clone();
         let filename = editor.read(cx).title().to_string();
         let content = editor.read(cx).text();
         let run = cx.background_executor().spawn(async move {
@@ -1142,7 +1613,8 @@ impl Workspace {
                 this.update_in(cx, |this, window, cx| {
                     let langs = languages(cx);
                     let title = editor.read(cx).title();
-                    let reader = make_reader(Some(editor.read(cx).path().to_path_buf()), title, &markdown, &langs, cx);
+                    let k = this.knowledge.clone();
+                    let reader = make_reader(Some(editor.read(cx).path().to_path_buf()), title, &markdown, &langs, &k, cx);
                     // Only swap if that tab still shows this editor in
                     // Edit view (the user may have toggled or closed).
                     if let Some(Tab::Editor { editor: e, view }) = this.tabs.get_mut(tab_ix) {
@@ -1229,7 +1701,8 @@ impl Workspace {
                     let lang = crate::reader::language_for_path(&path);
                     crate::reader::source_as_document(&text, lang.as_deref())
                 };
-                let reader = make_reader(Some(path.clone()), title, &source, &langs, cx);
+                let k = self.knowledge.clone();
+                let reader = make_reader(Some(path.clone()), title, &source, &langs, &k, cx);
                 if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(tab_ix) {
                     *view = EditorView::Preview(reader);
                 }
@@ -1377,9 +1850,8 @@ impl Workspace {
             self.dismiss_palette(window, cx);
             return;
         }
-        let (entries, failures) = match cx.try_global::<crate::extensions::ExtensionState>() {
-            Some(state) => {
-                let host = state.0.lock().unwrap();
+        let (entries, failures) = {
+            let host = self.host.lock().unwrap();
                 let mut entries = host
                     .plugins()
                     .iter()
@@ -1424,9 +1896,7 @@ impl Workspace {
                     .iter()
                     .map(|(dir, e)| format!("{}: {e}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
                     .collect();
-                (entries, failures)
-            }
-            None => (Vec::new(), Vec::new()),
+            (entries, failures)
         };
         // App-level commands exist with or without plugins.
         let mut entries = entries;
@@ -1662,14 +2132,10 @@ impl Workspace {
     /// so the change is visible without waiting for the minute timer.
     fn toggle_flux(&mut self, _: &ToggleFlux, window: &mut Window, cx: &mut Context<Self>) {
         {
+            let on = !cx.global::<crate::theme::ThemeState>().settings.flux.enabled;
+            persist_setting(cx, move |s| s.flux.enabled = on);
             let state = cx.global_mut::<crate::theme::ThemeState>();
-            state.settings.flux.enabled = !state.settings.flux.enabled;
             state.flux_blend = crate::flux::current_blend(&state.settings.flux);
-            if let Err(err) =
-                crate::settings::save(&crate::settings::config_dir(), &state.settings)
-            {
-                eprintln!("supermd: cannot save settings: {err}");
-            }
         }
         crate::theme::refresh_active_theme(cx);
         window.refresh();
@@ -1704,10 +2170,7 @@ impl Workspace {
                 self.show_command_error("Open a folder to use templates".to_string(), cx);
                 return;
             };
-            let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
-                return;
-            };
-            let host = state.0.clone();
+            let host = self.host.clone();
             let ctx_data = crate::extensions::template_context(
                 &root
                     .file_name()
@@ -1746,10 +2209,7 @@ impl Workspace {
             return;
         };
         let editor = editor.clone();
-        let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() else {
-            return;
-        };
-        let host = state.0.clone();
+        let host = self.host.clone();
         let (document, selection) = editor.read(cx).command_snapshot();
         if id == "__format" {
             let snapshot = document.clone();
@@ -1794,8 +2254,7 @@ impl Workspace {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "export".to_string());
-            let extension = state
-                .0
+            let extension = host
                 .lock()
                 .unwrap()
                 .plugins()
@@ -1915,6 +2374,9 @@ impl Workspace {
         let grant = if allow { cap.clone() } else { format!("denied:{cap}") };
         settings.plugin_grants.entry(plugin).or_default().push(grant);
         let _ = crate::settings::save(&dir, &settings);
+        self.host.lock().unwrap().set_grants(settings.plugin_grants.clone());
+        // The shared rootless host renders inline plugin output for
+        // every window; it needs the same grants (never a root).
         if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
             state.0.lock().unwrap().set_grants(settings.plugin_grants.clone());
         }
@@ -1935,21 +2397,83 @@ impl Workspace {
         );
     }
 
-    fn reload_plugins(&mut self, _: &ReloadPlugins, _window: &mut Window, cx: &mut Context<Self>) {
-        let plugins_dir = crate::settings::config_dir().join("plugins");
-        let mut host = crate::extensions::ExtensionHost::load(&plugins_dir);
-        let settings = crate::settings::load(&crate::settings::config_dir());
-        host.set_grants(settings.plugin_grants.clone());
+    /// Swap this window's plugin host for one freshly loaded from
+    /// `plugins_dir`, keeping the window's own workspace root and its
+    /// editors' root cell. Returns how many plugins loaded.
+    fn adopt_reloaded_host(
+        &mut self,
+        plugins_dir: &Path,
+        grants: &std::collections::BTreeMap<String, Vec<String>>,
+        refresh_tables: bool,
+    ) -> usize {
+        let mut host = crate::extensions::ExtensionHost::load(plugins_dir);
+        host.set_grants(grants.clone());
         if let Some(tree) = &self.tree {
             host.set_workspace_root(Some(tree.root.clone()));
         }
-        crate::extensions::refresh_tables(&mut host);
-        for (dir, err) in host.failures() {
-            eprintln!("supermd: plugin failed: {}: {err}", dir.display());
+        if refresh_tables {
+            crate::extensions::refresh_tables(&mut host);
+            for (dir, err) in host.failures() {
+                eprintln!("supermd: plugin failed: {}: {err}", dir.display());
+            }
         }
         let count = host.plugins().len();
+        let mut slot = self.host.lock().unwrap_or_else(|e| e.into_inner());
+        // Every editor in this window holds a clone of the *old*
+        // host's root cell. Carry it into the replacement, or they
+        // are all left pointing at a cell nothing writes to again.
+        host.adopt_root_handle(slot.root_handle());
+        *slot = host;
+        count
+    }
+
+    fn reload_plugins(&mut self, _: &ReloadPlugins, window: &mut Window, cx: &mut Context<Self>) {
+        let plugins_dir = crate::settings::config_dir().join("plugins");
+        let settings = crate::settings::load(&crate::settings::config_dir());
+        let grants = settings.plugin_grants.clone();
+        let count = self.adopt_reloaded_host(&plugins_dir, &grants, true);
+        // `refresh_tables` just rewrote the *process-wide* fence,
+        // decoration and inline tables, so every window's projectors
+        // now claim blocks for the new plugin set. A window whose host
+        // was left behind answers those claims with "no such plugin"
+        // and shows a red error banner in place of every such block
+        // until it restarts -- so every window gets the new host, each
+        // keeping its own sandbox root.
+        //
+        // Skipped by window handle, not by entity: `self` is the
+        // workspace being updated right now, and updating it again --
+        // through its own window -- panics.
+        //
+        // `WindowHandle::root` would read the entity directly, but it
+        // is `#[cfg(any(test, feature = "test-support"))]`, so using it
+        // here compiles under `cargo test` and breaks `cargo build`.
+        let me = window.window_handle();
+        let others: Vec<gpui::WindowHandle<Workspace>> = cx
+            .windows()
+            .into_iter()
+            .filter(|handle| *handle != me)
+            .filter_map(|handle| handle.downcast::<Workspace>())
+            .collect();
+        for handle in others {
+            let _ = handle.update(cx, |workspace, _window, _cx| {
+                workspace.adopt_reloaded_host(&plugins_dir, &grants, false);
+            });
+        }
+        // Rebuild the shared rootless host too, so inline rendering
+        // sees the new plugin set. It never gets a workspace root.
         if let Some(state) = cx.try_global::<crate::extensions::ExtensionState>() {
-            *state.0.lock().unwrap() = host;
+            let mut slot = state.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut shared = crate::extensions::ExtensionHost::load(&plugins_dir);
+            shared.set_grants(settings.plugin_grants.clone());
+            shared.mark_shared_rootless();
+            // No production editor holds *this* host's cell today --
+            // but `editor/mod.rs` claims every path that replaces a
+            // host keeps the cell, and the test helpers already hand
+            // editors this one. An exemption that has to be remembered
+            // is an exemption that gets forgotten: adopt here too and
+            // the claim is true without a footnote.
+            shared.adopt_root_handle(slot.root_handle());
+            *slot = shared;
         }
         if cx.try_global::<crate::diagram::DiagramCache>().is_some() {
             cx.global_mut::<crate::diagram::DiagramCache>().clear();
@@ -2289,9 +2813,7 @@ impl Workspace {
     /// Milestone-2 half of a rename/move: every note pointing at the
     /// moved path gets its links rewritten, on disk and in open tabs.
     fn rewrite_knowledge_links(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>().cloned() else {
-            return;
-        };
+        let state = self.knowledge.clone();
         // Disk is the rewrite source: flush dirty buffers first.
         for tab in &self.tabs {
             if let Tab::Editor { editor, .. } = tab {
@@ -2300,7 +2822,7 @@ impl Workspace {
                 }
             }
         }
-        let mut index = state.0.lock().unwrap();
+        let mut index = state.lock().unwrap();
         // A moved folder renames every note under it.
         let moved: Vec<(PathBuf, PathBuf)> = if new.is_dir() {
             index
@@ -2430,6 +2952,29 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Show the file in Finder. `NSWorkspace` rather than a process
+    /// spawn: the App Store build cannot spawn processes.
+    fn reveal_in_finder(&mut self, _: &RevealInFinder, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        // `reveal_dir` already exists and uses
+        // `activateFileViewerSelectingURLs`, which selects the item —
+        // so it reveals a file, not only a directory.
+        crate::platform::reveal_dir(&entry.path);
+        let _ = cx;
+    }
+
+    fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+            entry.path.display().to_string(),
+        ));
+        self.show_command_error("Path copied".into(), cx);
+    }
+
     fn sidebar_open(&mut self, _: &SidebarOpen, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.sidebar_rows();
         let Some((_, entry)) = rows.get(self.sidebar_selected).cloned() else {
@@ -2508,18 +3053,15 @@ impl Workspace {
         };
         let ix = picker.order[picker.pos];
         {
-            let state = cx.global_mut::<crate::theme::ThemeState>();
-            let picked = &state.themes[ix];
-            if picked.theme.is_dark {
-                state.settings.dark_theme = picked.name.clone();
-            } else {
-                state.settings.light_theme = picked.name.clone();
-            }
-            if let Err(err) =
-                crate::settings::save(&crate::settings::config_dir(), &state.settings)
-            {
-                eprintln!("supermd: cannot save settings: {err}");
-            }
+            let picked = &cx.global::<crate::theme::ThemeState>().themes[ix];
+            let (name, is_dark) = (picked.name.clone(), picked.theme.is_dark);
+            persist_setting(cx, move |s| {
+                if is_dark {
+                    s.dark_theme = name.clone();
+                } else {
+                    s.light_theme = name.clone();
+                }
+            });
         }
         crate::theme::refresh_active_theme(cx);
         self.focus_active(window, cx);
@@ -2837,6 +3379,109 @@ impl Workspace {
         )
     }
 
+    /// The right-click menu raised on a sidebar row, tab, or graph
+    /// node. Built from `menus::items_for`, so a renamed command or a
+    /// changed shortcut shows up here for free; each row dispatches the
+    /// same boxed action the menu bar and the keystroke do, so all
+    /// three paths stay one path.
+    fn render_context_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (pos, surface, ectx) = self.context_menu?;
+        let t = theme(cx);
+        let rows: Vec<AnyElement> = crate::menus::items_for(surface, ectx)
+            .into_iter()
+            .map(|item| {
+                let cmd = crate::commands::COMMANDS
+                    .iter()
+                    .find(|c| c.id == item.id)
+                    .expect("menu item names a real command");
+                let shortcut = if item.keys.is_empty() {
+                    String::new()
+                } else {
+                    crate::platform::shortcut_glyphs(&crate::commands::glyphs(item.keys))
+                };
+                div()
+                    .id(SharedString::from(format!("ctx-menu-{}", item.id)))
+                    .w_full()
+                    .px_3()
+                    .py(px(5.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover_bg))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(t.ui_size))
+                            .text_color(t.fg)
+                            .child(item.label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(t.fg_muted)
+                            .child(SharedString::from(shortcut)),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.context_menu = None;
+                        window.dispatch_action((cmd.action)(), cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                // A click anywhere else dismisses the menu without
+                // otherwise reacting — the row underneath must not also
+                // see the click that closed the menu.
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .child(gpui::deferred(
+                    gpui::anchored()
+                        .position(pos)
+                        .anchor(gpui::Corner::TopLeft)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .id("ctx-menu")
+                                .w(px(220.))
+                                .bg(t.panel_bg)
+                                .border_1()
+                                .border_color(t.border)
+                                .rounded_lg()
+                                .shadow_lg()
+                                .overflow_hidden()
+                                .flex()
+                                .flex_col()
+                                .py_1()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .children(rows),
+                        ),
+                ))
+                .into_any_element(),
+        )
+    }
+
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_shortcuts {
             return None;
@@ -3024,13 +3669,14 @@ impl Workspace {
                             .flex_none()
                             .text_color(tint)
                     })
-                    .child(
+                    .child({
+                        let row_color = sidebar_row_color(entry.ignored, is_dir, &t);
                         div()
                             .text_size(px(t.ui_size))
-                            .text_color(if is_dir { t.fg_strong } else { t.fg })
+                            .text_color(row_color)
                             .overflow_hidden()
-                            .child(SharedString::from(entry.name.clone())),
-                    )
+                            .child(SharedString::from(entry.name.clone()))
+                    })
                     .child(div().flex_1())
                     .when(is_modified, |d| {
                         d.child(
@@ -3042,6 +3688,22 @@ impl Workspace {
                                 .bg(t.accent),
                         )
                     })
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.sidebar_selected = row_ix;
+                            let surface = if is_dir {
+                                crate::menus::Surface::SidebarFolder
+                            } else {
+                                crate::menus::Surface::SidebarFile
+                            };
+                            this.context_menu =
+                                Some((event.position, surface, Default::default()));
+                            window.focus(&this.sidebar_focus);
+                            cx.notify();
+                        }),
+                    )
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.sidebar_selected = row_ix;
                         if is_dir {
@@ -3272,6 +3934,8 @@ impl Workspace {
                 .on_action(cx.listener(Self::sidebar_new_file))
                 .on_action(cx.listener(Self::sidebar_new_folder))
                 .on_action(cx.listener(Self::sidebar_move_to))
+                .on_action(cx.listener(Self::reveal_in_finder))
+                .on_action(cx.listener(Self::copy_path))
                 .flex()
                 .flex_col()
                 .child(
@@ -3613,6 +4277,19 @@ impl Workspace {
                             this.close_tab_at(ix, window, cx);
                         })),
                 )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.set_active(ix, window, cx);
+                        this.context_menu = Some((
+                            event.position,
+                            crate::menus::Surface::Tab,
+                            Default::default(),
+                        ));
+                        cx.notify();
+                    }),
+                )
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     // Double-clicking a preview tab pins it.
                     if event.click_count() >= 2 && this.preview_tab == Some(ix) {
@@ -3707,12 +4384,12 @@ impl Workspace {
 
     /// Build, lay out, and show the full-workspace graph.
     fn open_graph_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
+        if self.tree.is_none() {
             self.show_command_error("Open a folder to see its graph".to_string(), cx);
             return;
-        };
+        }
         let (mut nodes, mut edges) = {
-            let index = state.0.lock().unwrap();
+            let index = self.knowledge.lock().unwrap();
             let (mut n, mut e) = crate::graph::build(&index);
             // Notes the vault refers to but does not have. They are the
             // to-write list, and the graph is where they are visible.
@@ -3828,8 +4505,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Narrow the graph to what is near the note you have open, or
-    /// widen it back to the whole vault.
+    /// Narrow the graph to what is near the node under the pointer —
+    /// or, with the pointer off the nodes, the note you have open —
+    /// and widen it back to the whole vault.
     fn graph_local(&mut self, _: &GraphLocal, _: &mut Window, cx: &mut Context<Self>) {
         let open = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
         let Some(graph) = self.graph.as_mut() else { return };
@@ -3840,13 +4518,23 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(open) = open else {
-            self.show_command_error("Open a note to centre the graph on it".into(), cx);
-            return;
-        };
-        let Some(center) = graph.sim.nodes.iter().position(|n| n.path == open) else {
-            self.show_command_error("That note is not in the graph".into(), cx);
-            return;
+        // The node under the pointer wins. A right-click sets `hovered`
+        // and the menu dispatches this action, so without reading it
+        // the menu acted on the active tab instead of the node it was
+        // raised over — the wrong note, or none at all.
+        let hovered = graph.hovered.filter(|ix| *ix < graph.sim.nodes.len());
+        let center = if let Some(ix) = hovered {
+            ix
+        } else {
+            let Some(open) = open else {
+                self.show_command_error("Open a note to centre the graph on it".into(), cx);
+                return;
+            };
+            let Some(center) = graph.sim.nodes.iter().position(|n| n.path == open) else {
+                self.show_command_error("That note is not in the graph".into(), cx);
+                return;
+            };
+            center
         };
         graph.filter.local = Some((center, 1));
         let edges = graph.sim.edges.clone();
@@ -3939,10 +4627,10 @@ impl Workspace {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let root = cx
-                .try_global::<crate::knowledge::KnowledgeState>()
-                .map(|s| s.0.lock().unwrap().root.clone());
-            let Some(root) = root else { return };
+            let root = self.knowledge.lock().unwrap().root.clone();
+            if root.as_os_str().is_empty() {
+                return;
+            }
             // The same containment the editor applies before creating a
             // note from a link.
             let Some(path) = crate::knowledge::creatable_note_path(&root, dir, &name) else {
@@ -4073,6 +4761,7 @@ impl Workspace {
             let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
                 && state.filter.matches_at(ix, node);
             let is_open = open_path.as_deref() == Some(node.path.as_path());
+            let is_ghost = node.ghost;
             let group = match state.color_by {
                 crate::graph::ColorBy::None => None,
                 crate::graph::ColorBy::Folder => node.folder.as_deref(),
@@ -4132,6 +4821,23 @@ impl Workspace {
                                 graph.sim.hold_warm(true);
                             }
                             this.graph_tick(cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(graph) = &mut this.graph {
+                                graph.hovered = Some(ix);
+                            }
+                            let surface = if is_ghost {
+                                crate::menus::Surface::GraphGhost
+                            } else {
+                                crate::menus::Surface::GraphNode
+                            };
+                            this.context_menu =
+                                Some((event.position, surface, Default::default()));
+                            cx.notify();
                         }),
                     )
                     .child(
@@ -4380,18 +5086,13 @@ impl Workspace {
         let Some(path) = self.tabs.get(self.active).and_then(|t| t.path(cx)) else {
             return Vec::new();
         };
-        let Some(state) = cx.try_global::<crate::knowledge::KnowledgeState>() else {
-            return Vec::new();
-        };
-        let index = state.0.lock().unwrap();
+        let index = self.knowledge.lock().unwrap();
         index.backlinks(&path)
     }
 
     /// All workspace tags with counts, for the knowledge panel.
-    fn all_tags(&self, cx: &App) -> Vec<(String, usize)> {
-        cx.try_global::<crate::knowledge::KnowledgeState>()
-            .map(|state| state.0.lock().unwrap().tags())
-            .unwrap_or_default()
+    fn all_tags(&self) -> Vec<(String, usize)> {
+        self.knowledge.lock().unwrap().tags()
     }
 
     fn render_knowledge(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -4400,7 +5101,7 @@ impl Workspace {
         }
         let t = theme(cx);
         let backlinks = self.active_backlinks(cx);
-        let tags = self.all_tags(cx);
+        let tags = self.all_tags();
 
         let section = |title: &'static str| {
             div()
@@ -4427,8 +5128,7 @@ impl Workspace {
             .tabs
             .get(self.active)
             .and_then(|tab| tab.path(cx))
-            .zip(cx.try_global::<crate::knowledge::KnowledgeState>())
-            .map(|(path, state)| crate::graph::local(&state.0.lock().unwrap(), &path))
+            .map(|path| crate::graph::local(&self.knowledge.lock().unwrap(), &path))
             .filter(|(nodes, _)| nodes.len() > 1);
         if let Some((nodes, edges)) = local {
             let (w, h) = (216.0f32, 140.0f32);
@@ -4776,6 +5476,8 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_file))
+            .on_action(cx.listener(Self::new_window))
+            .on_action(cx.listener(Self::open_folder_in_new_window))
             .on_action(cx.listener(Self::open_dialog))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -4792,6 +5494,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reveal_settings_folder))
             .on_action(cx.listener(Self::import_plugin))
             .on_action(cx.listener(Self::reload_plugins))
+            .on_action(cx.listener(Self::make_default_markdown_app))
             .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent_ix(0, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent_ix(1, w, cx)))
             .on_action(cx.listener(|this, _: &OpenRecent2, w, cx| this.open_recent_ix(2, w, cx)))
@@ -4897,6 +5600,91 @@ impl Render for Workspace {
                                     })),
                             )
                     }))
+                    .children(self.show_default_handler_offer.then(|| {
+                        div()
+                            .w_full()
+                            .flex_none()
+                            .px_3()
+                            .py(px(6.))
+                            .bg(t.panel_bg)
+                            .border_b_1()
+                            .border_color(t.border)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .text_size(px(12.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_color(t.fg)
+                                    .child("Make SuperMD your default app for Markdown files?"),
+                            )
+                            .child(
+                                div()
+                                    .id("default-handler-yes")
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .bg(t.accent)
+                                    .text_color(t.bg)
+                                    .cursor_pointer()
+                                    .child("Use SuperMD for Markdown Files")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
+                                        this.make_default_markdown_app(&MakeDefaultMarkdownApp, w, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("default-handler-no")
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_color(t.fg_muted)
+                                    .hover(|s| s.bg(t.hover_bg))
+                                    .child("Not now")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                        this.record_default_handler_answer(cx);
+                                        cx.notify();
+                                    })),
+                            )
+                    }))
+                    // Deliberately its own banner, not `command_error`'s
+                    // 4s auto-dismissing one: the sandboxed-refusal
+                    // message is multi-sentence Finder instructions
+                    // that a 4s timer would cut off mid-read.
+                    .children(self.default_handler_result.clone().map(|message| {
+                        div()
+                            .w_full()
+                            .flex_none()
+                            .px_3()
+                            .py(px(6.))
+                            .bg(t.panel_bg)
+                            .border_b_1()
+                            .border_color(t.border)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .text_size(px(12.))
+                            .child(div().flex_1().text_color(t.fg).child(message))
+                            .child(
+                                div()
+                                    .id("default-handler-dismiss")
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_color(t.fg_muted)
+                                    .hover(|s| s.bg(t.hover_bg))
+                                    .child("Dismiss")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                        this.default_handler_result = None;
+                                        cx.notify();
+                                    })),
+                            )
+                    }))
                     .child(
                         div()
                             .flex_1()
@@ -4921,6 +5709,7 @@ impl Render for Workspace {
             .children(self.render_shortcuts(cx))
             .children(self.render_about(cx))
             .children(self.render_theme_picker(cx))
+            .children(self.render_context_menu(cx))
             .when_some(self.finder.as_ref(), |root, (finder, _)| {
                 let finder = finder.clone();
                 root.child(
@@ -5324,7 +6113,7 @@ impl Render for Workspace {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -5385,13 +6174,16 @@ mod tests {
     /// env var; point it at a tempdir (serialized — env is process-wide).
     static HOME_LOCK: Mutex<()> = Mutex::new(());
 
-    struct TempHome {
+    pub(crate) struct TempHome {
         _dir: tempfile::TempDir,
         prev: Option<std::ffi::OsString>,
         _guard: MutexGuard<'static, ()>,
     }
 
-    fn temp_home() -> TempHome {
+    /// Serialized against every other caller of this helper across the
+    /// crate (env is process-wide, so two tests swapping HOME at once
+    /// race) -- not just within this file's own tests.
+    pub(crate) fn temp_home() -> TempHome {
         let guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("HOME");
@@ -5426,10 +6218,9 @@ mod tests {
 
     /// Like `open_workspace`, but takes the raw launch argument so tests
     /// can exercise the single-file / welcome-document startup paths.
-    fn open_arg(
-        cx: &mut TestAppContext,
-        arg: Option<PathBuf>,
-    ) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
+    /// The globals a workspace needs before it can be built or drawn.
+    /// Call under `temp_home()` -- the backup registry roots under it.
+    pub(crate) fn install_test_globals(cx: &mut TestAppContext) {
         cx.update(|cx| {
             cx.set_global(crate::theme::ActiveTheme(Arc::new(
                 crate::theme::Theme::dark(),
@@ -5451,7 +6242,29 @@ mod tests {
                 flux_blend: 0.0,
             });
         });
-        cx.add_window_view(|_, cx| Workspace::new(arg, cx))
+    }
+
+    fn open_arg(
+        cx: &mut TestAppContext,
+        arg: Option<PathBuf>,
+    ) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
+        install_test_globals(cx);
+        let (ws, vcx) = cx.add_window_view(|_, cx| Workspace::new(arg, cx));
+        // The fixture host `with_plugins` loaded stands in for the one
+        // a real workspace builds from ~/.supermd/plugins. Production
+        // never adopts the shared global -- see `ExtensionState`.
+        vcx.update(|_, app| {
+            if let Some(state) = app.try_global::<crate::extensions::ExtensionState>() {
+                let handle = state.0.clone();
+                ws.update(app, |ws, _| {
+                    if let Some(tree) = &ws.tree {
+                        handle.lock().unwrap().set_workspace_root(Some(tree.root.clone()));
+                    }
+                    ws.host = handle;
+                });
+            }
+        });
+        (ws, vcx)
     }
 
     fn tab_paths(ws: &Workspace, cx: &App) -> Vec<Option<PathBuf>> {
@@ -5499,6 +6312,465 @@ mod tests {
         assert_eq!(log, "Daily [note](Vision.md) link.\n");
     }
 
+    /// The plugin sandbox root is per window too. It decides which
+    /// directory a `workspace-read` plugin may preopen, so a host
+    /// shared between windows would let a plugin invoked from one
+    /// window read the other window's folder.
+    #[gpui::test]
+    fn two_workspaces_keep_separate_plugin_sandbox_roots(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+
+        let (ws_a, cx) = open_workspace(cx, a.path());
+        let (ws_b, cx) = open_workspace(cx, b.path());
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let root_a = ws_a.read(app).host.lock().unwrap().workspace_root();
+            let root_b = ws_b.read(app).host.lock().unwrap().workspace_root();
+            assert_eq!(root_a.as_deref(), Some(a.path()));
+            assert_eq!(root_b.as_deref(), Some(b.path()));
+            assert_ne!(root_a, root_b, "one host for both windows is the leak");
+        });
+    }
+
+    /// The folder picker opens a window per folder and ignores
+    /// anything that is not one — a file would give the new window no
+    /// sidebar, no index and no sandbox root.
+    #[gpui::test]
+    fn the_folder_picker_opens_a_window_per_folder_and_skips_files(
+        cx: &mut TestAppContext,
+    ) {
+        let _home = temp_home();
+        let (root, a, _) = workspace_fixture();
+        let other = tempfile::tempdir().unwrap();
+        let (_ws, cx) = open_workspace(cx, root.path());
+        let before = cx.update(|_, app| app.windows().len());
+
+        let opened = cx.update(|_, app| {
+            open_folders_in_new_windows(
+                vec![other.path().to_path_buf(), a.clone()],
+                app,
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(opened, 1, "the folder opened, the file did not");
+        assert_eq!(cx.update(|_, app| app.windows().len()), before + 1);
+    }
+
+    /// ⌘Q must flush unsaved edits in *every* window, not only the one
+    /// the app started in. With a single window that distinction did
+    /// not exist; ⌘⇧N is what made it a way to lose work.
+    #[gpui::test]
+    fn quitting_flushes_dirty_editors_in_every_window(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = a_dir.path().join("a.md");
+        let b = b_dir.path().join("b.md");
+        std::fs::write(&a, "a on disk\n").unwrap();
+        std::fs::write(&b, "b on disk\n").unwrap();
+        install_test_globals(cx);
+
+        let first = cx
+            .update(|app| open_in_new_window(Some(a_dir.path().to_path_buf()), app))
+            .expect("first window");
+        let second = cx
+            .update(|app| open_in_new_window(Some(b_dir.path().to_path_buf()), app))
+            .expect("second window");
+        cx.run_until_parked();
+
+        // A dirty, unwritten buffer in each window.
+        for (handle, path, typed) in [(&first, &a, "AA"), (&second, &b, "BB")] {
+            cx.update(|app| {
+                handle.update(app, |ws, window, cx| ws.open_path(path, window, cx)).unwrap();
+            });
+            cx.run_until_parked();
+            cx.simulate_input((*handle).into(), typed);
+            cx.update(|app| {
+                let ws = handle.read(app).expect("window alive");
+                let Some(Tab::Editor { editor, .. }) = ws.tabs.get(ws.active) else {
+                    panic!("expected an editor tab");
+                };
+                assert!(editor.read(app).save.is_dirty(), "{typed} is unsaved");
+            });
+        }
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a on disk\n", "not yet written");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "b on disk\n");
+
+        let flushed = cx.update(flush_all_windows);
+        assert_eq!(flushed, 2, "both windows flushed");
+        assert!(std::fs::read_to_string(&a).unwrap().contains("AA"));
+        assert!(
+            std::fs::read_to_string(&b).unwrap().contains("BB"),
+            "the second window's edits survive the quit too"
+        );
+    }
+
+    /// Reload Plugins replaces the whole host inside the `HostHandle`
+    /// mutex, and `ExtensionHost::load` mints a fresh root cell. Every
+    /// editor built before the reload holds a clone of the *old* cell,
+    /// so unless the replacement adopts it they are left reading a cell
+    /// nothing writes to again — and the very next Open… in this window
+    /// re-roots the host while those editors keep keying their diagram
+    /// renders under the previous vault. That is the cross-vault cache
+    /// leak `DiagramKey::root_hash` exists to close, coming back in by
+    /// the side door.
+    #[gpui::test]
+    fn reloading_plugins_keeps_the_root_cell_editors_already_hold(
+        cx: &mut TestAppContext,
+    ) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+
+        let before = cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { editor, .. }) = w.tabs.get(w.active) else {
+                panic!("expected an editor tab");
+            };
+            let cell = editor.read(app).plugin_root_handle().expect("editor has the root cell");
+            // `make_editor` hands over the host's *own* cell, not a copy.
+            assert!(
+                Arc::ptr_eq(&cell, &w.host.lock().unwrap().root_handle()),
+                "the editor shares the host's root cell from the moment it is built"
+            );
+            cell
+        });
+
+        // The process-shared rootless host is rebuilt by the same
+        // command. No production editor holds *its* cell, but the test
+        // helpers hand editors that very handle, and `editor/mod.rs`
+        // claims every host-replacing path keeps the cell -- so it must
+        // be true here too, not true-with-a-footnote.
+        let shared_before = cx.update(|_, app| {
+            let host = crate::extensions::ExtensionHost::load(std::path::Path::new("/nonexistent"));
+            app.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
+            app.global::<crate::extensions::ExtensionState>().0.lock().unwrap().root_handle()
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.reload_plugins(&ReloadPlugins, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let after = w.host.lock().unwrap().root_handle();
+            assert!(
+                Arc::ptr_eq(&before, &after),
+                "the reloaded host adopted the cell the editor still holds"
+            );
+            let shared_after =
+                app.global::<crate::extensions::ExtensionState>().0.lock().unwrap().root_handle();
+            assert!(
+                Arc::ptr_eq(&shared_before, &shared_after),
+                "the rebuilt shared host adopted its cell too"
+            );
+        });
+
+        // And the proof that matters: re-rooting the window after a
+        // reload is visible to that editor.
+        let second = tempfile::tempdir().unwrap();
+        let second_root = second.path().canonicalize().unwrap();
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&second_root, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            before.read().unwrap().as_deref(),
+            Some(second_root.as_path()),
+            "the editor's cell followed the new workspace root"
+        );
+    }
+
+    /// The background plugin surfaces have no window of their own, so
+    /// their failures used to reach the user only through `eprintln!`
+    /// — Console.app for a Finder- or Dock-launched build, i.e. nobody.
+    #[gpui::test]
+    fn a_background_plugin_failure_is_shown_in_a_window(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        install_test_globals(cx);
+        let window = cx
+            .update(|app| open_in_new_window(Some(root.path().to_path_buf()), app))
+            .expect("window");
+        cx.run_until_parked();
+
+        let shown = cx.update(|app| report_plugin_error("renderer: boom".to_string(), app));
+        assert!(shown, "a live window took it");
+        cx.update(|app| {
+            let ws = window.read(app).expect("window alive");
+            assert_eq!(
+                ws.command_error.as_ref().map(|m| m.to_string()),
+                Some("renderer: boom".to_string())
+            );
+        });
+
+        // With every window gone it reports that it could not be shown,
+        // rather than pretending it was.
+        cx.update(|app| {
+            window.update(app, |_, w, _| w.remove_window()).ok();
+        });
+        cx.run_until_parked();
+        assert!(!cx.update(|app| report_plugin_error("later".to_string(), app)));
+    }
+
+    /// The drainer must *report* a failed inline render, not merely
+    /// cache it. Deleting `report_plugin_error` from the drain loop
+    /// left the whole suite green: the plugin author's `workspace-read`
+    /// refusal, or a render panic, went to Console.app and nowhere
+    /// else. `a_background_plugin_failure_is_shown_in_a_window` tests
+    /// the reporting function; this tests that anything calls it.
+    ///
+    /// It lives here rather than beside the drainer because the thing
+    /// being asserted is `Workspace::command_error`, which is private
+    /// to this module.
+    #[gpui::test]
+    fn a_failed_inline_render_is_reported_by_the_drainer(cx: &mut TestAppContext) {
+        let fixtures =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        if !fixtures.join("panic/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built (scripts/build_plugins.sh --fixtures)");
+            return;
+        }
+        let _tables = crate::extensions::table_test_guard();
+        let _home = temp_home();
+        install_test_globals(cx);
+        cx.update(|app| {
+            let host = crate::extensions::ExtensionHost::load(&fixtures);
+            app.set_global(crate::extensions::ExtensionState(Arc::new(Mutex::new(host))));
+        });
+        let folder = tempfile::tempdir().unwrap();
+        let window = cx
+            .update(|app| open_in_new_window(Some(folder.path().to_path_buf()), app))
+            .expect("window");
+        cx.run_until_parked();
+
+        crate::extensions::clear_inline_cache();
+        // The `panic` fixture never moved off wit 0.1, so every inline
+        // call against it comes back an error.
+        crate::extensions::enqueue_inline(vec![(
+            "panic".to_string(),
+            "e".to_string(),
+            "x".to_string(),
+        )]);
+        cx.update(|app| crate::extensions::start_inline_drainer(app));
+        for _ in 0..50 {
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(60));
+            cx.run_until_parked();
+            let shown = cx.update(|app| {
+                window.read(app).map(|ws| ws.command_error.is_some()).unwrap_or(false)
+            });
+            if shown {
+                break;
+            }
+        }
+        cx.update(|app| {
+            let ws = window.read(app).expect("window alive");
+            let shown = ws.command_error.as_ref().map(|m| m.to_string());
+            assert!(
+                shown.as_deref().is_some_and(|m| m.contains("panic")),
+                "the window names the plugin that failed: {shown:?}"
+            );
+        });
+        crate::extensions::clear_inline_cache();
+    }
+
+    /// Re-rooting a window retires the diagrams cached against the
+    /// folder it just left. They can never be *served* to the new root
+    /// (the root is in the key), but a capped process-wide cache should
+    /// not go on holding renders of a vault nobody has open.
+    #[gpui::test]
+    fn opening_another_folder_clears_the_diagram_cache(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let second = tempfile::tempdir().unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        cx.update(|_, app| {
+            app.set_global(crate::diagram::DiagramCache::default());
+            app.global_mut::<crate::diagram::DiagramCache>().insert(
+                crate::diagram::DiagramKey {
+                    source_hash: 1,
+                    root_hash: crate::diagram::DiagramKey::root(Some(root.path())),
+                    theme_fingerprint: 0,
+                    width_bucket: 704,
+                },
+                crate::diagram::DiagramState::Pending,
+            );
+            assert_eq!(app.global::<crate::diagram::DiagramCache>().len(), 1);
+        });
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(second.path(), window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                app.global::<crate::diagram::DiagramCache>().len(),
+                0,
+                "the previous vault's renders are gone"
+            );
+        });
+    }
+
+    #[test]
+    fn a_shortfall_is_named_only_when_something_was_missed() {
+        assert_eq!(shortfall_message(2, 2), None);
+        assert_eq!(shortfall_message(3, 2), None, "never a negative shortfall");
+        assert_eq!(
+            shortfall_message(0, 1).as_deref(),
+            Some("Could not open that folder in a new window")
+        );
+        assert_eq!(shortfall_message(1, 3).as_deref(), Some("Opened 1 of 3 folders"));
+    }
+
+    #[test]
+    fn windows_cascade_and_wrap() {
+        assert_eq!(cascade_origin(0), (100.0, 60.0));
+        assert_eq!(cascade_origin(1), (124.0, 84.0));
+        // Wraps rather than walking off the bottom of the screen.
+        assert_eq!(cascade_origin(10), cascade_origin(0));
+    }
+
+    /// The production path, not the test harness: `open_in_new_window`
+    /// must build a whole second workspace — its own index and its own
+    /// plugin sandbox root — on the folder it was handed, while the
+    /// window it was invoked from keeps its own.
+    #[gpui::test]
+    fn open_in_new_window_gives_the_second_folder_its_own_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        let _home = temp_home();
+        let a = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("Alpha.md"), "# Alpha\n").unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(b.path().join("Beta.md"), "# Beta\n").unwrap();
+
+        let (ws_a, cx) = open_workspace(cx, a.path());
+        let before = cx.update(|_, app| app.windows().len());
+        let handle = cx
+            .update(|_, app| open_in_new_window(Some(b.path().to_path_buf()), app))
+            .expect("the window opens");
+        cx.run_until_parked();
+
+        assert_eq!(cx.update(|_, app| app.windows().len()), before + 1);
+        cx.update(|_, app| {
+            let ws_b = handle.read(app).expect("the new window holds a workspace");
+            let names_b: Vec<String> = ws_b
+                .knowledge
+                .lock()
+                .unwrap()
+                .note_names()
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
+            assert!(names_b.iter().any(|n| n.eq_ignore_ascii_case("beta")), "{names_b:?}");
+            assert!(
+                !names_b.iter().any(|n| n.eq_ignore_ascii_case("alpha")),
+                "the new window has its own index: {names_b:?}"
+            );
+            assert_eq!(
+                ws_b.host.lock().unwrap().workspace_root().as_deref(),
+                Some(b.path()),
+                "and its own plugin sandbox root"
+            );
+            let names_a: Vec<String> = ws_a
+                .read(app)
+                .knowledge
+                .lock()
+                .unwrap()
+                .note_names()
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
+            assert!(names_a.iter().any(|n| n.eq_ignore_ascii_case("alpha")), "{names_a:?}");
+            assert!(
+                !names_a.iter().any(|n| n.eq_ignore_ascii_case("beta")),
+                "and the window it came from is untouched: {names_a:?}"
+            );
+        });
+    }
+
+    /// ⌘⇧N means two things, and both have to survive.
+    ///
+    /// `SidebarNewFolder` has had it scoped to `Sidebar` all along;
+    /// `NewWindow` claims it globally. gpui scores a context-free
+    /// binding at the depth of the *deepest* context, so "Sidebar" does
+    /// NOT outrank "no context" — the two tie, and the tie is broken by
+    /// declaration order in `commands::COMMANDS`. That is exactly the
+    /// collision class that made ⌘⇧G unreachable in 0.0.15, so this
+    /// asserts the real keystroke through the real keymap, both ways
+    /// round, rather than trusting the scoping.
+    #[gpui::test]
+    fn new_window_yields_cmd_shift_n_to_a_focused_sidebar(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _, _) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        cx.update(|_, app| app.bind_keys(crate::app_keybindings()));
+        let chord = crate::platform::keybinding("cmd-shift-n");
+
+        // ── sidebar focused: New Folder Here, and no new window ──
+        select_sidebar_row(&ws, cx, "a.md");
+        let before = cx.update(|_, app| app.windows().len());
+        cx.simulate_keystrokes(&chord);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(
+                matches!(
+                    ws.read(app).sidebar_edit.as_ref().map(|e| &e.kind),
+                    Some(SidebarEditKind::NewDir(_))
+                ),
+                "the sidebar binding still wins while the sidebar has focus"
+            );
+            assert_eq!(app.windows().len(), before, "and no window was opened");
+        });
+        cx.dispatch_action(SidebarEditCancel);
+        cx.run_until_parked();
+
+        // ── sidebar not focused: New Window, and no folder edit ──
+        ws.update_in(cx, |ws, window, _| window.focus(&ws.focus_handle));
+        cx.run_until_parked();
+        cx.simulate_keystrokes(&chord);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                app.windows().len(),
+                before + 1,
+                "off the sidebar, ⌘⇧N opens a window"
+            );
+            assert!(ws.read(app).sidebar_edit.is_none(), "and creates no folder");
+        });
+    }
+
+    /// Two windows, two folders, two indexes. A process-wide
+    /// KnowledgeState meant the second workspace's backlinks and graph
+    /// showed the first workspace's notes.
+    #[gpui::test]
+    fn two_workspaces_keep_separate_indexes(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let a = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("Alpha.md"), "# Alpha\n").unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(b.path().join("Beta.md"), "# Beta\n").unwrap();
+
+        let (ws_a, cx) = open_workspace(cx, a.path());
+        let (ws_b, cx) = open_workspace(cx, b.path());
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let names_a: Vec<String> = ws_a.read(app).knowledge.lock().unwrap()
+                .note_names().iter().map(|(n, _)| n.clone()).collect();
+            let names_b: Vec<String> = ws_b.read(app).knowledge.lock().unwrap()
+                .note_names().iter().map(|(n, _)| n.clone()).collect();
+            assert!(names_a.iter().any(|n| n.eq_ignore_ascii_case("alpha")));
+            assert!(!names_a.iter().any(|n| n.eq_ignore_ascii_case("beta")),
+                "window A does not see window B's notes: {names_a:?}");
+            assert!(names_b.iter().any(|n| n.eq_ignore_ascii_case("beta")));
+            assert!(!names_b.iter().any(|n| n.eq_ignore_ascii_case("alpha")),
+                "and the reverse: {names_b:?}");
+        });
+    }
+
     #[gpui::test]
     fn knowledge_index_tracks_saves_through_the_watcher(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -5513,8 +6785,7 @@ mod tests {
         ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&b), cx));
         cx.run_until_parked();
         cx.update(|_, app| {
-            let state = app.global::<crate::knowledge::KnowledgeState>();
-            let index = state.0.lock().unwrap();
+            let index = ws.read(app).knowledge.lock().unwrap();
             let back = index.backlinks(&root.path().join("A.md"));
             assert!(
                 back.iter().any(|(p, _)| p.ends_with("B.md")),
@@ -5543,12 +6814,103 @@ mod tests {
         ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&leak), cx));
         cx.run_until_parked();
         cx.update(|_, app| {
-            let state = app.global::<crate::knowledge::KnowledgeState>();
-            let index = state.0.lock().unwrap();
+            let index = ws.read(app).knowledge.lock().unwrap();
             let back = index.backlinks(&root.path().join("A.md"));
             assert!(
                 !back.iter().any(|(p, _)| p.ends_with("leak.md")),
                 "a symlinked note must never enter the index: {back:?}"
+            );
+        });
+    }
+
+    /// The watcher's admission rule has to be `Index::scan`'s. A note
+    /// excluded by a *nested* `.gitignore` is absent from the scan and
+    /// was re-admitted by the watcher the moment the user saved it,
+    /// where it stayed in backlinks, the graph and `[[` completion
+    /// until the next restart -- while the sidebar, reading the same
+    /// rule, drew it undimmed.
+    #[gpui::test]
+    fn the_watcher_applies_nested_ignore_files_too(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let notes = root.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        std::fs::write(notes.join(".gitignore"), "private.md\n").unwrap();
+        let private = notes.join("private.md");
+        std::fs::write(&private, "links [[A]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let a = root.path().join("A.md");
+        // `A.md` rides along so the whole-batch short-circuit does not
+        // return early -- the per-path check is what is on trial.
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[a.clone(), private.clone()], cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let index = ws.read(app).knowledge.lock().unwrap();
+            let back = index.backlinks(&a);
+            assert!(
+                !back.iter().any(|(p, _)| p.ends_with("private.md")),
+                "a nested-gitignored note must stay out of the index: {back:?}"
+            );
+        });
+    }
+
+    /// The other half of the same rule: `Index::scan` drops a file
+    /// hardlinked to something outside the workspace, and a hardlink
+    /// made while the workspace is open reaches the index only through
+    /// the watcher, which had a symlink check and no hardlink check.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_watcher_never_indexes_a_note_hardlinked_from_outside(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        let outside = outside_dir.path().join("outside.md");
+        std::fs::write(&outside, "secret links [[A]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let leak = root.path().join("leak.md");
+        if std::fs::hard_link(&outside, &leak).is_err() {
+            return; // cross-device temp dirs: nothing to test here
+        }
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(std::slice::from_ref(&leak), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let index = ws.read(app).knowledge.lock().unwrap();
+            let back = index.backlinks(&root.path().join("A.md"));
+            assert!(
+                !back.iter().any(|(p, _)| p.ends_with("leak.md")),
+                "a hardlink out of the workspace must never enter the index: {back:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn on_fs_events_checks_each_path_not_just_the_batch(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.md"), "plain\n").unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        let hidden = root.path().join(".git").join("HIDDEN.md");
+        std::fs::write(&hidden, "secret links [[A]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        let a = root.path().join("A.md");
+        // The batch carries one path `is_visible` admits (so the
+        // batch-level short-circuit above does not return early) and
+        // one it does not: a `.md` under `.git`, which `Index::scan`
+        // never walks. Each path must be checked on its own.
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[a.clone(), hidden.clone()], cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let index = ws.read(app).knowledge.lock().unwrap();
+            let back = index.backlinks(&a);
+            assert!(
+                !back.iter().any(|(p, _)| p.ends_with("HIDDEN.md")),
+                "a path under .git must not enter the index just because \
+                 the batch also touched a visible file: {back:?}"
             );
         });
     }
@@ -5595,7 +6957,7 @@ mod tests {
         let (ws, cx) = open_workspace(cx, root.path());
 
         cx.update(|_, app| {
-            let tags = ws.read(app).all_tags(app);
+            let tags = ws.read(app).all_tags();
             assert_eq!(tags[0], ("planning".to_string(), 2));
             assert!(tags.contains(&("q3".to_string(), 1)));
         });
@@ -5646,6 +7008,83 @@ mod tests {
         cx.dispatch_action(GraphDismiss);
         cx.run_until_parked();
         cx.update(|_, app| assert!(ws.read(app).graph.is_none()));
+    }
+
+    /// A right-click on a graph node sets `graph.hovered` and the menu
+    /// dispatches `graph_local` -- which centred on the *active tab's*
+    /// path instead, so right-clicking a node while another note was
+    /// open centred the graph on the wrong note, and with no note open
+    /// it answered "Open a note to centre the graph on it" to a click
+    /// that named a specific node.
+    #[gpui::test]
+    fn the_graph_menu_centres_on_the_clicked_node(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Hub.md"), "to [[SpokeA]] and [[SpokeB]]\n").unwrap();
+        std::fs::write(root.path().join("SpokeA.md"), "back [[Hub]]\n").unwrap();
+        std::fs::write(root.path().join("SpokeB.md"), "quiet\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // A note open in the active tab -- the thing graph_local used
+        // to centre on no matter which node was clicked.
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path(&root.path().join("Hub.md"), window, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run_plugin_command("supermd".into(), "__graph".into(), window, cx)
+        });
+        cx.run_until_parked();
+
+        let (hub, spoke) = cx.update(|_, app| {
+            let nodes = ws.read(app).graph.as_ref().expect("graph open").nodes();
+            let ix = |name: &str| {
+                nodes.iter().position(|n| n.path.ends_with(name)).expect(name)
+            };
+            (ix("Hub.md"), ix("SpokeB.md"))
+        });
+        assert_ne!(hub, spoke);
+
+        // What the right-click handler does before raising the menu.
+        ws.update_in(cx, |ws, _, cx| {
+            ws.graph.as_mut().unwrap().hovered = Some(spoke);
+            cx.notify();
+        });
+        ws.update_in(cx, |ws, window, cx| ws.graph_local(&GraphLocal, window, cx));
+        cx.update(|_, app| {
+            let graph = ws.read(app).graph.as_ref().expect("graph open");
+            assert_eq!(
+                graph.filter.local,
+                Some((spoke, 1)),
+                "centred on the clicked node, not on the open note"
+            );
+        });
+
+        // Off again, then with no node under the pointer it falls back
+        // to the open note exactly as the keyboard action always has.
+        ws.update_in(cx, |ws, window, cx| ws.graph_local(&GraphLocal, window, cx));
+        ws.update_in(cx, |ws, _, cx| {
+            ws.graph.as_mut().unwrap().hovered = None;
+            cx.notify();
+        });
+        ws.update_in(cx, |ws, window, cx| ws.graph_local(&GraphLocal, window, cx));
+        cx.update(|_, app| {
+            let graph = ws.read(app).graph.as_ref().expect("graph open");
+            assert_eq!(graph.filter.local, Some((hub, 1)), "the open note");
+        });
+    }
+
+    /// `FsEntry.ignored` is computed and tested; this is the only test
+    /// that anything *reads* it. Without the dim, an ignored file looks
+    /// exactly like an indexed one and the sidebar quietly stops being
+    /// the place you can tell them apart.
+    #[test]
+    fn an_ignored_sidebar_row_is_dimmed() {
+        let t = crate::theme::Theme::dark();
+        assert_eq!(sidebar_row_color(true, false, &t), t.fg_muted, "an ignored file recedes");
+        assert_eq!(sidebar_row_color(true, true, &t), t.fg_muted, "an ignored folder too");
+        assert_ne!(sidebar_row_color(false, false, &t), t.fg_muted, "an indexed file does not");
+        assert_eq!(sidebar_row_color(false, false, &t), t.fg);
+        assert_eq!(sidebar_row_color(false, true, &t), t.fg_strong, "folders lead");
     }
 
     #[gpui::test]
@@ -6096,6 +7535,46 @@ mod tests {
             let Some(Tab::Editor { editor, .. }) = w.tabs.get(w.active) else { panic!("active tab is not an editor") };
             editor.clone()
         })
+    }
+
+    /// The editor raises its context menu as an event because the
+    /// workspace owns the single overlay that draws one. The subscription
+    /// must carry the editor's facts through: dropping them (storing a
+    /// `Default` context, say) compiles, draws, and silently hands the
+    /// user the empty menu the missing right-click handler already did.
+    #[gpui::test]
+    fn an_editor_context_menu_event_opens_the_overlay_with_its_facts(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        let editor = active_editor(&ws, cx);
+
+        cx.update(|_, app| assert!(ws.read(app).context_menu.is_none(), "nothing is open yet"));
+        let ctx = crate::menus::EditorContext {
+            in_table: true,
+            can_format: true,
+            ..Default::default()
+        };
+        let at = gpui::point(px(42.), px(17.));
+        editor.update(cx, |_, cx| {
+            cx.emit(EditorEvent::ContextMenu { position: at, ctx });
+        });
+        cx.run_until_parked();
+
+        let (pos, surface, stored) =
+            cx.update(|_, app| ws.read(app).context_menu.expect("the overlay opened"));
+        assert_eq!(pos, at, "it opens where the press landed");
+        assert_eq!(surface, crate::menus::Surface::Editor);
+        assert_eq!(stored, ctx, "the editor's facts reached the overlay");
+        // And the rows it draws are the table commands, not the two
+        // toggles a dropped context would have left.
+        let ids: Vec<&str> = crate::menus::items_for(surface, stored)
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert!(ids.contains(&"table_insert_row"), "{ids:?}");
     }
 
     // ── sidebar keyboard browsing ───────────────────────────────────────
@@ -6700,6 +8179,62 @@ mod tests {
         assert!(settings.contains(&picked_name), "picked theme persisted: {settings}");
     }
 
+    /// Every persisted setting is a read-modify-write against *disk*.
+    /// The copy in the `ThemeState` global was seeded once at launch
+    /// and knows nothing of what has been written since -- recents (and
+    /// under the sandbox the security-scoped bookmarks that hang off
+    /// them), plugin grants, net-domain grants. Saving that whole
+    /// struct back silently reverts all of it; only the one field the
+    /// user just changed may travel to disk.
+    #[gpui::test]
+    fn saving_one_setting_keeps_what_disk_gained_since_launch(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let dir = crate::settings::config_dir();
+
+        // What a fresh-load writer (record_recent, resolve_consent,
+        // enable_previews_for_hovered_site) leaves behind mid-session.
+        let stamp = |dir: &Path| {
+            let mut s = crate::settings::load(dir);
+            s.recent_workspaces = vec!["/opened/after/launch".to_string()];
+            s.plugin_grants.insert("demo".into(), vec!["workspace-read".into()]);
+            crate::settings::save(dir, &s).unwrap();
+        };
+        let still_there = |dir: &Path, who: &str| {
+            let s = crate::settings::load(dir);
+            assert_eq!(s.recent_workspaces, ["/opened/after/launch"], "{who} wiped the recents");
+            assert!(s.plugin_grants.contains_key("demo"), "{who} wiped the plugin grants");
+        };
+
+        stamp(&dir);
+        ws.update_in(cx, |ws, _w, cx| ws.record_default_handler_answer(cx));
+        still_there(&dir, "the default-handler banner");
+        assert!(crate::settings::load(&dir).default_handler_asked, "its own field did persist");
+
+        stamp(&dir);
+        let was = cx.update(|_, app| app.global::<crate::theme::ThemeState>().settings.flux.enabled);
+        ws.update_in(cx, |ws, window, cx| ws.toggle_flux(&ToggleFlux, window, cx));
+        still_there(&dir, "the flux toggle");
+        assert_eq!(crate::settings::load(&dir).flux.enabled, !was, "its own field did persist");
+
+        stamp(&dir);
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| ws.theme_picker_down(&ThemePickerDown, window, cx));
+        let picked = cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker open");
+            app.global::<crate::theme::ThemeState>().themes[picker.order[picker.pos]].name.clone()
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        still_there(&dir, "the theme picker");
+        assert_eq!(crate::settings::load(&dir).light_theme, picked, "its own field did persist");
+    }
+
     // ── edit/preview flip, new file ─────────────────────────────────────
 
     /// Previewing a code file must render it as code. It used to hand
@@ -7180,6 +8715,32 @@ mod tests {
         record_recent(ws_dir.path());
     }
 
+    /// A corrupt settings.toml must reach the user, not just an
+    /// eprintln! nobody sees in a packaged app -- and it has to happen
+    /// on this same startup, because record_recent's load-mutate-save
+    /// (triggered by opening this very workspace) is what overwrites
+    /// the preserved copy with defaults right afterward.
+    #[gpui::test]
+    fn corrupt_settings_file_surfaces_a_command_error_at_startup(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let config = crate::settings::config_dir();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("settings.toml"), "this is not = valid toml [[[").unwrap();
+
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let msg = w.command_error.clone().expect("the corruption must surface, not just print");
+            assert!(msg.contains("settings.toml.corrupt"), "message should name the recovery file: {msg}");
+        });
+        assert!(
+            config.join("settings.toml.corrupt").exists(),
+            "and the original bytes are actually kept on disk"
+        );
+    }
+
     // ── startup argument variants ───────────────────────────────────────
 
     #[gpui::test]
@@ -7333,9 +8894,7 @@ mod tests {
         let (ws, cx) = open_workspace(cx, root.path());
 
         let pending: Arc<Mutex<Vec<crate::PendingOpen>>> = Arc::new(Mutex::new(Vec::new()));
-        ws.update_in(cx, |ws, window, cx| {
-            ws.watch_external_opens(pending.clone(), window, cx)
-        });
+        cx.update(|_, app| watch_external_opens(pending.clone(), app));
         // First poll finds an empty queue and keeps looping.
         cx.background_executor
             .advance_clock(std::time::Duration::from_millis(350));
@@ -7363,6 +8922,79 @@ mod tests {
             assert_eq!(tab_paths(w, app), vec![Some(a.clone())], "file opened; missing filtered");
             assert_eq!(w.preview_tab, None, "external opens are permanent tabs");
         });
+    }
+
+    /// Closing the window an external-open watcher was armed on must
+    /// not silence Finder opens, "Open With → SuperMD", or
+    /// `supermd://` links for the rest of the session. That is exactly
+    /// what happened while the watcher was a per-window task: with one
+    /// window it could never be observed, and ⌘⇧N made it reachable.
+    #[gpui::test]
+    fn external_opens_survive_the_window_they_were_armed_on(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let second_root = tempfile::tempdir().unwrap();
+        install_test_globals(cx);
+
+        let first = cx
+            .update(|app| open_in_new_window(Some(root.path().to_path_buf()), app))
+            .expect("first window");
+        let second = cx
+            .update(|app| open_in_new_window(Some(second_root.path().to_path_buf()), app))
+            .expect("second window");
+        let pending: Arc<Mutex<Vec<crate::PendingOpen>>> = Arc::new(Mutex::new(Vec::new()));
+        cx.update(|app| watch_external_opens(pending.clone(), app));
+        cx.run_until_parked();
+
+        // Close the window the app started in.
+        cx.update(|app| {
+            first.update(app, |_, window, _| window.remove_window()).ok();
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|app| first.read(app).is_err()), "the first window is gone");
+
+        pending
+            .lock()
+            .unwrap()
+            .push(crate::PendingOpen::Path(a.clone()));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(350));
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            let ws = second.read(app).expect("second window alive");
+            assert!(
+                tab_paths(ws, app).iter().flatten().any(|p| p == &a),
+                "the open landed in the surviving window: {:?}",
+                tab_paths(ws, app)
+            );
+        });
+        assert!(
+            pending.lock().unwrap().is_empty(),
+            "a delivered batch is not requeued"
+        );
+    }
+
+    /// A batch that reaches no window is handed back, not dropped --
+    /// the old loop took the queue and then threw the contents away if
+    /// the update failed.
+    #[gpui::test]
+    fn an_undeliverable_batch_comes_back_rather_than_vanishing(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        install_test_globals(cx);
+        let only = cx
+            .update(|app| open_in_new_window(Some(root.path().to_path_buf()), app))
+            .expect("window");
+        cx.update(|app| {
+            only.update(app, |_, window, _| window.remove_window()).ok();
+        });
+        cx.run_until_parked();
+
+        let batch = vec![crate::PendingOpen::Path(a.clone())];
+        let back = cx.update(|app| deliver_external_opens(batch, app));
+        let back = back.expect("no window could take it, so it comes back");
+        assert!(matches!(back.as_slice(), [crate::PendingOpen::Path(p)] if *p == a));
     }
 
     // ── diff view (⌘⇧D) ─────────────────────────────────────────────────
@@ -7499,22 +9131,34 @@ mod tests {
         cx.update(|_, app| assert!(ws.read(app)._watcher.is_none()));
     }
 
+    /// Closing a window must let its `Workspace` actually go. The
+    /// watcher drain loop holds a `WeakEntity`; if it ever held a
+    /// strong one, every closed window would leak a whole workspace.
+    ///
+    /// It does **not** check that the loop exits, and the name no
+    /// longer says it does: a loop that never exits leaks a task, not
+    /// the entity, so removing its `break`s leaves this green. The
+    /// name it replaced (`drain_loops_exit_when_the_workspace_goes_away`)
+    /// promised that and more — it had no assertion at all, and the
+    /// drain parks on a timer, so `run_until_parked` returned whether
+    /// or not the loop exited. `rewatch_disconnects_the_old_drain_loop`
+    /// is the one that covers exiting.
+    ///
+    /// The external-open drain is deliberately not covered here: it is
+    /// app-level now and outlives any one window — see
+    /// `external_opens_survive_the_window_they_were_armed_on`.
     #[gpui::test]
-    fn drain_loops_exit_when_the_workspace_goes_away(cx: &mut TestAppContext) {
+    fn closing_a_window_drops_its_workspace(cx: &mut TestAppContext) {
         let _home = temp_home();
-        let (root, a, _b) = workspace_fixture();
+        let (root, _a, _b) = workspace_fixture();
         let root_canon = root.path().canonicalize().unwrap();
         let (ws, cx) = open_workspace(cx, &root_canon);
 
-        let pending: Arc<Mutex<Vec<crate::PendingOpen>>> =
-            Arc::new(Mutex::new(vec![crate::PendingOpen::Path(a.clone())]));
-        ws.update_in(cx, |ws, window, cx| {
-            ws.setup_watcher(cx);
-            ws.watch_external_opens(pending.clone(), window, cx);
-        });
+        ws.update_in(cx, |ws, _, cx| ws.setup_watcher(cx));
+        let weak = ws.downgrade();
 
-        // Queue a real fs event, then tear the window (and workspace)
-        // down; both drain loops must notice and exit rather than spin.
+        // Queue a real fs event so the loop has work in flight, then
+        // tear the window (and workspace) down under it.
         std::fs::write(root_canon.join("late.md"), "# late\n").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
         cx.update(|window, _| window.remove_window());
@@ -7525,6 +9169,11 @@ mod tests {
                 .advance_clock(std::time::Duration::from_millis(400));
             cx.run_until_parked();
         }
+        assert!(
+            weak.upgrade().is_none(),
+            "the workspace is gone; no drain loop is still holding it"
+        );
+        let _ = &root_canon;
     }
 
     // ── theme picker edges ──────────────────────────────────────────────
@@ -8097,6 +9746,153 @@ mod tests {
         assert!(move_failed, "the Move button reported the expected failure");
     }
 
+    #[test]
+    fn should_offer_default_handler_only_on_the_third_open() {
+        assert!(!should_offer_default_handler(1));
+        assert!(!should_offer_default_handler(2));
+        assert!(should_offer_default_handler(3));
+        // A fourth-or-later open must not re-arm an already-answered or
+        // already-dismissed offer: the caller only reaches this once
+        // per session, but the pure rule itself stays a hard `== 3`.
+        assert!(!should_offer_default_handler(4));
+    }
+
+    /// Never on the first two Markdown files opened this session --
+    /// that is the "demanding to be the default before you've been
+    /// used" behaviour the brief calls out by name -- and never at all
+    /// off macOS, which has no Markdown handler to become.
+    #[gpui::test]
+    fn third_markdown_open_triggers_the_default_handler_offer(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, _w, cx| {
+            ws.note_markdown_open(&a, cx);
+            ws.note_markdown_open(&a, cx);
+            assert!(!ws.show_default_handler_offer, "not on the first two opens");
+            ws.note_markdown_open(&a, cx);
+            assert_eq!(
+                ws.show_default_handler_offer,
+                crate::platform::MACOS,
+                "the third open offers it, but only where there is a handler to become"
+            );
+        });
+    }
+
+    /// The reading view resolves links through the workspace index,
+    /// which `make_reader` hands over in one line. Without it the
+    /// reader's index stays `None` and every wiki link and every
+    /// relative link in a preview reads as a note that does not exist
+    /// -- and the only `describe_link` test passes `None`, so it
+    /// structurally cannot see the difference.
+    #[gpui::test]
+    fn the_reading_view_previews_links_through_the_index(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Target.md"), "# Target\n\nthe body\n").unwrap();
+        let note = root.path().join("Note.md");
+        std::fs::write(&note, "see [[Target]] and [here](Target.md)\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&note, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        let reader = cx.update(|_, app| {
+            let ws = ws.read(app);
+            match ws.tabs.get(ws.active) {
+                Some(Tab::Editor { view: EditorView::Preview(reader), .. }) => reader.clone(),
+                _ => panic!("the active tab should be previewing"),
+            }
+        });
+        cx.update(|_, app| {
+            let reader = reader.read(app);
+            assert!(
+                matches!(reader.describe("[[Target", app), Some(crate::preview::Preview::Note { .. })),
+                "the wiki link resolves: {:?}",
+                reader.describe("[[Target", app)
+            );
+            assert!(
+                matches!(reader.describe("Target.md", app), Some(crate::preview::Preview::Note { .. })),
+                "and so does the relative link: {:?}",
+                reader.describe("Target.md", app)
+            );
+        });
+    }
+
+    /// The counter has to be wired to the real open path. Every other
+    /// test of this feature calls `note_markdown_open` directly, so
+    /// deleting its single call site left the whole thing unreachable
+    /// with the suite green.
+    #[gpui::test]
+    fn opening_markdown_files_normally_reaches_the_offer(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        for name in ["one.md", "two.md", "three.md"] {
+            std::fs::write(root.path().join(name), "# x\n").unwrap();
+        }
+        let (ws, cx) = open_workspace(cx, root.path());
+        for name in ["one.md", "two.md"] {
+            ws.update_in(cx, |ws, window, cx| {
+                ws.open_path(&root.path().join(name), window, cx)
+            });
+        }
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(!ws.read(app).show_default_handler_offer, "not on the first two");
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_path(&root.path().join("three.md"), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                ws.read(app).show_default_handler_offer,
+                crate::platform::MACOS,
+                "opening the third Markdown file the ordinary way raises the offer"
+            );
+        });
+    }
+
+    /// A refusal (or an acceptance) is remembered permanently: once
+    /// `default_handler_asked` is set, opening more Markdown files must
+    /// never bring the offer back.
+    #[gpui::test]
+    fn the_offer_never_returns_once_already_asked(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, _w, cx| {
+            cx.global_mut::<crate::theme::ThemeState>().settings.default_handler_asked = true;
+            for _ in 0..5 {
+                ws.note_markdown_open(&a, cx);
+            }
+            assert!(!ws.show_default_handler_offer, "an answered offer must not come back");
+        });
+    }
+
+    /// Answering hides the banner and persists the answer to disk, so a
+    /// restart does not ask again.
+    #[gpui::test]
+    fn recording_the_answer_hides_the_banner_and_survives_a_reload(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, _w, cx| {
+            ws.note_markdown_open(&a, cx);
+            ws.note_markdown_open(&a, cx);
+            ws.note_markdown_open(&a, cx);
+            ws.record_default_handler_answer(cx);
+            assert!(!ws.show_default_handler_offer, "answering dismisses the banner");
+            assert!(cx.global::<crate::theme::ThemeState>().settings.default_handler_asked);
+        });
+
+        let reloaded = crate::settings::load(&crate::settings::config_dir());
+        assert!(reloaded.default_handler_asked, "the answer survives a restart");
+    }
+
     // ── plugin shell: palette commands, templates, exports, consent,
     //    viewers, reload ──────────────────────────────────────────────
 
@@ -8445,9 +10241,15 @@ mod tests {
         assert!(installed.exists(), "plugin landed in the plugins dir");
         cx.update(|_, app| {
             assert!(ws.read(app).install_overlay.is_none(), "overlay closed");
-            let state = app.global::<crate::extensions::ExtensionState>();
-            let names: Vec<String> =
-                state.0.lock().unwrap().plugins().iter().map(|p| p.name.clone()).collect();
+            let names: Vec<String> = ws
+                .read(app)
+                .host
+                .lock()
+                .unwrap()
+                .plugins()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
             assert_eq!(names, ["demo"], "host reloaded with the new plugin");
         });
     }
@@ -8512,6 +10314,63 @@ mod tests {
         assert!(!landed.exists());
     }
 
+    /// `refresh_tables` writes the *process-wide* fence/decoration/
+    /// inline tables, so a reload in one window re-points every
+    /// window's projectors at the new plugin set -- while only the
+    /// reloading window's host actually has it. Window B then claims a
+    /// fence, its own host answers "no such plugin", and a red error
+    /// banner replaces every such block until that window restarts.
+    #[gpui::test]
+    fn reloading_plugins_refreshes_every_window(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        // Not `with_plugins`: that installs the ExtensionState global,
+        // and `open_arg` then hands every window the *same* host handle,
+        // which is exactly the sharing this test has to not have.
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        if !fixtures.join("echo/plugin.wasm").exists() {
+            eprintln!("SKIP: fixtures not built (scripts/build_plugins.sh --fixtures)");
+            return;
+        }
+        let _tables = crate::extensions::table_test_guard();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        // B first, so the live `cx` belongs to A's window -- the
+        // reload has to run through the window whose action it is.
+        let (ws_b, cx) = open_workspace(cx, b.path());
+        let (ws_a, cx) = open_workspace(cx, a.path());
+        cx.run_until_parked();
+
+        // The plugin appears on disk only after both windows are open,
+        // so neither host has it until something reloads.
+        let plugins = crate::settings::config_dir().join("plugins/echo");
+        std::fs::create_dir_all(&plugins).unwrap();
+        for f in ["plugin.toml", "plugin.wasm"] {
+            std::fs::copy(fixtures.join("echo").join(f), plugins.join(f)).unwrap();
+        }
+
+        ws_a.update_in(cx, |ws, window, cx| ws.reload_plugins(&ReloadPlugins, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let names = |ws: &Entity<Workspace>| -> Vec<String> {
+                ws.read(app)
+                    .host
+                    .lock()
+                    .unwrap()
+                    .plugins()
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect()
+            };
+            assert_eq!(names(&ws_a), ["echo"], "the reloading window");
+            assert_eq!(names(&ws_b), ["echo"], "and every other window with it");
+            assert_eq!(
+                ws_b.read(app).host.lock().unwrap().workspace_root().as_deref(),
+                Some(b.path()),
+                "each window keeps its own sandbox root"
+            );
+        });
+    }
+
     #[gpui::test]
     fn reload_plugins_rebuilds_the_host(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -8532,9 +10391,15 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|_, app| {
-            let state = app.global::<crate::extensions::ExtensionState>();
-            let names: Vec<String> =
-                state.0.lock().unwrap().plugins().iter().map(|p| p.name.clone()).collect();
+            let names: Vec<String> = ws
+                .read(app)
+                .host
+                .lock()
+                .unwrap()
+                .plugins()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
             assert_eq!(names, ["echo"], "reload swapped to the temp-HOME plugin set");
         });
         let _ = ws;

@@ -329,11 +329,21 @@ pub fn ureq_preview_fetcher() -> PreviewFetcher {
 pub struct PreviewState {
     pub fetcher: PreviewFetcher,
     pub cache: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, FetchedMeta>>>,
+    /// The `supermd` preview grants, read once at construction rather
+    /// than on every popover open — a file read and a TOML parse on
+    /// the UI thread, every dwell. `refresh_grants` re-reads it; call
+    /// that right after a grant is written, or the next hover answers
+    /// from a stale copy.
+    grants: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl PreviewState {
     pub fn new(fetcher: PreviewFetcher) -> Self {
-        Self { fetcher, cache: Default::default() }
+        Self {
+            fetcher,
+            cache: Default::default(),
+            grants: std::sync::Arc::new(std::sync::Mutex::new(stored_grants())),
+        }
     }
 
     pub fn cached(&self, url: &str) -> Option<FetchedMeta> {
@@ -343,6 +353,20 @@ impl PreviewState {
     pub fn remember(&self, url: &str, meta: FetchedMeta) {
         if let Ok(mut c) = self.cache.lock() {
             c.insert(url.to_string(), meta);
+        }
+    }
+
+    /// The cached `supermd` preview grants.
+    pub fn grants(&self) -> Vec<String> {
+        self.grants.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// Re-read the grants from disk into the cache. Call this right
+    /// after writing a new one, or a hover already in flight answers
+    /// from what was cached before the grant existed.
+    pub fn refresh_grants(&self) {
+        if let Ok(mut g) = self.grants.lock() {
+            *g = stored_grants();
         }
     }
 }
@@ -649,6 +673,52 @@ mod tests {
         h.moved_to(10, t0 + Duration::from_millis(200));
         h.moved_to(10, t0 + Duration::from_millis(399));
         assert!(h.poll(t0 + DWELL), "the original dwell still governs");
+    }
+
+    /// `PreviewState` reads the grants once, and only `refresh_grants`
+    /// moves that cache forward -- the same shape `settings::load`
+    /// itself has, minus a file read and a TOML parse on every hover.
+    #[test]
+    fn grants_are_read_once_and_refreshed_on_demand() {
+        // HOME is process-wide: share the crate's one lock-guarded
+        // helper rather than swapping it unguarded, or a test in
+        // another file racing the same env var reads this test's
+        // tempdir (or vice versa).
+        let _home = crate::workspace::tests::temp_home();
+
+        // A grant already exists on disk before the state is built.
+        let dir = crate::settings::config_dir();
+        let mut settings = crate::settings::load(&dir);
+        settings.plugin_grants.insert("supermd".into(), vec!["net:first.test".into()]);
+        crate::settings::save(&dir, &settings).unwrap();
+
+        let state = PreviewState::new(std::sync::Arc::new(|_: &str| Ok(Vec::new())));
+        assert_eq!(
+            state.grants(),
+            vec!["net:first.test".to_string()],
+            "grants are read at construction"
+        );
+
+        // A second grant lands on disk exactly the way
+        // `enable_previews_for_hovered_site` writes one -- straight
+        // through `settings::save`, never through this state.
+        settings.plugin_grants.insert(
+            "supermd".into(),
+            vec!["net:first.test".into(), "net:second.test".into()],
+        );
+        crate::settings::save(&dir, &settings).unwrap();
+        assert_eq!(
+            state.grants(),
+            vec!["net:first.test".to_string()],
+            "a stale cache must not see a new grant on its own"
+        );
+
+        state.refresh_grants();
+        assert_eq!(
+            state.grants(),
+            vec!["net:first.test".to_string(), "net:second.test".to_string()],
+            "refresh_grants must pick up what is on disk now"
+        );
     }
 }
 

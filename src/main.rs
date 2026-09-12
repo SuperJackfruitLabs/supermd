@@ -20,6 +20,7 @@ mod knowledge;
 mod install;
 mod install_ui;
 mod markdown;
+mod menus;
 mod nav;
 mod preview;
 mod palette;
@@ -42,14 +43,9 @@ mod workspace;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::prelude::*;
-use gpui::{
-    actions, point, px, size, App, Application, Bounds, Focusable, KeyBinding, Menu, MenuItem,
-    SystemMenuType, TitlebarOptions, WindowBounds, WindowOptions,
-};
+use gpui::{actions, App, Application, KeyBinding, Menu, MenuItem, SystemMenuType};
 
 use theme::{apply_system_appearance, ActiveTheme};
-use workspace::Workspace;
 
 actions!(app, [Quit]);
 
@@ -395,9 +391,14 @@ fn main() {
                 eprintln!("supermd: plugin failed: {}: {err}", dir.display());
             }
             host.set_grants(startup_settings.plugin_grants.clone());
-            if let Some(dir) = arg.as_ref().filter(|p| p.is_dir()) {
-                host.set_workspace_root(Some(dir.clone()));
-            }
+            // Deliberately no workspace root: this is the shared
+            // rootless host (see `extensions::ExtensionState`). Each
+            // window's `Workspace` owns the rooted host that decides
+            // what a `workspace-read` plugin may open. Marking it says
+            // so out loud: a workspace-read plugin reaching this host
+            // is refused by name instead of silently getting an empty
+            // filesystem after the user has already granted consent.
+            host.mark_shared_rootless();
             cx.set_global(extensions::ExtensionState(Arc::new(std::sync::Mutex::new(host))));
         }
         cx.set_global(editor::SessionBackups(Arc::new(std::sync::Mutex::new(
@@ -417,67 +418,24 @@ fn main() {
 
         cx.set_menus(app_menus(&startup_settings.recent_workspaces));
 
-        let bounds = Bounds {
-            origin: point(px(100.), px(60.)),
-            size: size(px(1200.), px(800.)),
-        };
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("SuperMD".into()),
-                        // Client-side decorations: we draw the top bar,
-                        // native traffic lights overlay it.
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(px(12.), px(10.))),
-                    }),
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    // Linux: ask for client-side decorations; we draw
-                    // our own window controls when the compositor
-                    // grants them (Decorations::Server is the fallback).
-                    window_decorations: if cfg!(target_os = "linux") {
-                        Some(gpui::WindowDecorations::Client)
-                    } else {
-                        None
-                    },
-                    ..Default::default()
-                },
-                {
-                    let arg = arg.clone();
-                    move |_window, cx| {
-                        cx.new(|cx| {
-                            let mut workspace = Workspace::new(arg, cx);
-                            workspace.setup_watcher(cx);
-                            workspace
-                        })
-                    }
-                },
-            )
-            .unwrap();
+        // The same opener every later ⌘⇧N uses, so the first window is
+        // not a special case with its own chrome.
+        let window = workspace::open_in_new_window(arg.clone(), cx)
+            .expect("the first window opens");
 
-        // Flush every dirty editor before the app exits.
+        // Flush every dirty editor in *every* window before the app
+        // exits.
         cx.on_app_quit(move |cx| {
-            window
-                .update(cx, |workspace, _window, cx| workspace.flush_all(cx))
-                .ok();
+            workspace::flush_all_windows(cx);
             async {}
         })
         .detach();
 
-        window
-            .update(cx, |workspace, window, cx| {
-                workspace.watch_external_opens(pending_opens.clone(), window, cx);
-                apply_system_appearance(window.appearance(), cx);
-                window
-                    .observe_window_appearance(|window, cx| {
-                        apply_system_appearance(window.appearance(), cx);
-                        window.refresh();
-                    })
-                    .detach();
-                window.focus(&workspace.focus_handle(cx));
-                cx.activate(true);
-            })
-            .unwrap();
+        // External opens (Finder, `supermd://`) are routed at app
+        // level into whichever window is alive -- not bound to the one
+        // opened here, which the user may close while others stay up.
+        let _ = &window;
+        workspace::watch_external_opens(pending_opens.clone(), cx);
     });
 }
 

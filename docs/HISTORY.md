@@ -29,3 +29,13 @@ The phase-by-phase build record that used to live in WELCOME.md.
 | 22 | Flux: solar times, night blend, kelvin warming | Done |
 | 23 | Knowledge: file ops, wiki links, backlinks, tags, graph view | Done |
 | 24 | Shortcuts, menus & chrome: one command table, six surfaces | Done |
+
+## Release notes
+
+**0.0.16** — Multiple windows (⌘⇧N, and Open Folder in New Window). Each
+window is its own workspace: its own tabs, knowledge index, graph, and
+plugin sandbox root, so two vaults open at once never show each other's
+notes. Plugin authors: `workspace-read` is now per window, and is no
+longer available to `render_inline` (whose results are cached across
+every window) — inline calls from a plugin declaring it fail with a
+named error instead of silently seeing an empty `/workspace`.

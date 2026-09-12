@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -176,6 +177,17 @@ pub fn rasterize(svg: &str, scale: f32) -> Result<(Vec<u8>, u32, u32), String> {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct DiagramKey {
     pub source_hash: u64,
+    /// The workspace root the render ran against, hashed; 0 for a
+    /// render that cannot read one (merman, or no host root).
+    ///
+    /// The cache is process-wide and shared by every window. A plugin
+    /// fence renderer holding `workspace-read` reads files named in the
+    /// fence body, so the *same* fence body in two vaults is two
+    /// different pictures — without the root in the key, window B gets
+    /// a cache hit and is shown vault A's contents. It also fixes the
+    /// single-window half: `open_path` re-roots the host, and diagrams
+    /// rendered against the old root must not survive it.
+    pub root_hash: u64,
     pub theme_fingerprint: u64,
     pub width_bucket: u32,
 }
@@ -183,6 +195,12 @@ pub struct DiagramKey {
 impl DiagramKey {
     pub fn bucket(width: f32) -> u32 {
         ((width / 64.0).round() as u32) * 64
+    }
+
+    /// Hash of the workspace root a render may read under. `None` (no
+    /// folder open, or a renderer that reads nothing) is 0.
+    pub fn root(root: Option<&Path>) -> u64 {
+        root.map(|r| hash_str(&r.to_string_lossy())).unwrap_or(0)
     }
 }
 
@@ -248,6 +266,14 @@ impl DiagramCache {
         self.map.get(key)
     }
 
+    /// Forget one entry. Used to retract a render whose root moved
+    /// while it was in flight — the result belongs to a vault that is
+    /// no longer the one the key names.
+    pub fn remove(&mut self, key: &DiagramKey) {
+        self.map.remove(key);
+        self.order.retain(|k| k != key);
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -270,6 +296,9 @@ pub fn diagram_state(source: &str, width: f32, cx: &mut gpui::App) -> DiagramSta
     let theme = DiagramTheme::from_theme(&crate::theme::theme(cx));
     let key = DiagramKey {
         source_hash: hash_str(source),
+        // merman renders the fence text and nothing else: no host, no
+        // preopen, so no workspace to be wrong about.
+        root_hash: 0,
         theme_fingerprint: theme.fingerprint(),
         width_bucket: DiagramKey::bucket(width),
     };
@@ -317,11 +346,32 @@ pub fn plugin_diagram_state(
     lang: &str,
     source: &str,
     width: f32,
+    host: Option<crate::extensions::HostHandle>,
+    root: Option<crate::extensions::RootHandle>,
     cx: &mut gpui::App,
 ) -> DiagramState {
+    // The host belongs to the workspace that owns the editor drawing
+    // this block, never to the process: its preopen root is that
+    // window's folder.
+    let Some(host) = host else {
+        return DiagramState::Failed("extensions not initialized".to_string());
+    };
+    // The root is read *here*, from the cell the host shares, rather
+    // than taken as a value the caller computed: a caller that gets it
+    // wrong silently re-opens the cross-vault cache leak, and there is
+    // nothing on the render path for it to get wrong if it only ever
+    // forwards the cell. A read-lock on that cell is cheap — it is the
+    // *host* mutex that must never be taken per frame, since a plugin
+    // call holds it for up to the epoch cap. Poison keeps the root
+    // rather than falling back to the shared `None` key space.
+    let root_cell = root;
+    let root = root_cell
+        .as_ref()
+        .and_then(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
     let theme = DiagramTheme::from_theme(&crate::theme::theme(cx));
     let key = DiagramKey {
         source_hash: hash_str(&format!("{plugin}@{version}:{lang}\u{0}{source}")),
+        root_hash: DiagramKey::root(root.as_deref()),
         theme_fingerprint: theme.fingerprint(),
         width_bucket: DiagramKey::bucket(width),
     };
@@ -331,15 +381,10 @@ pub fn plugin_diagram_state(
     if let Some(state) = cx.global::<DiagramCache>().get(&key) {
         return state.clone();
     }
-    let Some(host) = cx
-        .try_global::<crate::extensions::ExtensionState>()
-        .map(|s| s.0.clone())
-    else {
-        return DiagramState::Failed("extensions not initialized".to_string());
-    };
     cx.global_mut::<DiagramCache>().insert(key.clone(), DiagramState::Pending);
 
     let available = width;
+    let keyed_root = root;
     let (plugin, lang, source) = (plugin.to_string(), lang.to_string(), source.to_string());
     let render = cx.background_executor().spawn(async move {
         let svg = host
@@ -361,7 +406,22 @@ pub fn plugin_diagram_state(
             Err(e) => DiagramState::Failed(e),
         };
         cx.update(|cx| {
-            cx.global_mut::<DiagramCache>().insert(key, state);
+            // The key was built from the root as it read *before* the
+            // render was queued; the host reads its own root again when
+            // the call actually executes. A re-root landing in that
+            // window would cache content rendered against the new vault
+            // under the old vault's key — the same cross-vault leak the
+            // key exists to close, through a narrower door. If the root
+            // moved, retract the entry instead: the next frame keys
+            // under the root that is now true and renders again.
+            let now = root_cell
+                .as_ref()
+                .and_then(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
+            if now == keyed_root {
+                cx.global_mut::<DiagramCache>().insert(key, state);
+            } else {
+                cx.global_mut::<DiagramCache>().remove(&key);
+            }
             cx.refresh_windows();
         })
         .ok();
@@ -453,17 +513,134 @@ mod tests {
         let mut c = DiagramCache::default();
         for i in 0..130u64 {
             c.insert(
-                DiagramKey { source_hash: i, theme_fingerprint: 0, width_bucket: 704 },
+                DiagramKey { source_hash: i, root_hash: 0, theme_fingerprint: 0, width_bucket: 704 },
                 DiagramState::Pending,
             );
         }
         assert!(c.len() <= 128);
         assert!(c
-            .get(&DiagramKey { source_hash: 0, theme_fingerprint: 0, width_bucket: 704 })
+            .get(&DiagramKey { source_hash: 0, root_hash: 0, theme_fingerprint: 0, width_bucket: 704 })
             .is_none());
         assert!(c
-            .get(&DiagramKey { source_hash: 129, theme_fingerprint: 0, width_bucket: 704 })
+            .get(&DiagramKey { source_hash: 129, root_hash: 0, theme_fingerprint: 0, width_bucket: 704 })
             .is_some());
+    }
+
+    /// The cache is process-wide; the workspace root is part of the
+    /// key. A plugin fence renderer holding `workspace-read` reads
+    /// files under that root, so the *same* fence body in two vaults is
+    /// two different renders — without the root in the key, the second
+    /// window takes a cache hit and is shown the first window's data.
+    /// The lookup happens before the host is ever consulted, so the
+    /// host alone cannot keep them apart.
+    #[gpui::test]
+    fn two_vaults_with_the_same_fence_body_are_two_cache_entries(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(crate::theme::Theme::dark())));
+            // An empty host: the render fails, but only *after* the key
+            // has been computed and the Pending entry inserted, which
+            // is the part under test.
+            let host: crate::extensions::HostHandle = Arc::new(std::sync::Mutex::new(
+                crate::extensions::ExtensionHost::load(Path::new("/nonexistent")),
+            ));
+            let body = "same fence body";
+            let cell = |root: &Path| -> crate::extensions::RootHandle {
+                Arc::new(std::sync::RwLock::new(Some(root.to_path_buf())))
+            };
+            let call = |root: &Path, cx: &mut gpui::App| {
+                plugin_diagram_state(
+                    "renderer",
+                    "0.1.0",
+                    "demo",
+                    body,
+                    664.0,
+                    Some(host.clone()),
+                    Some(cell(root)),
+                    cx,
+                )
+            };
+            call(a.path(), cx);
+            assert_eq!(cx.global::<DiagramCache>().len(), 1);
+            // Same body, same plugin, same width, different vault.
+            call(b.path(), cx);
+            assert_eq!(
+                cx.global::<DiagramCache>().len(),
+                2,
+                "vault B must not hit vault A's cached render"
+            );
+            // And the same vault twice is still one entry.
+            call(a.path(), cx);
+            assert_eq!(cx.global::<DiagramCache>().len(), 2);
+        });
+    }
+
+    /// The root is read once to build the key, and the host reads its
+    /// own root again when the render actually executes. A re-root
+    /// landing in that window would cache a picture of vault B under
+    /// vault A's key — the same cross-vault leak, through a narrower
+    /// door. The entry is retracted instead, so the next frame keys
+    /// under the root that is now true.
+    #[gpui::test]
+    fn a_render_whose_root_moved_mid_flight_is_retracted(cx: &mut gpui::TestAppContext) {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let cell: crate::extensions::RootHandle =
+            Arc::new(std::sync::RwLock::new(Some(a.path().to_path_buf())));
+        let host: crate::extensions::HostHandle = Arc::new(std::sync::Mutex::new(
+            crate::extensions::ExtensionHost::load(Path::new("/nonexistent")),
+        ));
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(crate::theme::Theme::dark())));
+        });
+
+        // The control: nothing moves, so the result is kept.
+        cx.update(|cx| {
+            plugin_diagram_state(
+                "renderer", "0.1.0", "demo", "steady", 664.0,
+                Some(host.clone()), Some(cell.clone()), cx,
+            );
+            assert_eq!(cx.global::<DiagramCache>().len(), 1, "pending entry");
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(cx.global::<DiagramCache>().len(), 1, "a settled render is cached");
+        });
+
+        // And the race: queued against A, landing after a move to B.
+        cx.update(|cx| {
+            plugin_diagram_state(
+                "renderer", "0.1.0", "demo", "raced", 664.0,
+                Some(host.clone()), Some(cell.clone()), cx,
+            );
+            assert_eq!(cx.global::<DiagramCache>().len(), 2, "pending entry");
+        });
+        *cell.write().unwrap() = Some(b.path().to_path_buf());
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                cx.global::<DiagramCache>().len(),
+                1,
+                "the entry keyed under vault A was retracted, not filled with vault B's render"
+            );
+        });
+    }
+
+    #[test]
+    fn root_hash_separates_roots_and_collapses_none() {
+        assert_eq!(DiagramKey::root(None), 0);
+        assert_ne!(DiagramKey::root(Some(Path::new("/vault/a"))), 0);
+        assert_ne!(
+            DiagramKey::root(Some(Path::new("/vault/a"))),
+            DiagramKey::root(Some(Path::new("/vault/b")))
+        );
+        assert_eq!(
+            DiagramKey::root(Some(Path::new("/vault/a"))),
+            DiagramKey::root(Some(Path::new("/vault/a")))
+        );
     }
 
     #[test]
@@ -500,7 +677,7 @@ mod tests {
     #[test]
     fn reinserting_key_updates_state_without_duplicating_order() {
         let mut c = DiagramCache::default();
-        let key = DiagramKey { source_hash: 7, theme_fingerprint: 0, width_bucket: 704 };
+        let key = DiagramKey { source_hash: 7, root_hash: 0, theme_fingerprint: 0, width_bucket: 704 };
         c.insert(key.clone(), DiagramState::Pending);
         c.insert(key.clone(), DiagramState::Failed("boom".into()));
         assert_eq!(c.len(), 1);
@@ -511,7 +688,7 @@ mod tests {
         // so the original key must survive.
         for i in 100..227u64 {
             c.insert(
-                DiagramKey { source_hash: i, theme_fingerprint: 0, width_bucket: 704 },
+                DiagramKey { source_hash: i, root_hash: 0, theme_fingerprint: 0, width_bucket: 704 },
                 DiagramState::Pending,
             );
         }
