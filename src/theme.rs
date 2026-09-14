@@ -2,48 +2,76 @@ use std::sync::Arc;
 
 use gpui::{rgb, App, Global, Hsla, SharedString, WindowAppearance};
 
-/// Colors for tree-sitter highlight captures.
-pub struct SyntaxColors {
-    pub keyword: Hsla,
-    pub function: Hsla,
-    pub kind: Hsla, // types
-    pub string: Hsla,
-    pub comment: Hsla,
-    pub constant: Hsla,
-    pub property: Hsla,
-    pub operator: Hsla,
-    pub tag: Hsla,
-    pub attribute: Hsla,
+/// Declares a group of colour fields once: the struct itself, a `map`
+/// used by `Theme::map_colors`, and a `fields()` accessor the test
+/// walks. A field can only be declared here — there is nowhere else
+/// for one to hide from `map_colors`, so flux warming cannot miss it.
+/// Modelled on the `surfaces!` macro in `menus.rs`, which removed the
+/// same hand-maintained-second-list defect from `Surface::ALL`.
+macro_rules! theme_colors {
+    ($name:ident { $($field:ident),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        pub struct $name {
+            $(pub $field: Hsla,)+
+        }
+
+        impl $name {
+            fn map(&self, f: &impl Fn(Hsla) -> Hsla) -> Self {
+                Self { $($field: f(self.$field),)+ }
+            }
+
+            pub fn fields(&self) -> Vec<(&'static str, Hsla)> {
+                vec![$((stringify!($field), self.$field),)+]
+            }
+        }
+    };
 }
+
+// Colors for tree-sitter highlight captures.
+theme_colors!(SyntaxColors {
+    keyword,
+    function,
+    kind, // types
+    string,
+    comment,
+    constant,
+    property,
+    operator,
+    tag,
+    attribute,
+});
+
+theme_colors!(ThemeColors {
+    // Document surface
+    bg,
+    fg,
+    fg_strong,
+    fg_muted,
+    accent,
+    link,
+    code_bg,
+    code_fg,
+    border,
+
+    // Chrome: sidebar, tab bar, panels
+    panel_bg,
+    hover_bg,
+    selected_bg,
+    find_match_bg,
+    find_active_bg,
+
+    // Diff view washes
+    diff_added_bg,
+    diff_added_fg,
+    diff_deleted_bg,
+    diff_deleted_fg,
+});
 
 /// Visual constants for the whole app. One place to tune the look.
 pub struct Theme {
     pub is_dark: bool,
 
-    // Document surface
-    pub bg: Hsla,
-    pub fg: Hsla,
-    pub fg_strong: Hsla,
-    pub fg_muted: Hsla,
-    pub accent: Hsla,
-    pub link: Hsla,
-    pub code_bg: Hsla,
-    pub code_fg: Hsla,
-    pub border: Hsla,
-
-    // Chrome: sidebar, tab bar, panels
-    pub panel_bg: Hsla,
-    pub hover_bg: Hsla,
-    pub selected_bg: Hsla,
-    pub find_match_bg: Hsla,
-    pub find_active_bg: Hsla,
-
-    // Diff view washes
-    pub diff_added_bg: Hsla,
-    pub diff_added_fg: Hsla,
-    pub diff_deleted_bg: Hsla,
-    pub diff_deleted_fg: Hsla,
-
+    pub colors: ThemeColors,
     pub syntax: SyntaxColors,
 
     pub body_family: SharedString,
@@ -55,43 +83,32 @@ pub struct Theme {
     pub ui_size: f32,
 }
 
+/// Existing call sites read and write colours as direct fields
+/// (`t.bg`, `theme.accent = ...`) all over `workspace.rs`, `view.rs`
+/// and `editor/`. `Deref`/`DerefMut` to `ThemeColors` keeps every one
+/// of those compiling unchanged instead of renaming them to `t.colors.bg`.
+impl std::ops::Deref for Theme {
+    type Target = ThemeColors;
+    fn deref(&self) -> &ThemeColors {
+        &self.colors
+    }
+}
+
+impl std::ops::DerefMut for Theme {
+    fn deref_mut(&mut self) -> &mut ThemeColors {
+        &mut self.colors
+    }
+}
+
 impl Theme {
     /// A copy with every color passed through `f`; fonts, sizes, and
-    /// flags unchanged. New color fields must be threaded through here
-    /// — flux warming relies on full coverage.
+    /// flags unchanged. Colors are declared once via `theme_colors!`,
+    /// so this cannot miss one — flux warming relies on full coverage.
     pub fn map_colors(&self, f: impl Fn(Hsla) -> Hsla) -> Self {
         Self {
             is_dark: self.is_dark,
-            bg: f(self.bg),
-            fg: f(self.fg),
-            fg_strong: f(self.fg_strong),
-            fg_muted: f(self.fg_muted),
-            accent: f(self.accent),
-            link: f(self.link),
-            code_bg: f(self.code_bg),
-            code_fg: f(self.code_fg),
-            border: f(self.border),
-            panel_bg: f(self.panel_bg),
-            hover_bg: f(self.hover_bg),
-            selected_bg: f(self.selected_bg),
-            find_match_bg: f(self.find_match_bg),
-            find_active_bg: f(self.find_active_bg),
-            diff_added_bg: f(self.diff_added_bg),
-            diff_added_fg: f(self.diff_added_fg),
-            diff_deleted_bg: f(self.diff_deleted_bg),
-            diff_deleted_fg: f(self.diff_deleted_fg),
-            syntax: SyntaxColors {
-                keyword: f(self.syntax.keyword),
-                function: f(self.syntax.function),
-                kind: f(self.syntax.kind),
-                string: f(self.syntax.string),
-                comment: f(self.syntax.comment),
-                constant: f(self.syntax.constant),
-                property: f(self.syntax.property),
-                operator: f(self.syntax.operator),
-                tag: f(self.syntax.tag),
-                attribute: f(self.syntax.attribute),
-            },
+            colors: self.colors.map(&f),
+            syntax: self.syntax.map(&f),
             body_family: self.body_family.clone(),
             mono_family: self.mono_family.clone(),
             body_size: self.body_size,
@@ -101,30 +118,41 @@ impl Theme {
         }
     }
 
+    /// Every colour field on the theme (document/chrome/diff, then
+    /// syntax), name and current value. Used only by tests to walk
+    /// the full set `map_colors` is guaranteed to cover.
+    pub fn color_fields(&self) -> Vec<(&'static str, Hsla)> {
+        let mut v = self.colors.fields();
+        v.extend(self.syntax.fields());
+        v
+    }
+
     pub fn light() -> Self {
         Self {
             is_dark: false,
 
-            bg: rgb(0xfdfbf6).into(),
-            fg: rgb(0x33302a).into(),
-            fg_strong: rgb(0x211f1a).into(),
-            fg_muted: rgb(0x918b7d).into(),
-            accent: rgb(0xc9821c).into(),
-            link: rgb(0xc9821c).into(),
-            code_bg: rgb(0xf6f2e9).into(),
-            code_fg: rgb(0x4a463d).into(),
-            border: rgb(0xeae5d8).into(),
+            colors: ThemeColors {
+                bg: rgb(0xfdfbf6).into(),
+                fg: rgb(0x33302a).into(),
+                fg_strong: rgb(0x211f1a).into(),
+                fg_muted: rgb(0x918b7d).into(),
+                accent: rgb(0xc9821c).into(),
+                link: rgb(0xc9821c).into(),
+                code_bg: rgb(0xf6f2e9).into(),
+                code_fg: rgb(0x4a463d).into(),
+                border: rgb(0xeae5d8).into(),
 
-            panel_bg: rgb(0xf8f5ec).into(),
-            hover_bg: rgb(0xf0ebdf).into(),
-            selected_bg: rgb(0xe8e1d0).into(),
-            find_match_bg: rgb(0xf6e3a8).into(),
-            find_active_bg: rgb(0xecc153).into(),
+                panel_bg: rgb(0xf8f5ec).into(),
+                hover_bg: rgb(0xf0ebdf).into(),
+                selected_bg: rgb(0xe8e1d0).into(),
+                find_match_bg: rgb(0xf6e3a8).into(),
+                find_active_bg: rgb(0xecc153).into(),
 
-            diff_added_bg: rgb(0xe6f0dc).into(),
-            diff_added_fg: rgb(0x3d6b2f).into(),
-            diff_deleted_bg: rgb(0xf7e3e0).into(),
-            diff_deleted_fg: rgb(0xa04b3d).into(),
+                diff_added_bg: rgb(0xe6f0dc).into(),
+                diff_added_fg: rgb(0x3d6b2f).into(),
+                diff_deleted_bg: rgb(0xf7e3e0).into(),
+                diff_deleted_fg: rgb(0xa04b3d).into(),
+            },
 
             syntax: SyntaxColors {
                 keyword: rgb(0xa626a4).into(),
@@ -153,26 +181,28 @@ impl Theme {
         Self {
             is_dark: true,
 
-            bg: rgb(0x211f1a).into(),
-            fg: rgb(0xd9d4c8).into(),
-            fg_strong: rgb(0xf2ede2).into(),
-            fg_muted: rgb(0x8f897a).into(),
-            accent: rgb(0xe5a63b).into(),
-            link: rgb(0xe5a63b).into(),
-            code_bg: rgb(0x2b2822).into(),
-            code_fg: rgb(0xcfc9ba).into(),
-            border: rgb(0x383428).into(),
+            colors: ThemeColors {
+                bg: rgb(0x211f1a).into(),
+                fg: rgb(0xd9d4c8).into(),
+                fg_strong: rgb(0xf2ede2).into(),
+                fg_muted: rgb(0x8f897a).into(),
+                accent: rgb(0xe5a63b).into(),
+                link: rgb(0xe5a63b).into(),
+                code_bg: rgb(0x2b2822).into(),
+                code_fg: rgb(0xcfc9ba).into(),
+                border: rgb(0x383428).into(),
 
-            panel_bg: rgb(0x262420).into(),
-            hover_bg: rgb(0x2f2c25).into(),
-            selected_bg: rgb(0x3a362c).into(),
-            find_match_bg: rgb(0x574a1c).into(),
-            find_active_bg: rgb(0x7d6a24).into(),
+                panel_bg: rgb(0x262420).into(),
+                hover_bg: rgb(0x2f2c25).into(),
+                selected_bg: rgb(0x3a362c).into(),
+                find_match_bg: rgb(0x574a1c).into(),
+                find_active_bg: rgb(0x7d6a24).into(),
 
-            diff_added_bg: rgb(0x2c3a26).into(),
-            diff_added_fg: rgb(0xa8c897).into(),
-            diff_deleted_bg: rgb(0x3d2723).into(),
-            diff_deleted_fg: rgb(0xd18b7f).into(),
+                diff_added_bg: rgb(0x2c3a26).into(),
+                diff_added_fg: rgb(0xa8c897).into(),
+                diff_deleted_bg: rgb(0x3d2723).into(),
+                diff_deleted_fg: rgb(0xd18b7f).into(),
+            },
 
             syntax: SyntaxColors {
                 keyword: rgb(0xc678dd).into(),
@@ -518,6 +548,24 @@ attribute = "#d19a66"
         // A valid .toml alongside them still loads.
         std::fs::write(dir.path().join("ok.toml"), builtin_theme_sources()[0]).unwrap();
         assert_eq!(load_custom_themes(dir.path()).len(), 1);
+    }
+
+    /// Every colour on the theme is warmed by flux. The macro is what
+    /// guarantees it: a field declared in `theme_colors!` is mapped,
+    /// and a field cannot be declared anywhere else.
+    #[test]
+    fn map_colors_touches_every_colour_field() {
+        let t = Theme::light();
+        let black = Hsla { h: 0., s: 0., l: 0., a: 1. };
+        let mapped = t.map_colors(|_| black);
+        for (name, c) in mapped.color_fields() {
+            assert_eq!(c, black, "{name} was not mapped");
+        }
+        assert!(
+            mapped.color_fields().len() >= 20,
+            "colour_fields looks truncated: {}",
+            mapped.color_fields().len()
+        );
     }
 
     #[test]
