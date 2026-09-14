@@ -672,6 +672,8 @@ is not a document."
 
 Tabs sit on the ground. The active tab takes `page_bg` and meets the page with no seam, so it reads as attached to the document. This single move does most of the work of making the page look like a sheet.
 
+**Ruling (recorded during Task 4).** The page is inset on **left, right and bottom only** — the top edge is deliberately flush, because that is where the active tab joins it. Tab and page together form the sheet. An inset on all four sides would leave a gap the tab cannot cross, which contradicts this task's own requirement; an inset on neither left nor top left the page butting flush against the sidebar, reading as not resting on anything. Left/right/bottom plus a flush top resolves both.
+
 - [ ] **Step 1: Write the failing test**
 
 ```rust
