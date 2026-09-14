@@ -5387,6 +5387,12 @@ impl Workspace {
         )
     }
 
+    /// The gap between the page and the window edge. One number, so
+    /// the projectors and the layout agree on the measure.
+    pub(crate) fn page_inset(&self) -> gpui::Pixels {
+        px(10.)
+    }
+
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         div()
@@ -5467,6 +5473,23 @@ impl Render for Workspace {
             }
             None => self.render_empty(cx),
         };
+        // The document rests on the ground: its own surface, a margin,
+        // a radius and the resting shadow. The inset is part of the
+        // available measure the editor's projectors size against.
+        let inset = self.page_inset();
+        let page = div()
+            .flex_1()
+            .min_w_0()
+            .my(inset)
+            .mr(inset)
+            .bg(t.page_bg)
+            .rounded(crate::elevation::radius(crate::elevation::Surface::Page))
+            .shadow(crate::elevation::shadows(
+                crate::elevation::Surface::Page,
+                t.shadow,
+            ))
+            .overflow_hidden()
+            .child(content);
 
         div()
             .size_full()
@@ -5699,7 +5722,7 @@ impl Render for Workspace {
                                     .min_w_0()
                                     .flex()
                                     .flex_col()
-                                    .child(div().flex_1().min_h_0().child(content)),
+                                    .child(div().flex_1().min_h_0().flex().child(page)),
                             )
                             .children(outline)
                             .children(knowledge),
@@ -6283,6 +6306,28 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("row {name:?} not found"));
             ws.sidebar_selected = ix;
             cx.notify();
+        });
+    }
+
+    /// The document is the one thing that rests on the ground. It gets
+    /// the page surface; the window keeps the ground.
+    #[gpui::test]
+    fn the_document_pane_is_a_page_not_the_window_background(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        std::fs::write(fx.path().join("n.md"), "# Note\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let t = crate::theme::theme(app);
+            assert_ne!(
+                t.page_bg, t.bg,
+                "the page must be its own surface, not the window background"
+            );
+            assert!(
+                f32::from(ws.read(app).page_inset()) > 0.,
+                "the page needs a margin, or it cannot read as resting on anything"
+            );
         });
     }
 

@@ -315,7 +315,7 @@ impl Render for Reader {
         let t = theme(cx);
         div()
             .size_full()
-            .bg(t.bg)
+            .bg(t.page_bg)
             .key_context("Reader")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::scroll_up))

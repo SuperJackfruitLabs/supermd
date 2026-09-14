@@ -4217,7 +4217,7 @@ impl Render for Editor {
 
         div()
             .size_full()
-            .bg(t.bg)
+            .bg(t.page_bg)
             .key_context(if diffing { "DiffView" } else { "Editor" })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::move_left))
