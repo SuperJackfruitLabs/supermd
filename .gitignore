@@ -13,3 +13,6 @@ docs/internal/
 # Reference material for design study: competitor screenshots and case
 # studies, downloaded from public marketing pages. Not ours to redistribute.
 docs/inspiration/
+
+# Brainstorming and subagent-driven-development scratch
+.superpowers/
