@@ -248,7 +248,7 @@ error rather than something a reviewer has to notice."
     }
 ```
 
-`shipped_themes()` is a test helper that loads every `assets/themes/*.toml` through `Theme::from_toml` plus `Theme::light()` and `Theme::dark()`, returning `Vec<(String, Theme)>`. Write it in the same test module using `include_str!` for each file so the test has no filesystem dependency:
+`shipped_themes()` is a test helper that loads every `assets/themes/*.toml` through `LoadedTheme::from_toml` plus `Theme::light()` and `Theme::dark()`, returning `Vec<(String, Theme)>`. Write it in the same test module using `include_str!` for each file so the test has no filesystem dependency:
 
 ```rust
     fn shipped_themes() -> Vec<(String, Theme)> {
@@ -266,7 +266,7 @@ error rather than something a reviewer has to notice."
             ("solarized-dark", include_str!("../assets/themes/solarized-dark.toml")),
             ("solarized-light", include_str!("../assets/themes/solarized-light.toml")),
         ] {
-            v.push((name.to_string(), Theme::from_toml(src).expect(name)));
+            v.push((name.to_string(), LoadedTheme::from_toml(src).expect(name)));
         }
         v
     }
@@ -371,7 +371,7 @@ Expected: PASS. **If a shipped theme fails the contrast floor, do not weaken the
     fn a_theme_without_the_new_keys_still_loads() {
         let src = include_str!("../assets/themes/nord.toml");
         assert!(!src.contains("page_bg"), "fixture assumption: nord predates page_bg");
-        let t = Theme::from_toml(src).expect("nord loads");
+        let t = LoadedTheme::from_toml(src).expect("nord loads");
         assert!(t.page_bg.l > 0., "derived rather than defaulted to nothing");
     }
 ```
@@ -1330,7 +1330,7 @@ This task stops the misparse. It does **not** add frontmatter support — no tag
             .blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Heading { level, content } => Some((*level, content.plain())),
+                Block::Heading { level, content } => Some((*level, content.text.clone())),
                 _ => None,
             })
             .collect();
@@ -1533,7 +1533,10 @@ Both live in the same handful of lines. #33: with the caret in the only body row
                 "the caret was in the delimiter: {text:?}"
             );
             assert_eq!(
-                crate::editor::blocks::blocks(&text).iter().filter(|b| b.is_table()).count(),
+                crate::editor::blocks::blocks(&text)
+                    .iter()
+                    .filter(|b| matches!(b.kind, crate::editor::blocks::BlockKind::Table))
+                    .count(),
                 1,
                 "still one table: {text:?}"
             );

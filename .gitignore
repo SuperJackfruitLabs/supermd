@@ -16,3 +16,6 @@ docs/inspiration/
 
 # Brainstorming and subagent-driven-development scratch
 .superpowers/
+
+# Machine-specific build location
+.cargo/config.toml
