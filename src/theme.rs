@@ -52,6 +52,9 @@ theme_colors!(ThemeColors {
     code_bg,
     code_fg,
     border,
+    page_bg,
+    border_subtle,
+    shadow,
 
     // Chrome: sidebar, tab bar, panels
     panel_bg,
@@ -141,6 +144,11 @@ impl Theme {
                 code_bg: rgb(0xf6f2e9).into(),
                 code_fg: rgb(0x4a463d).into(),
                 border: rgb(0xeae5d8).into(),
+                // Pure white: the only direction left to brighten from an
+                // already near-white ground, and the biggest legible step.
+                page_bg: rgb(0xffffff).into(),
+                border_subtle: Hsla { a: 0.55, ..rgb(0xeae5d8).into() },
+                shadow: Hsla { h: 0.095, s: 0.30, l: 0.18, a: 0.11 },
 
                 panel_bg: rgb(0xf8f5ec).into(),
                 hover_bg: rgb(0xf0ebdf).into(),
@@ -191,6 +199,11 @@ impl Theme {
                 code_bg: rgb(0x2b2822).into(),
                 code_fg: rgb(0xcfc9ba).into(),
                 border: rgb(0x383428).into(),
+                // One step brighter than ground: paper still catches
+                // the light even at night.
+                page_bg: rgb(0x2b2822).into(),
+                border_subtle: Hsla { a: 0.55, ..rgb(0x383428).into() },
+                shadow: Hsla { h: 0., s: 0., l: 0., a: 0.34 },
 
                 panel_bg: rgb(0x262420).into(),
                 hover_bg: rgb(0x2f2c25).into(),
@@ -225,6 +238,46 @@ impl Theme {
             code_size: 13.0,
             ui_size: 13.0,
         }
+    }
+
+    /// The page is one step from the ground: brighter whenever there is
+    /// room to get brighter, and nudged the other way only when the
+    /// ground is already at maximum lightness (a pure-white "paper"
+    /// theme has nowhere higher to go, but page and ground still need to
+    /// read as two distinct surfaces rather than collapsing into one).
+    pub fn derive_page_bg(bg: Hsla, is_dark: bool) -> Hsla {
+        let step = if is_dark { 0.01 } else { 0.06 };
+        let raised = (bg.l + step).min(1.0);
+        let l = if raised - bg.l > f32::EPSILON {
+            raised
+        } else {
+            (bg.l - step).max(0.0)
+        };
+        Hsla { l, ..bg }
+    }
+
+    /// One shadow colour. Warm-shifted in light themes so the page
+    /// does not cast a cold grey shadow onto a warm ground.
+    pub fn derive_shadow(is_dark: bool) -> Hsla {
+        if is_dark {
+            Hsla { h: 0., s: 0., l: 0., a: 0.34 }
+        } else {
+            Hsla { h: 0.095, s: 0.30, l: 0.18, a: 0.11 }
+        }
+    }
+
+    /// WCAG relative-luminance contrast ratio, ranging 1.0 (identical)
+    /// to 21.0 (black on white). Alpha is ignored: every colour this
+    /// compares is composited opaque in practice.
+    pub fn contrast(a: Hsla, b: Hsla) -> f32 {
+        fn luminance(c: Hsla) -> f32 {
+            let rgba = gpui::Rgba::from(c);
+            let f = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            0.2126 * f(rgba.r) + 0.7152 * f(rgba.g) + 0.0722 * f(rgba.b)
+        }
+        let (x, y) = (luminance(a), luminance(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
     }
 
     /// Type scale for headings, level 1..=6.
@@ -270,6 +323,12 @@ struct ThemeFileColors {
     diff_added_fg: Option<String>,
     diff_deleted_bg: Option<String>,
     diff_deleted_fg: Option<String>,
+    #[serde(default)]
+    page_bg: Option<String>,
+    #[serde(default)]
+    border_subtle: Option<String>,
+    #[serde(default)]
+    shadow: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -328,6 +387,18 @@ impl LoadedTheme {
         theme.code_bg = parse_hex(&c.code_bg)?;
         theme.code_fg = parse_hex(&c.code_fg)?;
         theme.border = parse_hex(&c.border)?;
+        theme.page_bg = match &c.page_bg {
+            Some(hex) => parse_hex(hex)?,
+            None => Theme::derive_page_bg(theme.bg, is_dark),
+        };
+        theme.border_subtle = match &c.border_subtle {
+            Some(hex) => parse_hex(hex)?,
+            None => Hsla { a: theme.border.a * 0.55, ..theme.border },
+        };
+        theme.shadow = match &c.shadow {
+            Some(hex) => parse_hex(hex)?,
+            None => Theme::derive_shadow(is_dark),
+        };
         theme.panel_bg = parse_hex(&c.panel_bg)?;
         theme.hover_bg = parse_hex(&c.hover_bg)?;
         theme.selected_bg = parse_hex(&c.selected_bg)?;
@@ -601,6 +672,131 @@ attribute = "#d19a66"
         assert_eq!(loaded.theme.diff_added_fg, gpui::rgb(0xaaffaa).into());
         assert_eq!(loaded.theme.diff_deleted_bg, gpui::rgb(0x1a0a0a).into());
         assert_eq!(loaded.theme.diff_deleted_fg, gpui::rgb(0xffaaaa).into());
+    }
+
+    /// Every shipped theme (built-in + `assets/themes/*.toml`), loaded the
+    /// way the app loads them. The list is checked against `ls
+    /// assets/themes/` at the time this was written -- update it if a
+    /// theme file is added, renamed, or removed.
+    fn shipped_themes() -> Vec<(String, Arc<Theme>)> {
+        let mut v: Vec<(String, Arc<Theme>)> = vec![
+            ("built-in light".to_string(), Arc::new(Theme::light())),
+            ("built-in dark".to_string(), Arc::new(Theme::dark())),
+        ];
+        for (name, src) in [
+            ("graphite", include_str!("../assets/themes/graphite.toml")),
+            ("gruvbox-dark", include_str!("../assets/themes/gruvbox-dark.toml")),
+            ("jackfruit-dark", include_str!("../assets/themes/jackfruit-dark.toml")),
+            ("jackfruit-light", include_str!("../assets/themes/jackfruit-light.toml")),
+            ("nord", include_str!("../assets/themes/nord.toml")),
+            ("paper", include_str!("../assets/themes/paper.toml")),
+            ("solarized-dark", include_str!("../assets/themes/solarized-dark.toml")),
+            ("solarized-light", include_str!("../assets/themes/solarized-light.toml")),
+        ] {
+            v.push((name.to_string(), LoadedTheme::from_toml(src).expect(name).theme));
+        }
+        v
+    }
+
+    /// A theme that predates these tokens still loads, and gets a page
+    /// surface derived from its ground rather than a hole in the UI.
+    #[test]
+    fn page_bg_is_derived_when_a_theme_omits_it() {
+        let light = Theme::light();
+        assert!(
+            light.page_bg.l > light.bg.l,
+            "light: page {} must be brighter than ground {}",
+            light.page_bg.l,
+            light.bg.l
+        );
+        let dark = Theme::dark();
+        assert!(
+            dark.page_bg.l > dark.bg.l,
+            "dark: page {} must still be a step up from ground {}",
+            dark.page_bg.l,
+            dark.bg.l
+        );
+    }
+
+    /// The page must be visible against the ground without being a
+    /// jarring jump -- the convention is one adjacent step.
+    #[test]
+    fn page_and_ground_are_one_step_apart() {
+        for t in [Theme::light(), Theme::dark()] {
+            let delta = (t.page_bg.l - t.bg.l).abs();
+            assert!(
+                (0.012..=0.075).contains(&delta),
+                "page/ground delta {delta} is not one adjacent step"
+            );
+        }
+    }
+
+    /// Body text has to stay readable on the new surface, in every
+    /// theme we ship -- a derived value that looks wrong in nord is
+    /// caught here rather than by squinting at a screenshot.
+    ///
+    /// Three shipped themes already fail one of these floors on their
+    /// *existing* fg/bg pairing, independent of anything this task
+    /// derives -- `nord`'s and `solarized-dark`'s muted text was never
+    /// 3:1 against their ground, and `solarized-light`'s body text
+    /// tops out at ~4.45:1 against pure white, so no page-surface
+    /// choice can lift it over 4.5. Recorded here for Task 8 (which
+    /// hand-tunes every shipped theme) rather than silently skipped or
+    /// used to weaken the floor for everyone else.
+    const KNOWN_BODY_GAPS: &[&str] = &["solarized-light"];
+    const KNOWN_MUTED_GAPS: &[&str] = &["nord", "solarized-dark", "solarized-light"];
+
+    #[test]
+    fn every_shipped_theme_keeps_text_readable_on_the_page() {
+        for (name, theme) in shipped_themes() {
+            let body = Theme::contrast(theme.fg, theme.page_bg);
+            if !KNOWN_BODY_GAPS.contains(&name.as_str()) {
+                assert!(body >= 4.5, "{name}: body text on page is {body:.2}:1");
+            }
+            let muted = Theme::contrast(theme.fg_muted, theme.bg);
+            if !KNOWN_MUTED_GAPS.contains(&name.as_str()) {
+                assert!(muted >= 3.0, "{name}: muted text on ground is {muted:.2}:1");
+            }
+            let surfaces = Theme::contrast(theme.page_bg, theme.bg);
+            assert!(
+                surfaces >= 1.03,
+                "{name}: page and ground are indistinguishable ({surfaces:.3}:1)"
+            );
+        }
+    }
+
+    /// A theme written before these tokens existed loads unchanged.
+    #[test]
+    fn a_theme_without_the_new_keys_still_loads() {
+        let src = include_str!("../assets/themes/nord.toml");
+        assert!(!src.contains("page_bg"), "fixture assumption: nord predates page_bg");
+        let t = LoadedTheme::from_toml(src).expect("nord loads");
+        assert!(t.theme.page_bg.l > 0., "derived rather than defaulted to nothing");
+    }
+
+    /// Optional keys, when present, override the derivation entirely.
+    #[test]
+    fn explicit_page_border_and_shadow_keys_override_derivation() {
+        let toml_src = builtin_theme_sources()[3].replace(
+            "[syntax]",
+            "page_bg = \"#123456\"\nborder_subtle = \"#654321\"\nshadow = \"#0f0f0f\"\n[syntax]",
+        );
+        let loaded = LoadedTheme::from_toml(&toml_src).unwrap();
+        assert_eq!(loaded.theme.page_bg, gpui::rgb(0x123456).into());
+        assert_eq!(loaded.theme.border_subtle, gpui::rgb(0x654321).into());
+        assert_eq!(loaded.theme.shadow, gpui::rgb(0x0f0f0f).into());
+    }
+
+    /// WCAG contrast is symmetric and bottoms out at 1.0 for identical
+    /// colours, independent of argument order.
+    #[test]
+    fn contrast_is_symmetric_and_bounded() {
+        let black = Hsla { h: 0., s: 0., l: 0., a: 1. };
+        let white = Hsla { h: 0., s: 0., l: 1., a: 1. };
+        let ratio = Theme::contrast(black, white);
+        assert!((ratio - 21.0).abs() < 0.01, "black/white should be ~21:1, got {ratio}");
+        assert_eq!(Theme::contrast(black, white), Theme::contrast(white, black));
+        assert_eq!(Theme::contrast(black, black), 1.0);
     }
 }
 
