@@ -5393,6 +5393,16 @@ impl Workspace {
         px(10.)
     }
 
+    /// Which edges of the page meet the ground. Three of them do; the
+    /// top is deliberately flush, because that is where the active tab
+    /// joins the page. Tab and page together are the sheet, the way a
+    /// browser attaches a tab to its document -- a top margin would
+    /// leave a gap the tab cannot cross.
+    pub(crate) fn page_margins(&self) -> gpui::Edges<gpui::Pixels> {
+        let inset = self.page_inset();
+        gpui::Edges { top: px(0.), right: inset, bottom: inset, left: inset }
+    }
+
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         div()
@@ -5476,14 +5486,18 @@ impl Render for Workspace {
         // The document rests on the ground: its own surface, a margin,
         // a radius and the resting shadow. The inset is part of the
         // available measure the editor's projectors size against.
-        let inset = self.page_inset();
+        let m = self.page_margins();
         let page = div()
             .flex_1()
             .min_w_0()
-            .my(inset)
-            .mr(inset)
+            .ml(m.left)
+            .mr(m.right)
+            .mb(m.bottom)
             .bg(t.page_bg)
-            .rounded(crate::elevation::radius(crate::elevation::Surface::Page))
+            // Bottom corners only. The top edge is flush because the
+            // active tab joins the page there; a rounded top corner
+            // would open exactly the seam the tab has to cross.
+            .rounded_b(crate::elevation::radius(crate::elevation::Surface::Page))
             .shadow(crate::elevation::shadows(
                 crate::elevation::Surface::Page,
                 t.shadow,
@@ -6327,6 +6341,19 @@ pub(crate) mod tests {
             assert!(
                 f32::from(ws.read(app).page_inset()) > 0.,
                 "the page needs a margin, or it cannot read as resting on anything"
+            );
+            // Three sides meet the ground; the top is where the active
+            // tab joins the page, so it is flush by design.
+            let inset = ws.read(app).page_inset();
+            let m = ws.read(app).page_margins();
+            assert_eq!(m.left, inset, "the page lifts off the sidebar");
+            assert_eq!(m.right, inset, "the page lifts off the outline");
+            assert_eq!(m.bottom, inset, "the page lifts off the status bar");
+            assert_eq!(
+                m.top,
+                px(0.),
+                "the top is flush: the active tab joins the page there, and a \
+                 gap is a seam the tab cannot cross"
             );
         });
     }

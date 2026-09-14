@@ -4218,6 +4218,10 @@ impl Render for Editor {
         div()
             .size_full()
             .bg(t.page_bg)
+            // GPUI content masks are rectangular, so this square
+            // fill would otherwise overpaint the page's rounded
+            // bottom corners.
+            .rounded_b(crate::elevation::radius(crate::elevation::Surface::Page))
             .key_context(if diffing { "DiffView" } else { "Editor" })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::move_left))
