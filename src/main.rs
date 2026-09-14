@@ -6,6 +6,7 @@ mod bookmarks_mac;
 mod commands;
 mod diagram;
 mod diff;
+mod elevation;
 mod editor;
 mod extensions;
 mod files;
