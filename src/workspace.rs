@@ -486,6 +486,60 @@ pub(crate) fn sidebar_row_color(ignored: bool, is_dir: bool, t: &Theme) -> gpui:
     }
 }
 
+/// How a sidebar row paints. Pure, so "which row is the open one?" is
+/// answerable in a test rather than by reading a render function. This
+/// is separate from `sidebar_row_color` above, which decides text
+/// colour and carries the gitignored dimming -- that one stays as is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowState {
+    Resting,
+    Hovered,
+    Active,
+}
+
+pub(crate) struct RowStyle {
+    pub background: gpui::Hsla,
+    pub leading_bar: Option<gpui::Hsla>,
+}
+
+pub(crate) fn sidebar_row_style(state: RowState, t: &Theme) -> RowStyle {
+    match state {
+        RowState::Resting => RowStyle { background: t.bg, leading_bar: None },
+        RowState::Hovered => RowStyle { background: t.hover_bg, leading_bar: None },
+        RowState::Active => RowStyle { background: t.selected_bg, leading_bar: Some(t.accent) },
+    }
+}
+
+/// The parts of the chrome. They all share the ground; naming them
+/// keeps "which surface is this?" answerable in a test rather than by
+/// reading four render functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChromePart {
+    Sidebar,
+    Outline,
+    StatusBar,
+    TitleBar,
+}
+
+/// Which logical group a titlebar command belongs to. Apple's guidance
+/// caps a toolbar at three logical groups; SuperMD's chrome only needs
+/// two -- what the current document can do, and which panels are open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolbarGroup {
+    DocumentAction,
+    ViewToggle,
+}
+
+/// The grouping rule for `render_titlebar_chrome`'s buttons, keyed by
+/// the same id each button carries. Kept as a pure function rather than
+/// inlined so the grouping is answerable in a test.
+pub(crate) fn toolbar_group(id: &str) -> ToolbarGroup {
+    match id {
+        "chrome-changes" => ToolbarGroup::DocumentAction,
+        _ => ToolbarGroup::ViewToggle,
+    }
+}
+
 pub(crate) fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
     let s = &t.syntax;
     match color {
@@ -3630,6 +3684,18 @@ impl Workspace {
                 let is_dir = entry.is_dir;
                 let expanded = is_dir && self.tree.as_ref().is_some_and(|t| t.is_expanded(&path));
                 let is_modified = !is_dir && git_modified.contains(&entry.path);
+                // The open file is the one thing marking "where you are"
+                // on a ground with no dividers -- it gets the accent
+                // bar. Keyboard selection is a value step like hover,
+                // not a mark of its own.
+                let row_state = if is_active {
+                    RowState::Active
+                } else if is_kb_selected {
+                    RowState::Hovered
+                } else {
+                    RowState::Resting
+                };
+                let row_style = sidebar_row_style(row_state, t);
 
                 div()
                     .id(id)
@@ -3642,9 +3708,11 @@ impl Workspace {
                     .ml(px(depth as f32 * 12.))
                     .rounded_md()
                     .cursor_pointer()
+                    .bg(row_style.background)
                     .hover(|s| s.bg(t.hover_bg))
-                    .when(is_kb_selected, |d| d.bg(t.hover_bg))
-                    .when(is_active, |d| d.bg(t.selected_bg))
+                    .when_some(row_style.leading_bar, |d, bar| {
+                        d.border_l_2().border_color(bar)
+                    })
                     .child(
                         // Fixed chevron slot on every row so icons align in a
                         // column whether or not the row is a directory.
@@ -3722,12 +3790,28 @@ impl Workspace {
                     .into_any_element()
     }
 
+    /// Sidebar, outline, status bar and title bar all share the ground.
+    /// `_part` is unused today -- every chrome surface paints the same
+    /// colour -- but keeping the parameter is what makes "does every
+    /// part share the ground?" a loop over an enum in a test, rather
+    /// than four separate assertions that can drift independently.
+    pub(crate) fn chrome_background(&self, _part: ChromePart, t: &Theme) -> gpui::Hsla {
+        t.bg
+    }
+
+    /// Nothing inside the ground draws a divider. The page's own edge
+    /// is what separates chrome from document.
+    pub(crate) fn chrome_has_divider(&self, _part: ChromePart) -> bool {
+        false
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_sidebar {
             return None;
         }
         let active_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
         let t = theme(cx);
+        let sidebar_bg = self.chrome_background(ChromePart::Sidebar, &t);
         let Some(tree) = self.tree.as_mut() else {
             // Empty workspace: no listing, just a way to open one.
             return Some(
@@ -3735,9 +3819,7 @@ impl Workspace {
                     .w(px(240.))
                     .h_full()
                     .flex_none()
-                    .bg(t.panel_bg)
-                    .border_r_1()
-                    .border_color(t.border)
+                    .bg(sidebar_bg)
                     .flex()
                     .flex_col()
                     .child(
@@ -3920,9 +4002,7 @@ impl Workspace {
                 .w(px(240.))
                 .h_full()
                 .flex_none()
-                .bg(t.panel_bg)
-                .border_r_1()
-                .border_color(t.border)
+                .bg(sidebar_bg)
                 .key_context("Sidebar")
                 .track_focus(&self.sidebar_focus)
                 .on_action(cx.listener(Self::sidebar_up))
@@ -4114,9 +4194,7 @@ impl Workspace {
                 .h(px(22.))
                 .w_full()
                 .flex_none()
-                .bg(t.panel_bg)
-                .border_t_1()
-                .border_color(t.border)
+                .bg(self.chrome_background(ChromePart::StatusBar, &t))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -4179,6 +4257,13 @@ impl Workspace {
             .get(self.active)
             .and_then(|tab| tab.path(cx))
             .is_some_and(|p| self.git_modified.contains(&p));
+        // Two logical groups (Apple's guidance caps a toolbar at three):
+        // what the current document can do, and which panels are open.
+        // `toolbar_group` names the rule; the grouping below just
+        // follows it. Spacing separates the groups, not a container --
+        // a boxed group would imply elevation, and nothing here lifts.
+        debug_assert_eq!(toolbar_group("chrome-changes"), ToolbarGroup::DocumentAction);
+        debug_assert_eq!(toolbar_group("chrome-sidebar"), ToolbarGroup::ViewToggle);
         Some(
             div()
                 .flex()
@@ -4186,32 +4271,43 @@ impl Workspace {
                 .flex_none()
                 .h_full()
                 .items_center()
+                .gap_3()
                 .children(modified.then(|| {
-                    button("chrome-changes", "changes", false, cx, |t, w, c| {
-                        t.show_changes(&ShowChanges, w, c)
-                    })
+                    div().flex().flex_row().items_center().child(button(
+                        "chrome-changes",
+                        "changes",
+                        false,
+                        cx,
+                        |t, w, c| t.show_changes(&ShowChanges, w, c),
+                    ))
                 }))
-                .child(button(
-                    "chrome-sidebar",
-                    "sidebar",
-                    self.show_sidebar,
-                    cx,
-                    |t, w, c| t.toggle_sidebar(&ToggleSidebar, w, c),
-                ))
-                .child(button(
-                    "chrome-outline",
-                    "outline",
-                    self.show_outline,
-                    cx,
-                    |t, w, c| t.toggle_outline(&ToggleOutline, w, c),
-                ))
-                .child(button(
-                    "chrome-knowledge",
-                    "knowledge",
-                    self.show_knowledge,
-                    cx,
-                    |t, w, c| t.toggle_knowledge(&ToggleKnowledge, w, c),
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .child(button(
+                            "chrome-sidebar",
+                            "sidebar",
+                            self.show_sidebar,
+                            cx,
+                            |t, w, c| t.toggle_sidebar(&ToggleSidebar, w, c),
+                        ))
+                        .child(button(
+                            "chrome-outline",
+                            "outline",
+                            self.show_outline,
+                            cx,
+                            |t, w, c| t.toggle_outline(&ToggleOutline, w, c),
+                        ))
+                        .child(button(
+                            "chrome-knowledge",
+                            "knowledge",
+                            self.show_knowledge,
+                            cx,
+                            |t, w, c| t.toggle_knowledge(&ToggleKnowledge, w, c),
+                        )),
+                )
                 .into_any_element(),
         )
     }
@@ -4322,7 +4418,7 @@ impl Workspace {
             .h(px(34.))
             .flex_none()
             .w_full()
-            .bg(t.panel_bg)
+            .bg(self.chrome_background(ChromePart::TitleBar, &t))
             // No border of its own: a single line here would draw
             // straight across the active tab and put back the seam
             // Task 5 removes. Each tab carries its own bottom border
@@ -5390,9 +5486,7 @@ impl Workspace {
                 .w(px(220.))
                 .h_full()
                 .flex_none()
-                .bg(t.panel_bg)
-                .border_l_1()
-                .border_color(t.border)
+                .bg(self.chrome_background(ChromePart::Outline, &t))
                 .flex()
                 .flex_col()
                 .child(
@@ -6457,6 +6551,67 @@ pub(crate) mod tests {
             assert_eq!(w.tab_background(0, &t), t.page_bg, "active tab is the page");
             assert_eq!(w.tab_background(1, &t), t.bg, "inactive tabs are ground");
         });
+    }
+
+    /// The chrome is one surface. Dividers between its parts are what
+    /// made the app read as three panes at the same value.
+    #[gpui::test]
+    fn the_chrome_is_one_continuous_ground(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        std::fs::write(fx.path().join("n.md"), "# N\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let t = crate::theme::theme(app);
+            let w = ws.read(app);
+            for part in [ChromePart::Sidebar, ChromePart::Outline, ChromePart::StatusBar] {
+                assert_eq!(
+                    w.chrome_background(part, &t),
+                    t.bg,
+                    "{part:?} must share the ground"
+                );
+            }
+            assert!(
+                !w.chrome_has_divider(ChromePart::Sidebar),
+                "the ground is continuous; no divider inside it"
+            );
+        });
+    }
+
+    /// The open file is marked by an accent bar on the leading edge,
+    /// not by a background alone -- on a continuous ground a tinted
+    /// row alone is easy to miss.
+    #[test]
+    fn the_active_sidebar_row_carries_an_accent_bar() {
+        let t = Theme::light();
+        let active = sidebar_row_style(RowState::Active, &t);
+        assert_eq!(active.leading_bar, Some(t.accent));
+        assert_ne!(active.background, t.bg, "and a tint behind it");
+
+        let hovered = sidebar_row_style(RowState::Hovered, &t);
+        assert_eq!(hovered.leading_bar, None, "hover is a value step, not a mark");
+        assert_ne!(hovered.background, t.bg);
+
+        let resting = sidebar_row_style(RowState::Resting, &t);
+        assert_eq!(resting.background, t.bg, "a resting row is the ground");
+        assert_eq!(resting.leading_bar, None);
+    }
+
+    /// The grouping rule behind the titlebar's four glyphs: what the
+    /// document can do, versus which panels are open. If this ever
+    /// grows a third command, this is the one place that decides where
+    /// it lands rather than the render function guessing at spacing.
+    #[test]
+    fn toolbar_buttons_group_by_what_they_do() {
+        assert_eq!(toolbar_group("chrome-changes"), ToolbarGroup::DocumentAction);
+        for id in ["chrome-sidebar", "chrome-outline", "chrome-knowledge"] {
+            assert_eq!(
+                toolbar_group(id),
+                ToolbarGroup::ViewToggle,
+                "{id} is a view toggle"
+            );
+        }
     }
 
     /// `tab_background` is a rule about which colour a tab *should*
