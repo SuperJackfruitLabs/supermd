@@ -5421,8 +5421,16 @@ impl Workspace {
     /// So the page takes its corners back at the end of the frame
     /// rather than asking every descendant to remember. Each mask is a
     /// radius-sized square of ground with a page-coloured circle of
-    /// that radius centred on its inner corner: the visible quadrant
-    /// is exactly the page, the rest is exactly the ground.
+    /// that radius centred on its inner corner -- but neither half is
+    /// quite what it claims. The disc paints flat `page_bg`, which is
+    /// only ever an approximation of whatever the page actually shows
+    /// there: where a code block's `code_bg` would show through, the
+    /// mismatch is invisible in the dark theme (the two colours are
+    /// equal) but up to 22 levels of blue in light. And the square's
+    /// ground is not exactly the ground either -- painting flat `t.bg`
+    /// there also erases the page's own shadow in that sliver, which
+    /// would otherwise blend in at roughly 8-18 RGB levels in the light
+    /// theme, 4-8 in dark.
     fn page_corner_masks(&self, t: &Theme) -> [AnyElement; 2] {
         let r = crate::elevation::radius(crate::elevation::Surface::Page);
         // Diameter 2r, so gpui's radius clamp (min(w, h) / 2) leaves a
@@ -6417,7 +6425,11 @@ pub(crate) mod tests {
     /// wrapper would wear an inset, a radius and a shadow that trace a
     /// sheet that is not there, and switching tabs would pop the
     /// page's corners square. Geometry is the half of that a test can
-    /// see, and one `when` gates the whole of it.
+    /// see, and two `when(on_page, ..)` gates -- one for the page's own
+    /// styling, one for its corner masks -- carry the whole of it.
+    /// Both read the same `on_page` flag today, so they cannot drift
+    /// from each other, but nothing ties them together: a future edit
+    /// to one is free to leave the other's gate behind.
     #[gpui::test]
     fn an_image_is_not_a_document_and_does_not_get_the_page(cx: &mut TestAppContext) {
         let _home = temp_home();

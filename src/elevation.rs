@@ -57,6 +57,11 @@ pub fn radius(surface: Surface) -> Pixels {
 /// the `Edges` whole makes the edge set the unit of code -- an edge
 /// cannot go missing at the call site without deleting the field it
 /// came from.
+///
+/// It overwrites `style().margin` wholesale rather than merging into
+/// it, so a chained `.mt(...)`/`.mb(...)`/etc on the same element is
+/// only safe *after* this call -- one applied before `margins()` is
+/// silently clobbered.
 pub(crate) trait Margins: gpui::Styled + Sized {
     fn margins(mut self, m: gpui::Edges<Pixels>) -> Self {
         self.style().margin = gpui::EdgesRefinement {
