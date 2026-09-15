@@ -490,10 +490,16 @@ pub(crate) fn sidebar_row_color(ignored: bool, is_dir: bool, t: &Theme) -> gpui:
 /// answerable in a test rather than by reading a render function. This
 /// is separate from `sidebar_row_color` above, which decides text
 /// colour and carries the gitignored dimming -- that one stays as is.
+///
+/// `KeyboardSelected` is the row the keyboard cursor is on, not the row
+/// the mouse pointer is over -- real pointer hover is a separate,
+/// always-on `.hover()` closure applied at the render site on top of
+/// whichever of these three backgrounds is already painted (active
+/// row included). Do not read this variant as "mouse is here".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RowState {
     Resting,
-    Hovered,
+    KeyboardSelected,
     Active,
 }
 
@@ -505,7 +511,7 @@ pub(crate) struct RowStyle {
 pub(crate) fn sidebar_row_style(state: RowState, t: &Theme) -> RowStyle {
     match state {
         RowState::Resting => RowStyle { background: t.bg, leading_bar: None },
-        RowState::Hovered => RowStyle { background: t.hover_bg, leading_bar: None },
+        RowState::KeyboardSelected => RowStyle { background: t.hover_bg, leading_bar: None },
         RowState::Active => RowStyle { background: t.selected_bg, leading_bar: Some(t.accent) },
     }
 }
@@ -3686,12 +3692,14 @@ impl Workspace {
                 let is_modified = !is_dir && git_modified.contains(&entry.path);
                 // The open file is the one thing marking "where you are"
                 // on a ground with no dividers -- it gets the accent
-                // bar. Keyboard selection is a value step like hover,
-                // not a mark of its own.
+                // bar. Keyboard selection is a value step like pointer
+                // hover, not a mark of its own -- the `.hover()` below
+                // is the real pointer-hover state and layers on top of
+                // whichever of these backgrounds is already painted.
                 let row_state = if is_active {
                     RowState::Active
                 } else if is_kb_selected {
-                    RowState::Hovered
+                    RowState::KeyboardSelected
                 } else {
                     RowState::Resting
                 };
@@ -3799,8 +3807,13 @@ impl Workspace {
         t.bg
     }
 
-    /// Nothing inside the ground draws a divider. The page's own edge
-    /// is what separates chrome from document.
+    /// Whether `part` draws a divider against whatever it borders.
+    /// Always `false` today -- the page's own edge is what separates
+    /// chrome from document -- but this is the one place that decides
+    /// it: the sidebar, outline and status bar render sites all call
+    /// this before drawing a border rather than drawing one outright,
+    /// so flipping the answer here is what actually puts a divider
+    /// back, not just a declared rule nothing consults.
     pub(crate) fn chrome_has_divider(&self, _part: ChromePart) -> bool {
         false
     }
@@ -3820,6 +3833,9 @@ impl Workspace {
                     .h_full()
                     .flex_none()
                     .bg(sidebar_bg)
+                    .when(self.chrome_has_divider(ChromePart::Sidebar), |d| {
+                        d.border_r_1().border_color(t.border)
+                    })
                     .flex()
                     .flex_col()
                     .child(
@@ -4003,6 +4019,9 @@ impl Workspace {
                 .h_full()
                 .flex_none()
                 .bg(sidebar_bg)
+                .when(self.chrome_has_divider(ChromePart::Sidebar), |d| {
+                    d.border_r_1().border_color(t.border)
+                })
                 .key_context("Sidebar")
                 .track_focus(&self.sidebar_focus)
                 .on_action(cx.listener(Self::sidebar_up))
@@ -4195,6 +4214,9 @@ impl Workspace {
                 .w_full()
                 .flex_none()
                 .bg(self.chrome_background(ChromePart::StatusBar, &t))
+                .when(self.chrome_has_divider(ChromePart::StatusBar), |d| {
+                    d.border_t_1().border_color(t.border)
+                })
                 .flex()
                 .flex_row()
                 .items_center()
@@ -4259,11 +4281,40 @@ impl Workspace {
             .is_some_and(|p| self.git_modified.contains(&p));
         // Two logical groups (Apple's guidance caps a toolbar at three):
         // what the current document can do, and which panels are open.
-        // `toolbar_group` names the rule; the grouping below just
-        // follows it. Spacing separates the groups, not a container --
-        // a boxed group would imply elevation, and nothing here lifts.
-        debug_assert_eq!(toolbar_group("chrome-changes"), ToolbarGroup::DocumentAction);
-        debug_assert_eq!(toolbar_group("chrome-sidebar"), ToolbarGroup::ViewToggle);
+        // `toolbar_group` decides placement directly -- each candidate
+        // is partitioned by calling it, rather than hand-placed into a
+        // div and asserted afterwards, so a button with the wrong id
+        // for its intended group lands in the wrong group instead of
+        // merely failing an assert nothing runs. Spacing separates the
+        // groups, not a container -- a boxed group would imply
+        // elevation, and nothing here lifts.
+        type Action = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
+        let candidates: [(&'static str, &'static str, bool, Action); 4] = [
+            ("chrome-changes", "changes", false, |t, w, c| {
+                t.show_changes(&ShowChanges, w, c)
+            }),
+            ("chrome-sidebar", "sidebar", self.show_sidebar, |t, w, c| {
+                t.toggle_sidebar(&ToggleSidebar, w, c)
+            }),
+            ("chrome-outline", "outline", self.show_outline, |t, w, c| {
+                t.toggle_outline(&ToggleOutline, w, c)
+            }),
+            ("chrome-knowledge", "knowledge", self.show_knowledge, |t, w, c| {
+                t.toggle_knowledge(&ToggleKnowledge, w, c)
+            }),
+        ];
+        let mut document_actions = Vec::new();
+        let mut view_toggles = Vec::new();
+        for (id, icon, on, act) in candidates {
+            if id == "chrome-changes" && !modified {
+                continue;
+            }
+            let el = button(id, icon, on, cx, act).into_any_element();
+            match toolbar_group(id) {
+                ToolbarGroup::DocumentAction => document_actions.push(el),
+                ToolbarGroup::ViewToggle => view_toggles.push(el),
+            }
+        }
         Some(
             div()
                 .flex()
@@ -4272,42 +4323,24 @@ impl Workspace {
                 .h_full()
                 .items_center()
                 .gap_3()
-                .children(modified.then(|| {
-                    div().flex().flex_row().items_center().child(button(
-                        "chrome-changes",
-                        "changes",
-                        false,
-                        cx,
-                        |t, w, c| t.show_changes(&ShowChanges, w, c),
-                    ))
-                }))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .child(button(
-                            "chrome-sidebar",
-                            "sidebar",
-                            self.show_sidebar,
-                            cx,
-                            |t, w, c| t.toggle_sidebar(&ToggleSidebar, w, c),
-                        ))
-                        .child(button(
-                            "chrome-outline",
-                            "outline",
-                            self.show_outline,
-                            cx,
-                            |t, w, c| t.toggle_outline(&ToggleOutline, w, c),
-                        ))
-                        .child(button(
-                            "chrome-knowledge",
-                            "knowledge",
-                            self.show_knowledge,
-                            cx,
-                            |t, w, c| t.toggle_knowledge(&ToggleKnowledge, w, c),
-                        )),
-                )
+                .when(!document_actions.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .children(document_actions),
+                    )
+                })
+                .when(!view_toggles.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .children(view_toggles),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -5487,6 +5520,9 @@ impl Workspace {
                 .h_full()
                 .flex_none()
                 .bg(self.chrome_background(ChromePart::Outline, &t))
+                .when(self.chrome_has_divider(ChromePart::Outline), |d| {
+                    d.border_l_1().border_color(t.border)
+                })
                 .flex()
                 .flex_col()
                 .child(
@@ -6589,9 +6625,9 @@ pub(crate) mod tests {
         assert_eq!(active.leading_bar, Some(t.accent));
         assert_ne!(active.background, t.bg, "and a tint behind it");
 
-        let hovered = sidebar_row_style(RowState::Hovered, &t);
-        assert_eq!(hovered.leading_bar, None, "hover is a value step, not a mark");
-        assert_ne!(hovered.background, t.bg);
+        let kb_selected = sidebar_row_style(RowState::KeyboardSelected, &t);
+        assert_eq!(kb_selected.leading_bar, None, "keyboard selection is a value step, not a mark");
+        assert_ne!(kb_selected.background, t.bg);
 
         let resting = sidebar_row_style(RowState::Resting, &t);
         assert_eq!(resting.background, t.bg, "a resting row is the ground");
