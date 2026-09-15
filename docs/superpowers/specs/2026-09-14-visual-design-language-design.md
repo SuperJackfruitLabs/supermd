@@ -200,6 +200,14 @@ files absent from the sidebar · #39 reading-view checkboxes inert.
 
 **Watcher predicate split:** #31 — the last piece of 0.0.16's sidebar work.
 
+**Window reopening:** #53 — added after Apple rejected 0.0.16 under Guideline 4.
+Closing every window leaves the app running with no way back: New Window is
+scoped to a window, so with none open it has nothing to dispatch to. Our own
+0.0.16 whole-branch review found this, ranked it Medium, and parked it without
+filing — which is how it shipped. It runs first in 0.0.17, ahead of the
+remaining visual work, because it is independent of the redesign and the next
+App Store submission must clear the guideline regardless of how that lands.
+
 **Chores, batched into two dispatches:** #42 · #43 docs · #44 · #45 perf ·
 #46 test gap · #47 CI App Store job · #48 CHANGELOG.
 

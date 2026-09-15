@@ -2075,3 +2075,127 @@ git push origin v0.0.17
 The App Store package is built locally — CI has never produced one — and needs `~/supermd-signing`, `scripts/bundle_mas.sh 0.0.17`, `xcrun altool --validate-app`, then `--upload-app`.
 
 ---
+
+### Task 21: Reopening a window (#53)
+
+**Files:**
+- Modify: `src/main.rs` (`app_menus:301`, the action registration near `:417`)
+- Modify: `src/commands.rs` if `NewWindow`'s declaration needs a menu placement change
+- Test: inline in `src/main.rs` or `src/workspace.rs`
+
+**Interfaces:**
+- Consumes: `ws::NewWindow` (declared `src/commands.rs:167`), `Workspace::open_in_new_window`.
+- Produces: nothing later tasks depend on.
+
+**Runs BEFORE Task 7**, despite its number. Apple rejected 0.0.16 under Guideline 4 for this, submission `1626587c-7d6e-4cf7-a955-0cf8061edbe4`. Our own 0.0.16 whole-branch review found it first, ranked it Medium, and parked it without filing — which is how it shipped.
+
+Only reachable since 0.0.16: before multiple windows there was never a running app with zero windows.
+
+Three causes, three fixes.
+
+- [ ] **Step 1: Write the failing test**
+
+The app must survive losing its last window. Verify the real helper names first — `open_workspace` and `temp_home` live in `workspace::tests`, and the window-closing call used by `closing_a_window_drops_its_workspace_and_its_watcher_loop` is the model to copy.
+
+```rust
+    /// Closing every window must not strand the app. New Window is an
+    /// application action, not a window action -- with no window open
+    /// there is nothing for a window-scoped action to dispatch to,
+    /// which is exactly what Apple rejected 0.0.16 for.
+    #[gpui::test]
+    fn new_window_works_with_no_window_open(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        std::fs::write(fx.path().join("n.md"), "# N\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let handle = app.windows().first().copied().expect("one window");
+            handle.remove_window(app);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(app.windows().is_empty(), "precondition: no windows"));
+        drop(ws);
+
+        cx.update(|_, app| app.dispatch_action(&NewWindow));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(app.windows().len(), 1, "New Window opened one from nothing");
+        });
+    }
+```
+
+`App::dispatch_action` may be named differently or may need a window; if a global dispatch is not directly callable in this gpui version, assert instead that the action is registered at application level and that the callback opens a window when invoked. Say in the report which form you used and why.
+
+- [ ] **Step 2: Run it and watch it fail**
+
+```sh
+cargo test --bin supermd new_window_works_with_no_window_open
+```
+Expected: FAIL — no window is created, because `new_window` is a `Workspace` method (`src/workspace.rs:1576`) and there is no workspace to receive it.
+
+- [ ] **Step 3: Register New Window at application level**
+
+`src/main.rs:417` registers exactly one global action, `Quit`. Add `NewWindow` beside it, opening a window with no workspace required:
+
+```rust
+        cx.on_action(|_: &NewWindow, cx| {
+            crate::workspace::open_in_new_window(None, cx);
+        });
+```
+
+Check `open_in_new_window`'s real signature before using it — it takes `Option<PathBuf>` and an `&mut App` in Task 8 of the 0.0.16 plan, but verify rather than trust. The window-scoped handler on `Workspace` stays: with a window focused it wins, which is what `new_window_yields_cmd_shift_n_to_a_focused_sidebar` asserts.
+
+- [ ] **Step 4: Reopen on Dock activation**
+
+GPUI exposes the hook and we never call it — `App::on_reopen` (`vendor/gpui/src/app.rs:198`). Clicking the Dock icon with no windows open currently does nothing, which is almost certainly what the reviewer tried first.
+
+```rust
+        cx.on_reopen(|cx| {
+            if cx.windows().is_empty() {
+                crate::workspace::open_in_new_window(None, cx);
+            }
+        });
+```
+
+Guard on emptiness: reopen also fires when windows exist, and a spare window on every Dock click would be its own bug.
+
+- [ ] **Step 5: Add a Window menu**
+
+`app_menus` (`src/main.rs:301`) builds one menu. Apple's guidance names a Window menu listing open windows. Add one containing at least New Window, and the standard Minimize and Zoom if gpui exposes them. If listing *open windows* dynamically is not supported by gpui's `Menu` API, say so plainly in the report — New Window plus Dock reopen already satisfies "provide similar functionality in another menu item", which Apple offers as the alternative.
+
+Adding a menu placement means the shortcut docs regenerate:
+
+```sh
+UPDATE_DOCS=1 cargo test shortcut_docs_match_the_table
+cargo run --example build_docs
+```
+
+- [ ] **Step 6: Mutation-check, both suites, build**
+
+Remove the global registration and confirm the new test fails. Then:
+
+```sh
+cargo test --bin supermd
+cargo test --bin supermd --no-default-features --features mas
+cargo build --bin supermd
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src docs site
+git commit -m "fix: the app survives losing its last window
+
+New Window was scoped to a window, so with none open it had nothing to
+dispatch to -- Apple rejected 0.0.16 for exactly this, and our own
+review found it first and parked it without filing.
+
+It is now an application action, the Dock icon reopens a window when
+none are left, and a Window menu lists the way back.
+
+Closes #53"
+```
+
+---
