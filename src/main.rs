@@ -352,7 +352,15 @@ fn app_menus(recents: &[String]) -> Vec<Menu> {
 fn app_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &workspace::NewWindow, cx| {
-        workspace::open_in_new_window(None, cx);
+        // No `Workspace` exists here to hang `show_command_error` off
+        // (that is the whole reason this handler exists), so this is
+        // the one thing left to do -- and doing it silently would
+        // strand the user exactly as the original bug did, just by a
+        // different route: zero windows, user asks for one back, and
+        // nothing happens with no record of why.
+        if workspace::open_in_new_window(None, cx).is_none() {
+            eprintln!("supermd: New Window (app-level) could not open a window");
+        }
     });
 }
 
@@ -381,13 +389,14 @@ fn main() {
     // back.
     //
     // `on_reopen` is a `Platform` hook (see `vendor/gpui/src/app.rs`,
-    // `Application::on_reopen`) with a no-op stub on the test
-    // platform (`vendor/gpui/src/platform/test/platform.rs`), so
-    // nothing under `#[gpui::test]` can arm or fire it; it is covered
-    // by inspection, not a test.
+    // `Application::on_reopen`) whose test-platform implementation
+    // (`vendor/gpui/src/platform/test/platform.rs`) is `unimplemented!()`
+    // -- it panics if called, it is not a no-op (the genuine no-op one
+    // line above it is `on_quit`) -- so nothing under `#[gpui::test]`
+    // can arm or fire it; it is covered by inspection, not a test.
     app.on_reopen(|cx| {
-        if cx.windows().is_empty() {
-            workspace::open_in_new_window(None, cx);
+        if cx.windows().is_empty() && workspace::open_in_new_window(None, cx).is_none() {
+            eprintln!("supermd: Dock reopen could not open a window");
         }
     });
     app.run(move |cx: &mut App| {
