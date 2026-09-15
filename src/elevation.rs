@@ -48,6 +48,29 @@ pub fn radius(surface: Surface) -> Pixels {
     }
 }
 
+/// Apply a whole `Edges` of margins in one call.
+///
+/// gpui's margin setters are one per edge (`ml`, `mr`, `mb`...), so a
+/// four-edge rule spelled as three or four separate calls is coupled
+/// only by convention: drop one and the geometry silently changes,
+/// while anything that asserts on the rule itself still passes. Taking
+/// the `Edges` whole makes the edge set the unit of code -- an edge
+/// cannot go missing at the call site without deleting the field it
+/// came from.
+pub(crate) trait Margins: gpui::Styled + Sized {
+    fn margins(mut self, m: gpui::Edges<Pixels>) -> Self {
+        self.style().margin = gpui::EdgesRefinement {
+            top: Some(m.top.into()),
+            right: Some(m.right.into()),
+            bottom: Some(m.bottom.into()),
+            left: Some(m.left.into()),
+        };
+        self
+    }
+}
+
+impl<T: gpui::Styled> Margins for T {}
+
 /// Apple's concentric rule: a rounded rect inside another shares its
 /// centre of curvature, so the inner radius is the outer minus the gap
 /// between them. Clamped at zero -- a negative radius is a square.
@@ -59,6 +82,27 @@ pub fn inner_radius(outer: Pixels, padding: Pixels) -> Pixels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each edge has to land on its own side. A transposition here
+    /// would tilt every surface that takes its margins as a unit, and
+    /// the four values are close enough that the screen would not
+    /// obviously say so.
+    #[test]
+    fn margins_land_each_edge_on_its_own_side() {
+        use crate::elevation::Margins as _;
+        use gpui::Styled as _;
+        let mut el = gpui::div().margins(gpui::Edges {
+            top: px(1.),
+            right: px(2.),
+            bottom: px(3.),
+            left: px(4.),
+        });
+        let m = el.style().margin.clone();
+        assert_eq!(m.top, Some(px(1.).into()), "top");
+        assert_eq!(m.right, Some(px(2.).into()), "right");
+        assert_eq!(m.bottom, Some(px(3.).into()), "bottom");
+        assert_eq!(m.left, Some(px(4.).into()), "left");
+    }
 
     /// The ground never lifts. A shadow on a static panel tells the
     /// user it can be picked up, and the sidebar cannot.

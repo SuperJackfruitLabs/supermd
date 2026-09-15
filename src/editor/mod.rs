@@ -4218,10 +4218,15 @@ impl Render for Editor {
         div()
             .size_full()
             .bg(t.page_bg)
-            // GPUI content masks are rectangular, so this square
-            // fill would otherwise overpaint the page's rounded
-            // bottom corners.
+            // GPUI content masks are rectangular -- `ContentMask` has
+            // bounds and no radii -- so this square fill would
+            // otherwise overpaint the page's rounded bottom corners.
+            // Rounding here keeps the common case honest; the page
+            // masks its own corners for everything deeper than this
+            // root (see `Workspace::page_corner_masks`), because no
+            // test can see a corner and nothing else can enforce it.
             .rounded_b(crate::elevation::radius(crate::elevation::Surface::Page))
+            .debug_selector(|| "editor-root".into())
             .key_context(if diffing { "DiffView" } else { "Editor" })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::move_left))

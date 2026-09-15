@@ -11,6 +11,7 @@ use gpui::{
 
 use crate::editor::Editor;
 use crate::editor::EditorEvent;
+use crate::elevation::Margins;
 use crate::files::FileTree;
 use crate::seti::{self, SetiColor};
 use crate::theme::Theme;
@@ -5388,7 +5389,10 @@ impl Workspace {
     }
 
     /// The gap between the page and the window edge. One number, so
-    /// the projectors and the layout agree on the measure.
+    /// the layout and everything sized against it agree. Nothing reads
+    /// this but `page_margins`: the inset reaches the editor and its
+    /// projectors as a narrower `available` width through the ordinary
+    /// layout, never as a constant they look up.
     pub(crate) fn page_inset(&self) -> gpui::Pixels {
         px(10.)
     }
@@ -5401,6 +5405,34 @@ impl Workspace {
     pub(crate) fn page_margins(&self) -> gpui::Edges<gpui::Pixels> {
         let inset = self.page_inset();
         gpui::Edges { top: px(0.), right: inset, bottom: inset, left: inset }
+    }
+
+    /// Two quarter-discs that re-cut the page's bottom corners on top
+    /// of whatever the document painted there.
+    ///
+    /// GPUI's content mask is `ContentMask { bounds }` -- a rectangle,
+    /// with no radii anywhere in it -- so `overflow_hidden` clips
+    /// children to the page's *box*, not to its rounded outline. Any
+    /// filled descendant that reaches the bottom edge (the editor's
+    /// own background, a fenced-code band on the last line, a table
+    /// widget) paints straight through the arcs and squares them off,
+    /// and because that is pure paint no test can see it happen.
+    ///
+    /// So the page takes its corners back at the end of the frame
+    /// rather than asking every descendant to remember. Each mask is a
+    /// radius-sized square of ground with a page-coloured circle of
+    /// that radius centred on its inner corner: the visible quadrant
+    /// is exactly the page, the rest is exactly the ground.
+    fn page_corner_masks(&self, t: &Theme) -> [AnyElement; 2] {
+        let r = crate::elevation::radius(crate::elevation::Surface::Page);
+        // Diameter 2r, so gpui's radius clamp (min(w, h) / 2) leaves a
+        // true circle rather than a flattened one.
+        let disc = || div().absolute().w(r * 2.).h(r * 2.).rounded_full().bg(t.page_bg);
+        let corner = || div().absolute().bottom_0().w(r).h(r).overflow_hidden().bg(t.bg);
+        [
+            corner().left_0().child(disc().left_0().top(-r)).into_any_element(),
+            corner().right_0().child(disc().right_0().top(-r)).into_any_element(),
+        ]
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -5452,15 +5484,23 @@ impl Render for Workspace {
         let titlebar = self.render_titlebar(window, cx);
         let outline = self.render_outline(cx);
         let knowledge = self.render_knowledge(cx);
-        let content: AnyElement = match self.tabs.get(self.active) {
-            Some(Tab::Reader(reader)) => reader.clone().into_any_element(),
+        // Each arm says whether what it renders is a document, because
+        // only a document gets the page. An image is not one -- it
+        // keeps the ground, and a ground-coloured fill inside a page
+        // would wear a shadow and a radius that trace a sheet that is
+        // not there. Neither is the empty state: with no tab there is
+        // nothing for Task 5's tab strip to join, and an empty page
+        // hanging under an empty strip reads as a document failing to
+        // load. Both fall through to the window's own ground.
+        let (content, on_page): (AnyElement, bool) = match self.tabs.get(self.active) {
+            Some(Tab::Reader(reader)) => (reader.clone().into_any_element(), true),
             Some(Tab::Editor { view: EditorView::Preview(preview), .. }) => {
-                preview.clone().into_any_element()
+                (preview.clone().into_any_element(), true)
             }
-            Some(Tab::Editor { editor, .. }) => editor.clone().into_any_element(),
+            Some(Tab::Editor { editor, .. }) => (editor.clone().into_any_element(), true),
             Some(Tab::Image { path, zoom, .. }) => {
                 let zoom = *zoom;
-                if zoom <= 1.0 + f32::EPSILON && zoom >= 1.0 - f32::EPSILON {
+                let el = if zoom <= 1.0 + f32::EPSILON && zoom >= 1.0 - f32::EPSILON {
                     div()
                         .size_full()
                         .bg(t.bg)
@@ -5479,31 +5519,38 @@ impl Render for Workspace {
                         .p(px(32.))
                         .child(gpui::img(path.clone()).w(gpui::relative(zoom)))
                         .into_any_element()
-                }
+                };
+                (el, false)
             }
-            None => self.render_empty(cx),
+            None => (self.render_empty(cx), false),
         };
         // The document rests on the ground: its own surface, a margin,
         // a radius and the resting shadow. The inset is part of the
-        // available measure the editor's projectors size against.
-        let m = self.page_margins();
+        // available measure the editor and its projectors lay out
+        // against, so this is not a paint-only wrapper. The margins go
+        // on as one `Edges` -- see `elevation::Margins` for why four
+        // separate calls were not good enough.
         let page = div()
             .flex_1()
             .min_w_0()
-            .ml(m.left)
-            .mr(m.right)
-            .mb(m.bottom)
-            .bg(t.page_bg)
-            // Bottom corners only. The top edge is flush because the
-            // active tab joins the page there; a rounded top corner
-            // would open exactly the seam the tab has to cross.
-            .rounded_b(crate::elevation::radius(crate::elevation::Surface::Page))
-            .shadow(crate::elevation::shadows(
-                crate::elevation::Surface::Page,
-                t.shadow,
-            ))
-            .overflow_hidden()
-            .child(content);
+            .debug_selector(|| "page".into())
+            .when(on_page, |d| {
+                d.margins(self.page_margins())
+                    .bg(t.page_bg)
+                    // Bottom corners only. The top edge is flush because
+                    // the active tab joins the page there; a rounded top
+                    // corner would open exactly the seam the tab has to
+                    // cross.
+                    .rounded_b(crate::elevation::radius(crate::elevation::Surface::Page))
+                    .shadow(crate::elevation::shadows(
+                        crate::elevation::Surface::Page,
+                        t.shadow,
+                    ))
+                    .overflow_hidden()
+            })
+            .child(content)
+            // Last, so they sit over the document. See `page_corner_masks`.
+            .when(on_page, |d| d.children(self.page_corner_masks(&t)));
 
         div()
             .size_full()
@@ -5736,7 +5783,14 @@ impl Render for Workspace {
                                     .min_w_0()
                                     .flex()
                                     .flex_col()
-                                    .child(div().flex_1().min_h_0().flex().child(page)),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .flex()
+                                            .debug_selector(|| "document-pane".into())
+                                            .child(page),
+                                    ),
                             )
                             .children(outline)
                             .children(knowledge),
@@ -6356,6 +6410,128 @@ pub(crate) mod tests {
                  gap is a seam the tab cannot cross"
             );
         });
+    }
+
+    /// Only a document gets the page. An image keeps the ground, and
+    /// so does the empty state: a ground-coloured fill inside the page
+    /// wrapper would wear an inset, a radius and a shadow that trace a
+    /// sheet that is not there, and switching tabs would pop the
+    /// page's corners square. Geometry is the half of that a test can
+    /// see, and one `when` gates the whole of it.
+    #[gpui::test]
+    fn an_image_is_not_a_document_and_does_not_get_the_page(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        let note = fx.path().join("n.md");
+        std::fs::write(&note, "# Note\n").unwrap();
+        let pic = fx.path().join("pic.png");
+        std::fs::write(&pic, b"\x89PNG\r\n\x1a\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+
+        let inset = cx.update(|_, app| ws.read(app).page_inset());
+        let page_narrower_than_pane_by = |cx: &mut gpui::VisualTestContext| {
+            let pane = cx.debug_bounds("document-pane").expect("the document pane drew");
+            let page = cx.debug_bounds("page").expect("the page slot drew");
+            pane.size.width - page.size.width
+        };
+
+        assert_eq!(
+            page_narrower_than_pane_by(cx),
+            px(0.),
+            "with no tab open there is no document, so no page"
+        );
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&note, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            page_narrower_than_pane_by(cx),
+            inset * 2.,
+            "a document is a page, inset on both sides"
+        );
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&pic, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(matches!(w.tabs.get(w.active), Some(Tab::Image { .. })), "image tab is active");
+        });
+        assert_eq!(
+            page_narrower_than_pane_by(cx),
+            px(0.),
+            "an image fills the pane: no inset, and with it no shadow and no radius"
+        );
+    }
+
+    /// `page_margins` is only a rule until `render` obeys it, and
+    /// `render` obeying it is the part no accessor test can see: the
+    /// four-field rule used to be spelled as three independent margin
+    /// calls, and deleting two of them left this file's other page
+    /// test green. So measure the laid-out page against its parent.
+    #[gpui::test]
+    fn the_page_is_laid_out_inside_every_margin_it_declares(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        let note = fx.path().join("n.md");
+        std::fs::write(&note, "# Note\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&note, window, cx));
+        cx.run_until_parked();
+
+        let m = cx.update(|_, app| ws.read(app).page_margins());
+        let pane = cx.debug_bounds("document-pane").expect("the document pane drew");
+        let page = cx.debug_bounds("page").expect("the page drew");
+        assert_eq!(page.origin.x - pane.origin.x, m.left, "left margin");
+        assert_eq!(pane.right() - page.right(), m.right, "right margin");
+        assert_eq!(pane.bottom() - page.bottom(), m.bottom, "bottom margin");
+        assert_eq!(
+            page.origin.y - pane.origin.y,
+            m.top,
+            "top margin: flush, because the active tab joins the page there"
+        );
+    }
+
+    /// The inset is not paint. It comes out of the measure the editor
+    /// lays its lines out against, and that measure comes from the
+    /// layout rather than from the window -- so it tracks a resize and
+    /// stays one inset narrower than the pane at every size.
+    #[gpui::test]
+    fn the_inset_comes_out_of_the_editors_measure(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        let note = fx.path().join("n.md");
+        std::fs::write(&note, "# Note\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&note, window, cx));
+        cx.run_until_parked();
+
+        let m = cx.update(|_, app| ws.read(app).page_margins());
+        let measure = |cx: &mut gpui::VisualTestContext| {
+            let pane = cx.debug_bounds("document-pane").expect("the document pane drew");
+            let editor = cx.debug_bounds("editor-root").expect("the editor drew");
+            (pane.size.width, editor.size.width)
+        };
+
+        let (pane_w, editor_w) = measure(cx);
+        assert!(f32::from(editor_w) > 0., "the editor has to have been laid out");
+        assert_eq!(
+            editor_w,
+            pane_w - m.left - m.right,
+            "the horizontal inset comes straight out of the editor's width"
+        );
+
+        // And again at another window size: a width derived from the
+        // window rather than from the available space would drift here.
+        let before = cx.update(|window, _| window.viewport_size());
+        cx.simulate_resize(gpui::size(before.width - px(200.), before.height));
+        cx.run_until_parked();
+        let (narrow_pane_w, narrow_editor_w) = measure(cx);
+        assert_eq!(narrow_pane_w, pane_w - px(200.), "the pane took the whole resize");
+        assert_eq!(
+            narrow_editor_w,
+            narrow_pane_w - m.left - m.right,
+            "the editor stays one inset narrower than the pane at any size"
+        );
     }
 
     #[gpui::test]

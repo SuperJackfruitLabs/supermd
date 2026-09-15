@@ -316,9 +316,12 @@ impl Render for Reader {
         div()
             .size_full()
             .bg(t.page_bg)
-            // GPUI content masks are rectangular, so this square
-            // fill would otherwise overpaint the page's rounded
-            // bottom corners.
+            // GPUI content masks are rectangular -- `ContentMask` has
+            // bounds and no radii -- so this square fill would
+            // otherwise overpaint the page's rounded bottom corners.
+            // Rounding here keeps the common case honest; the page
+            // masks its own corners for everything deeper than this
+            // root (see `Workspace::page_corner_masks`).
             .rounded_b(crate::elevation::radius(crate::elevation::Surface::Page))
             .key_context("Reader")
             .track_focus(&self.focus_handle)
