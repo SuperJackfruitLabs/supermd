@@ -4216,6 +4216,12 @@ impl Workspace {
         )
     }
 
+    /// Which surface a tab sits on. The active tab is the page's own
+    /// edge; every other tab is chrome, sitting on the ground.
+    pub(crate) fn tab_background(&self, ix: usize, t: &Theme) -> gpui::Hsla {
+        if ix == self.active { t.page_bg } else { t.bg }
+    }
+
     fn render_titlebar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let active = self.active;
@@ -4231,6 +4237,7 @@ impl Workspace {
             let tint = seti_tint(color, &t);
             div()
                 .id(SharedString::from(format!("tab-{ix}")))
+                .debug_selector(move || format!("tab-{ix}"))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -4240,7 +4247,18 @@ impl Workspace {
                 .border_r_1()
                 .border_color(t.border)
                 .cursor_pointer()
-                .when(is_active, |d| d.bg(t.bg))
+                .bg(self.tab_background(ix, &t))
+                // The active tab is the page's own top edge: rounded to
+                // match, and square on the bottom so it meets the page
+                // with no seam. Every other tab keeps the divider that
+                // separates chrome from whatever surface sits below it
+                // -- the titlebar's own border no longer draws one,
+                // since that single line would cut straight across the
+                // active tab too and put the seam back.
+                .when(is_active, |d| {
+                    d.rounded_t(crate::elevation::radius(crate::elevation::Surface::Page))
+                })
+                .when(!is_active, |d| d.border_b_1().border_color(t.border))
                 .when(!is_active, |d| d.hover(|s| s.bg(t.hover_bg)))
                 .child(
                     gpui::svg()
@@ -4305,7 +4323,10 @@ impl Workspace {
             .flex_none()
             .w_full()
             .bg(t.panel_bg)
-            .when(!self.focus_mode, |d| d.border_b_1().border_color(t.border))
+            // No border of its own: a single line here would draw
+            // straight across the active tab and put back the seam
+            // Task 5 removes. Each tab carries its own bottom border
+            // instead -- see the tab closure above.
             .flex()
             .flex_row()
             .overflow_hidden()
@@ -6418,6 +6439,63 @@ pub(crate) mod tests {
                  gap is a seam the tab cannot cross"
             );
         });
+    }
+
+    /// The active tab is part of the page, not part of the chrome.
+    /// Inactive tabs stay on the ground.
+    #[gpui::test]
+    fn the_active_tab_takes_the_page_surface(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        std::fs::write(fx.path().join("a.md"), "# A\n").unwrap();
+        std::fs::write(fx.path().join("b.md"), "# B\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let t = crate::theme::theme(app);
+            let w = ws.read(app);
+            assert_eq!(w.tab_background(0, &t), t.page_bg, "active tab is the page");
+            assert_eq!(w.tab_background(1, &t), t.bg, "inactive tabs are ground");
+        });
+    }
+
+    /// `tab_background` is a rule about which colour a tab *should*
+    /// wear; it says nothing about whether the tab it names for the
+    /// page actually touches the page on screen. Open two tabs, make
+    /// the second one active, and measure both: the active tab's own
+    /// bottom edge has to land exactly on the page's top -- the same
+    /// zero `page_margins().top` this file's other page test checks,
+    /// now read off the laid-out tab rather than the rule.
+    #[gpui::test]
+    fn the_active_tab_meets_the_page_with_no_gap(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        let a = fx.path().join("a.md");
+        let b = fx.path().join("b.md");
+        std::fs::write(&a, "# A\n").unwrap();
+        std::fs::write(&b, "# B\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&b, window, cx));
+        cx.run_until_parked();
+        // The install banner is a separate, unrelated strip that can
+        // land between the tab bar and the page; whether it does
+        // depends on where the test binary happens to run from. Clear
+        // it so this test measures the tab-to-page seam on its own.
+        ws.update_in(cx, |ws, _, cx| {
+            ws.install_banner = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let active = cx.update(|_, app| ws.read(app).active);
+        assert_eq!(active, 1, "opening a second file makes it active");
+
+        let tab = cx.debug_bounds("tab-1").expect("the active tab drew");
+        let page = cx.debug_bounds("page").expect("the page drew");
+        assert_eq!(tab.bottom(), page.origin.y, "no gap between the active tab and the page");
     }
 
     /// Only a document gets the page. An image keeps the ground, and
