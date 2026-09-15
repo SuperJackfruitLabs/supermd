@@ -316,7 +316,44 @@ fn app_menus(recents: &[String]) -> Vec<Menu> {
         ],
     }];
     menus.extend(commands::menus(recents));
+    // gpui's `Menu`/`MenuItem` has no mechanism for a dynamic list of
+    // open windows (no `SystemMenuType::Window`, and `MenuItem` is only
+    // Separator/Submenu/SystemMenu/Action -- see
+    // `vendor/gpui/src/platform/app_menu.rs`), so this cannot be the
+    // traditional Mac "Window" menu that lists every open window and
+    // checkmarks the frontmost one. Apple's own guideline offers an
+    // alternative for exactly this case -- "or provide similar
+    // functionality in another menu item" -- which New Window (here,
+    // in the File menu, and via Dock reopen) satisfies. This menu adds
+    // the two standard window-chrome commands gpui does expose,
+    // `Window::minimize_window`/`zoom_window`, plus a second path to
+    // New Window, so there is a menu-bar answer to "how do I get a
+    // window back" beyond File.
+    menus.push(Menu {
+        name: "Window".into(),
+        items: vec![
+            MenuItem::action("New Window", workspace::NewWindow),
+            MenuItem::separator(),
+            MenuItem::action("Minimize", workspace::Minimize),
+            MenuItem::action("Zoom", workspace::Zoom),
+        ],
+    });
     menus
+}
+
+/// Actions gpui can dispatch with no window focused: `Quit` and
+/// `NewWindow`. Everything else users invoke (⌘⇧N included, once a
+/// window exists) is a `Workspace` method needing a live workspace to
+/// receive it -- see `Workspace::new_window` at `src/workspace.rs`.
+///
+/// Registered once from `main()`; a test calls this same function
+/// (never a copy of its body) so that deleting the registration here
+/// is exactly what makes `new_window_works_with_no_window_open` fail.
+fn app_actions(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &workspace::NewWindow, cx| {
+        workspace::open_in_new_window(None, cx);
+    });
 }
 
 fn main() {
@@ -334,6 +371,24 @@ fn main() {
     app.on_open_urls({
         let pending = pending_opens.clone();
         move |urls| queue_open_urls(&pending, urls)
+    });
+    // The Dock-icon-click callback. It fires whether or not windows
+    // exist -- macOS also sends it when the app is merely brought
+    // forward -- so it must guard on emptiness, or every Dock click
+    // opens a spare window on top of what is already there. This is
+    // the second half of the #53 fix: an app with no windows now has
+    // both a menu path (File > New Window, app-level) and a Dock path
+    // back.
+    //
+    // `on_reopen` is a `Platform` hook (see `vendor/gpui/src/app.rs`,
+    // `Application::on_reopen`) with a no-op stub on the test
+    // platform (`vendor/gpui/src/platform/test/platform.rs`), so
+    // nothing under `#[gpui::test]` can arm or fire it; it is covered
+    // by inspection, not a test.
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            workspace::open_in_new_window(None, cx);
+        }
     });
     app.run(move |cx: &mut App| {
         let mut themes = theme::builtin_themes();
@@ -414,7 +469,7 @@ fn main() {
 
         extensions::start_inline_drainer(cx);
 
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        app_actions(cx);
         cx.bind_keys(app_keybindings());
 
         cx.set_menus(app_menus(&startup_settings.recent_workspaces));
@@ -586,7 +641,7 @@ mod startup_tests {
         let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
         assert_eq!(
             names,
-            ["SuperMD", "File", "Edit", "Format", "View", "Go", "Tools", "Help"]
+            ["SuperMD", "File", "Edit", "Format", "View", "Go", "Tools", "Help", "Window"]
         );
         // Every recent slot (0..8) maps through its OpenRecentN arm.
         let file_menu = &menus[1];
@@ -604,6 +659,29 @@ mod startup_tests {
             .find(|m| m.name.as_ref() == "View")
             .expect("View menu");
         assert!(view.items.len() >= 8, "View menu holds the toggles");
+    }
+
+    /// #53: an app with no windows needs a way back that does not
+    /// depend on a `Workspace` existing. The File menu's New Window
+    /// (asserted structurally above) is one path; this is the second
+    /// -- a Window menu, since gpui cannot give this app the dynamic
+    /// "list every open window" menu Apple's guideline describes (see
+    /// `app_menus`'s comment), so it carries New Window again plus the
+    /// two window-chrome commands gpui does expose.
+    #[test]
+    fn window_menu_offers_a_way_back_with_no_windows_open() {
+        let menus = app_menus(&[]);
+        let window_menu =
+            menus.iter().find(|m| m.name.as_ref() == "Window").expect("Window menu");
+        let action_names: Vec<&str> = window_menu
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { name, .. } => Some(name.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(action_names, ["New Window", "Minimize", "Zoom"]);
     }
 
     #[gpui::test]

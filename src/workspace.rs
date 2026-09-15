@@ -26,6 +26,8 @@ actions!(
         NewFile,
         NewWindow,
         OpenFolderInNewWindow,
+        Minimize,
+        Zoom,
         OpenDialog,
         CloseTab,
         NextTab,
@@ -1579,6 +1581,19 @@ impl Workspace {
             // nothing at all with no message is the worse answer.
             self.show_command_error("Could not open a new window".to_string(), cx);
         }
+    }
+
+    /// Window > Minimize. Window-scoped (there is nothing to minimize
+    /// with no window), so this is wired only on the focused
+    /// `Workspace`, same as `new_window`'s sibling shortcuts.
+    fn minimize(&mut self, _: &Minimize, window: &mut Window, _cx: &mut Context<Self>) {
+        window.minimize_window();
+    }
+
+    /// Window > Zoom -- the green-button maximize toggle, not the text
+    /// zoom in the View menu (`ZoomIn`/`ZoomOut`/`ZoomReset`).
+    fn zoom(&mut self, _: &Zoom, window: &mut Window, _cx: &mut Context<Self>) {
+        window.zoom_window();
     }
 
     /// Pick a folder and open it *beside* this window rather than
@@ -5721,6 +5736,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_file))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::open_folder_in_new_window))
+            .on_action(cx.listener(Self::minimize))
+            .on_action(cx.listener(Self::zoom))
             .on_action(cx.listener(Self::open_dialog))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -7268,6 +7285,50 @@ pub(crate) mod tests {
                 "off the sidebar, ⌘⇧N opens a window"
             );
             assert!(ws.read(app).sidebar_edit.is_none(), "and creates no folder");
+        });
+    }
+
+    /// The app must survive losing its last window. `NewWindow` is an
+    /// application action, not only a `Workspace` one -- with no
+    /// window open there is nothing for a window-scoped handler to
+    /// dispatch to, which is exactly what Apple rejected 0.0.16 for
+    /// (Guideline 4, submission 1626587c-7d6e-4cf7-a955-0cf8061edbe4,
+    /// issue #53).
+    ///
+    /// This calls `crate::app_actions` -- the exact function `main()`
+    /// calls to register the global handler, not a copy of its body --
+    /// so deleting that registration is what makes this fail, not a
+    /// change to this test.
+    ///
+    /// `App::dispatch_action` (`vendor/gpui/src/app.rs`) does exist in
+    /// this gpui version and is called directly: with no
+    /// `active_window()` it falls through to the global action
+    /// listeners, the same path a Dock click or File > New Window
+    /// takes with zero windows open. It has to be driven through the
+    /// `TestAppContext` held in `VisualTestContext::cx` rather than
+    /// through `VisualTestContext::update` itself once the bound
+    /// window is gone: that inherent method re-derefs the (now
+    /// missing) window and panics.
+    #[gpui::test]
+    fn new_window_works_with_no_window_open(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        std::fs::write(fx.path().join("n.md"), "# N\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.cx.update(crate::app_actions);
+        cx.run_until_parked();
+
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        drop(ws);
+
+        cx.cx.update(|app| {
+            assert!(app.windows().is_empty(), "precondition: no windows");
+            app.dispatch_action(&NewWindow);
+        });
+        cx.run_until_parked();
+        cx.cx.update(|app| {
+            assert_eq!(app.windows().len(), 1, "New Window opened one from nothing");
         });
     }
 
