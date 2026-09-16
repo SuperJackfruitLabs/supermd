@@ -2199,3 +2199,177 @@ Closes #53"
 ```
 
 ---
+
+### Task 22: Appearance — Light, Dark or System (#new)
+
+**Files:**
+- Modify: `src/settings.rs` (the `Settings` struct, around line 8)
+- Modify: `src/theme.rs` (`ThemeState::resolve`, around line 895)
+- Modify: `src/workspace.rs` (the ⌘T theme picker, `toggle_theme_picker` ~3083 and its render)
+- Modify: `src/commands.rs` if a new action is needed
+- Test: inline in `src/theme.rs` and `src/settings.rs`
+
+**Interfaces:**
+- Produces: `settings::Appearance { System, Light, Dark }` and `Settings::appearance`.
+- Consumes: `ThemeState::resolve`'s existing `system_dark` and `flux_blend` fields.
+
+Today the app always follows the OS appearance, choosing between the user's
+`light_theme` and `dark_theme`. There is no way to say "always light". This adds
+one.
+
+**The precedence, decided with the user:** explicit appearance → flux night →
+system. An explicit choice beats flux. If the user has said Light, the app stays
+light at midnight; `flux.warm_shift` still applies, so they get *warm* light
+rather than dark. A setting that says "always Light" and then goes dark is a
+setting that lies.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+    /// An explicit appearance beats both the system and flux. A
+    /// setting that says "always Light" and then goes dark at night is
+    /// a setting that lies.
+    #[test]
+    fn an_explicit_appearance_overrides_system_and_flux() {
+        let mut st = ThemeState::for_test();
+        st.system_dark = true;
+
+        st.settings.appearance = Appearance::Light;
+        assert!(!st.resolve().is_dark, "explicit Light beats a dark system");
+
+        st.settings.appearance = Appearance::Dark;
+        st.system_dark = false;
+        assert!(st.resolve().is_dark, "explicit Dark beats a light system");
+
+        // Flux night would force dark; an explicit Light still wins.
+        st.settings.appearance = Appearance::Light;
+        st.settings.flux.enabled = true;
+        st.settings.flux.auto_dark = true;
+        st.flux_blend = 1.0;
+        assert!(!st.resolve().is_dark, "explicit Light beats flux night");
+    }
+
+    /// System is the default and keeps today's behaviour exactly,
+    /// including flux's night override.
+    #[test]
+    fn system_appearance_keeps_todays_behaviour() {
+        let mut st = ThemeState::for_test();
+        st.settings.appearance = Appearance::System;
+
+        st.system_dark = true;
+        assert!(st.resolve().is_dark);
+        st.system_dark = false;
+        assert!(!st.resolve().is_dark);
+
+        st.settings.flux.enabled = true;
+        st.settings.flux.auto_dark = true;
+        st.flux_blend = 1.0;
+        assert!(st.resolve().is_dark, "flux night still forces dark under System");
+    }
+```
+
+`ThemeState::for_test()` may not exist — check how existing `theme.rs` tests
+construct a `ThemeState` and follow that. If they build it by hand, do the same
+rather than adding a constructor for the test's convenience.
+
+```rust
+    /// A settings file written before this field existed still loads,
+    /// and gets the behaviour it had before.
+    #[test]
+    fn settings_without_appearance_default_to_system() {
+        let s: Settings = toml::from_str("light_theme = \"Nord\"\n").expect("loads");
+        assert_eq!(s.appearance, Appearance::System);
+    }
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```sh
+cargo test --bin supermd an_explicit_appearance system_appearance settings_without_appearance
+```
+Expected: FAIL — `Appearance` does not exist.
+
+- [ ] **Step 3: Add the setting**
+
+`Settings` already carries `#[serde(default)]` at the struct level, so a new
+field with a `Default` impl loads old files unchanged — no per-field attribute
+needed.
+
+```rust
+/// Which appearance the app uses. `System` follows the OS, which is
+/// what SuperMD did before this existed.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+```
+
+Add `pub appearance: Appearance` to `Settings` and to its `Default` impl.
+
+- [ ] **Step 4: Teach `resolve` the precedence**
+
+In `ThemeState::resolve` (`src/theme.rs:895`), the `dark` decision currently
+reads flux then `system_dark`. Put the explicit choice ahead of both:
+
+```rust
+        let dark = match self.settings.appearance {
+            Appearance::Light => false,
+            Appearance::Dark => true,
+            Appearance::System => {
+                // Unchanged: flux night forces dark, otherwise follow
+                // the system.
+                if flux.enabled && flux.auto_dark && self.flux_blend >= 0.5 {
+                    true
+                } else {
+                    self.system_dark
+                }
+            }
+        };
+```
+
+Leave the warm-shift branch below it alone — an explicit appearance changes
+*which* theme resolves, not whether colours drift with the time of day.
+
+- [ ] **Step 5: Put it in the theme picker**
+
+⌘T (`ToggleThemePicker`) is where someone looking for this will go. Add a
+three-way control at the top of the picker — Light / Dark / System — that writes
+the setting and applies immediately, the way the theme list already live-previews.
+
+Follow whatever the picker already does to persist a choice; if the picker
+currently only sets the `ActiveTheme` global and persists elsewhere, match that
+path rather than inventing a second one.
+
+- [ ] **Step 6: Mutation-check, suites, build**
+
+Make `resolve` ignore the explicit appearance (fall through to the old logic)
+and confirm `an_explicit_appearance_overrides_system_and_flux` fails. Then:
+
+```sh
+cargo test --bin supermd
+cargo test --bin supermd --no-default-features --features mas
+cargo build --bin supermd
+```
+Read the build's warnings, not just its exit code.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src
+git commit -m "feat: choose Light, Dark or System
+
+The app always followed the OS appearance, picking between the user's
+light and dark themes. There was no way to say 'always light'.
+
+An explicit choice beats flux: if you have said Light, the app stays
+light at midnight and flux warms it rather than flipping it. A setting
+that says always-Light and then goes dark is a setting that lies.
+
+Precedence: explicit appearance, then flux night, then the system."
+```
+
+---
