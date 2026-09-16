@@ -3762,7 +3762,7 @@ impl Workspace {
                         let (icon_path, tint) = if is_dir {
                             (crate::ui_icons::path("folder"), t.fg_muted)
                         } else {
-                            let (icon, color) = seti::icon_for(&entry.name);
+                            let (icon, _) = seti::icon_for(&entry.name);
                             (format!("icons/seti/{icon}.svg"), seti_tint_muted(&t, is_active))
                         };
                         // Seti glyphs carry ~30% internal padding, so the box
@@ -4389,7 +4389,7 @@ impl Workspace {
             let is_preview = matches!(tab, Tab::Editor { view: EditorView::Preview(_), .. });
             let is_transient = preview_tab == Some(ix);
             let is_active = ix == active;
-            let (icon, color) = seti::icon_for(&title);
+            let (icon, _) = seti::icon_for(&title);
             let tint = seti_tint_muted(&t, is_active);
             div()
                 .id(SharedString::from(format!("tab-{ix}")))
