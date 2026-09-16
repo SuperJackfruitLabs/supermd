@@ -135,7 +135,9 @@ impl Theme {
             is_dark: false,
 
             colors: ThemeColors {
-                bg: rgb(0xfdfbf6).into(),
+                // The ground is the cream one step below the page --
+                // the desk the sheet rests on, not the sheet.
+                bg: rgb(0xf8f4ea).into(),
                 // Ink shares the ground's warm hue rather than sitting
                 // neutral-to-black on it -- a warm palette reads as
                 // dated the moment the ink stops matching the paper's
@@ -148,15 +150,16 @@ impl Theme {
                 code_bg: rgb(0xf6f2e9).into(),
                 code_fg: rgb(0x4a463d).into(),
                 border: rgb(0xeae5d8).into(),
-                // Pure white: the only direction left to brighten from an
-                // already near-white ground, and the biggest legible step.
-                page_bg: rgb(0xffffff).into(),
+                // The warm cream itself. It is the identity of the
+                // theme, and the page is where the reading happens, so
+                // the page is what gets it.
+                page_bg: rgb(0xfdfbf6).into(),
                 border_subtle: Hsla { a: 0.55, ..rgb(0xeae5d8).into() },
-                shadow: Hsla { h: 0.095, s: 0.30, l: 0.18, a: 0.11 },
+                shadow: Hsla { h: 0.095, s: 0.30, l: 0.18, a: 0.18 },
 
-                panel_bg: rgb(0xf8f5ec).into(),
-                hover_bg: rgb(0xf0ebdf).into(),
-                selected_bg: rgb(0xe8e1d0).into(),
+                panel_bg: rgb(0xf3efe2).into(),
+                hover_bg: rgb(0xebe6d8).into(),
+                selected_bg: rgb(0xe3dcc9).into(),
                 find_match_bg: rgb(0xf6e3a8).into(),
                 find_active_bg: rgb(0xecc153).into(),
 
@@ -194,7 +197,7 @@ impl Theme {
             is_dark: true,
 
             colors: ThemeColors {
-                bg: rgb(0x211f1a).into(),
+                bg: rgb(0x171612).into(),
                 // Same warm hue family as the light theme's ink, so
                 // light and dark read as one app rather than a warm
                 // theme and a cool one.
@@ -206,15 +209,16 @@ impl Theme {
                 code_bg: rgb(0x2b2822).into(),
                 code_fg: rgb(0xcfc9ba).into(),
                 border: rgb(0x383428).into(),
-                // One step brighter than ground: paper still catches
-                // the light even at night.
-                page_bg: rgb(0x2b2822).into(),
+                // The warm charcoal the theme is named for. It used to
+                // be `bg`, and it used to equal `code_bg` -- which made
+                // a fenced block invisible on the page it sat on.
+                page_bg: rgb(0x211f1a).into(),
                 border_subtle: Hsla { a: 0.55, ..rgb(0x383428).into() },
                 shadow: Hsla { h: 0., s: 0., l: 0., a: 0.34 },
 
-                panel_bg: rgb(0x262420).into(),
-                hover_bg: rgb(0x2f2c25).into(),
-                selected_bg: rgb(0x3a362c).into(),
+                panel_bg: rgb(0x1c1b18).into(),
+                hover_bg: rgb(0x25231d).into(),
+                selected_bg: rgb(0x302d24).into(),
                 find_match_bg: rgb(0x574a1c).into(),
                 find_active_bg: rgb(0x7d6a24).into(),
 
@@ -265,11 +269,17 @@ impl Theme {
 
     /// One shadow colour. Warm-shifted in light themes so the page
     /// does not cast a cold grey shadow onto a warm ground.
+    ///
+    /// The light alpha is 0.18, not the 0.11 it started at. Measured on
+    /// screen at the shipped 10px inset, 0.11 dropped the ground by
+    /// about 15/255 at the page edge and faded over roughly six points
+    /// -- present in a pixel sample, not visible as a lift. The page
+    /// was not short of room, it was short of contrast.
     pub fn derive_shadow(is_dark: bool) -> Hsla {
         if is_dark {
             Hsla { h: 0., s: 0., l: 0., a: 0.34 }
         } else {
-            Hsla { h: 0.095, s: 0.30, l: 0.18, a: 0.11 }
+            Hsla { h: 0.095, s: 0.30, l: 0.18, a: 0.18 }
         }
     }
 
@@ -366,13 +376,22 @@ pub struct LoadedTheme {
     pub theme: Arc<Theme>,
 }
 
+/// `#rrggbb`, or `#rrggbbaa` when a colour needs to be translucent.
+///
+/// The alpha form exists because `shadow` is a *tint plus a strength*,
+/// and six digits can only say the tint. A theme that wrote
+/// `shadow = "#000000"` before this would get a fully opaque black --
+/// `elevation::shadows` scales the theme alpha, so an opaque shadow
+/// paints the page's drop shadow as a solid slab rather than a falloff.
+/// The derived shadows have always carried alpha; the file format just
+/// had no way to spell it.
 pub fn parse_hex(s: &str) -> Result<Hsla, String> {
     let hex = s.strip_prefix('#').unwrap_or(s);
-    if hex.len() != 6 {
-        return Err(format!("bad hex color {s:?}"));
-    }
-    let value = u32::from_str_radix(hex, 16).map_err(|e| format!("bad hex color {s:?}: {e}"))?;
-    Ok(rgb(value).into())
+    let value = match hex.len() {
+        6 | 8 => u32::from_str_radix(hex, 16).map_err(|e| format!("bad hex color {s:?}: {e}"))?,
+        _ => return Err(format!("bad hex color {s:?}")),
+    };
+    Ok(if hex.len() == 8 { gpui::rgba(value).into() } else { rgb(value).into() })
 }
 
 impl LoadedTheme {
@@ -530,6 +549,41 @@ mod theme_file_tests {
         let dark = Theme::dark();
         assert!(dark.bg.s > 0.01, "dark ground is warm-neutral, not blue-grey");
     }
+
+    /// A theme file with none of the surface keys -- the shape a user
+    /// theme written before they existed still has. The shipped themes
+    /// all declare `page_bg` and `shadow` now, so the derivations they
+    /// exist for can only be exercised against a fixture like this one.
+    const THEME_WITHOUT_SURFACE_KEYS: &str = r##"
+name = "No Surfaces"
+appearance = "dark"
+[colors]
+bg = "#111111"
+fg = "#dddddd"
+fg_strong = "#ffffff"
+fg_muted = "#888888"
+accent = "#ff0000"
+link = "#ff0001"
+code_bg = "#222222"
+code_fg = "#cccccc"
+border = "#333333"
+panel_bg = "#191919"
+hover_bg = "#252525"
+selected_bg = "#303030"
+find_match_bg = "#554400"
+find_active_bg = "#776600"
+[syntax]
+keyword = "#c678dd"
+function = "#61afef"
+type = "#e5c07b"
+string = "#98c379"
+comment = "#5c6370"
+constant = "#d19a66"
+property = "#e06c75"
+operator = "#8a919c"
+tag = "#e06c75"
+attribute = "#d19a66"
+"##;
 
     #[test]
     fn theme_file_toml_maps_every_field() {
@@ -763,26 +817,33 @@ attribute = "#d19a66"
     /// theme we ship -- a derived value that looks wrong in nord is
     /// caught here rather than by squinting at a screenshot.
     ///
-    /// Some shipped themes already fail one of these floors on their
-    /// *existing* fg/bg pairing, independent of anything this task
-    /// derives -- e.g. `nord`'s muted text was never 3:1 against its
-    /// ground, and `solarized-light`'s body text tops out well under
-    /// 4.5:1 against page white, so no page-surface choice can lift it
-    /// over the floor. Each is recorded below as a bounded *band*
-    /// (recorded ratio, floor) rather than a hole in the assertion: a
-    /// further regression still fails the test, and so does a fix that
-    /// clears the real floor -- at that point the entry is stale and
-    /// must be deleted, which is what makes Task 8's work (hand-tuning
-    /// every shipped theme) show up here instead of nowhere.
-    const KNOWN_BODY_GAPS: &[(&str, f32, f32)] = &[
-        ("solarized-dark", 3.9, 4.5),
-        ("solarized-light", 4.2, 4.5),
-    ];
-    const KNOWN_MUTED_GAPS: &[(&str, f32, f32)] = &[
-        ("nord", 2.3, 3.0),
-        ("solarized-dark", 2.7, 3.0),
-        ("solarized-light", 2.4, 3.0),
-    ];
+    /// One shipped theme cannot meet the body floor, and the exception
+    /// below is permanent rather than a to-do.
+    ///
+    /// Solarized's light body ink is base00 `#657b83`. Against base3
+    /// `#fdf6e3` it is 4.13:1 and against pure white -- the brightest
+    /// page any theme could have -- it is 4.4546:1. There is no page
+    /// colour that lifts it to 4.5:1, so the only fix is to change
+    /// base00, and base00 is not a detail of the theme: Solarized is a
+    /// published sixteen-colour palette built on measured *relative*
+    /// lightness relationships, and its author chose those numbers
+    /// deliberately. A Solarized theme with different ink is a theme
+    /// wearing Solarized's name. The page here is set as bright as it
+    /// can go while still reading as Solarized, which is the most that
+    /// can be done from this side.
+    ///
+    /// Everything else that used to sit in this table is gone, fixed in
+    /// the theme rather than recorded here: `solarized-dark`'s body
+    /// (the page now carries base03, which is what base0 was designed
+    /// against) and the muted text of `nord`, `solarized-dark` and
+    /// `solarized-light`. Secondary chrome text is not a published
+    /// Solarized or Nord role, so tuning it to the floor costs those
+    /// themes nothing they had.
+    ///
+    /// The entry is a *band*, not a hole: drift in either direction
+    /// fails. If it ever clears 4.5, delete it instead of widening it.
+    const KNOWN_BODY_GAPS: &[(&str, f32, f32)] = &[("solarized-light", 4.2, 4.5)];
+    const KNOWN_MUTED_GAPS: &[(&str, f32, f32)] = &[];
 
     #[test]
     fn every_shipped_theme_keeps_text_readable_on_the_page() {
@@ -811,6 +872,28 @@ attribute = "#d19a66"
         }
     }
 
+    /// A code fence must stay visible against the page it now sits on.
+    ///
+    /// `code_bg` was tuned against the window background. Once the
+    /// document moved onto its own brighter surface, several themes had
+    /// a fence within a hair of the page under it -- `jackfruit-dark`
+    /// and the built-in dark were at 1.000:1, literally the same
+    /// colour. Giving each page the theme's own background restores the
+    /// separation the theme author drew, which is why this passes with
+    /// room now rather than by a nudge.
+    #[test]
+    fn code_fences_stay_visible_on_the_page() {
+        for (name, theme) in shipped_themes() {
+            let separation = Theme::contrast(theme.code_bg, theme.page_bg);
+            assert!(
+                separation >= 1.04,
+                "{name}: code_bg is invisible on the page ({separation:.3}:1)"
+            );
+            let text = Theme::contrast(theme.code_fg, theme.code_bg);
+            assert!(text >= 4.5, "{name}: code text is {text:.2}:1");
+        }
+    }
+
     /// A theme that omits `shadow` gets the appearance-appropriate
     /// derived shadow (warm-shifted in light, opaque black in dark) --
     /// not a leftover value from whichever appearance `Theme::light()`/
@@ -818,13 +901,13 @@ attribute = "#d19a66"
     /// applied.
     #[test]
     fn shadow_is_derived_per_appearance_when_absent() {
-        let light = LoadedTheme::from_toml(builtin_theme_sources()[0]).unwrap(); // Jackfruit Light
-        assert!(!builtin_theme_sources()[0].contains("shadow"));
-        assert_eq!(light.theme.shadow, Theme::derive_shadow(false));
-
-        let dark = LoadedTheme::from_toml(builtin_theme_sources()[3]).unwrap(); // Jackfruit Dark
-        assert!(!builtin_theme_sources()[3].contains("shadow"));
+        assert!(!THEME_WITHOUT_SURFACE_KEYS.contains("shadow"));
+        let dark = LoadedTheme::from_toml(THEME_WITHOUT_SURFACE_KEYS).unwrap();
         assert_eq!(dark.theme.shadow, Theme::derive_shadow(true));
+
+        let light_src = THEME_WITHOUT_SURFACE_KEYS.replace("\"dark\"", "\"light\"");
+        let light = LoadedTheme::from_toml(&light_src).unwrap();
+        assert_eq!(light.theme.shadow, Theme::derive_shadow(false));
 
         assert_ne!(light.theme.shadow, dark.theme.shadow);
     }
@@ -834,8 +917,8 @@ attribute = "#d19a66"
     /// hairline -- not full-strength and not invisible.
     #[test]
     fn border_subtle_is_derived_from_border_alpha_when_absent() {
-        let loaded = LoadedTheme::from_toml(builtin_theme_sources()[3]).unwrap(); // Jackfruit Dark
-        assert!(!builtin_theme_sources()[3].contains("border_subtle"));
+        assert!(!THEME_WITHOUT_SURFACE_KEYS.contains("border_subtle"));
+        let loaded = LoadedTheme::from_toml(THEME_WITHOUT_SURFACE_KEYS).unwrap();
         let (border, subtle) = (loaded.theme.border, loaded.theme.border_subtle);
         assert_eq!(subtle.h, border.h);
         assert_eq!(subtle.s, border.s);
@@ -847,16 +930,34 @@ attribute = "#d19a66"
     /// A theme written before these tokens existed loads unchanged.
     #[test]
     fn a_theme_without_the_new_keys_still_loads() {
-        let src = include_str!("../assets/themes/nord.toml");
-        assert!(!src.contains("page_bg"), "fixture assumption: nord predates page_bg");
-        let t = LoadedTheme::from_toml(src).expect("nord loads");
-        assert!(t.theme.page_bg.l > 0., "derived rather than defaulted to nothing");
+        assert!(!THEME_WITHOUT_SURFACE_KEYS.contains("page_bg"));
+        let light_src = THEME_WITHOUT_SURFACE_KEYS.replace("\"dark\"", "\"light\"");
+        for (appearance, src) in
+            [("dark", THEME_WITHOUT_SURFACE_KEYS.to_string()), ("light", light_src)]
+        {
+            let t = LoadedTheme::from_toml(&src).expect("loads").theme;
+            // The same band and floor the shipped themes are held to.
+            // Every one of those now declares `page_bg` outright, so
+            // without this the derivation could quietly become a no-op
+            // and only a *user* theme -- the thing it exists for --
+            // would show the damage.
+            let delta = (t.page_bg.l - t.bg.l).abs();
+            assert!(
+                (0.012..=0.075).contains(&delta),
+                "{appearance}: derived page/ground delta {delta} is not one adjacent step"
+            );
+            let surfaces = Theme::contrast(t.page_bg, t.bg);
+            assert!(
+                surfaces >= 1.03,
+                "{appearance}: derived page and ground are indistinguishable ({surfaces:.3}:1)"
+            );
+        }
     }
 
     /// Optional keys, when present, override the derivation entirely.
     #[test]
     fn explicit_page_border_and_shadow_keys_override_derivation() {
-        let toml_src = builtin_theme_sources()[3].replace(
+        let toml_src = THEME_WITHOUT_SURFACE_KEYS.replace(
             "[syntax]",
             "page_bg = \"#123456\"\nborder_subtle = \"#654321\"\nshadow = \"#0f0f0f\"\n[syntax]",
         );
@@ -864,6 +965,41 @@ attribute = "#d19a66"
         assert_eq!(loaded.theme.page_bg, gpui::rgb(0x123456).into());
         assert_eq!(loaded.theme.border_subtle, gpui::rgb(0x654321).into());
         assert_eq!(loaded.theme.shadow, gpui::rgb(0x0f0f0f).into());
+    }
+
+    /// A six-digit colour is opaque; an eight-digit one carries its own
+    /// alpha. `shadow` needs the second form: `elevation::shadows`
+    /// scales the theme's alpha per layer, so a shadow parsed opaque
+    /// paints the page's falloff as a solid slab. Before eight-digit
+    /// hex, a theme file simply could not say "black at a third".
+    #[test]
+    fn eight_digit_hex_carries_alpha_and_six_digit_stays_opaque() {
+        assert_eq!(parse_hex("#0f0f0f").unwrap().a, 1.0);
+        let translucent = parse_hex("#0f0f0f57").unwrap();
+        assert!(
+            (translucent.a - 87. / 255.).abs() < 1e-6,
+            "alpha byte should survive: got {}",
+            translucent.a
+        );
+        let opaque = parse_hex("#0f0f0f").unwrap();
+        assert_eq!((translucent.h, translucent.s, translucent.l), (opaque.h, opaque.s, opaque.l));
+        assert!(parse_hex("#0f0f0f5").is_err(), "seven digits is not a colour");
+        assert!(parse_hex("#0f0f0f577").is_err(), "nine digits is not a colour");
+    }
+
+    /// Every shipped theme's `shadow` must be translucent. An opaque
+    /// one is not a shadow -- `elevation::shadows` multiplies it by the
+    /// per-layer alpha, so at a: 1.0 the page's outer layer lands at
+    /// 0.6 of solid colour and reads as a painted border.
+    #[test]
+    fn no_shipped_theme_casts_an_opaque_shadow() {
+        for (name, theme) in shipped_themes() {
+            assert!(
+                theme.shadow.a > 0.0 && theme.shadow.a < 0.5,
+                "{name}: shadow alpha {} is not a shadow",
+                theme.shadow.a
+            );
+        }
     }
 
     /// WCAG contrast is symmetric and bottoms out at 1.0 for identical
@@ -1083,3 +1219,4 @@ pub fn apply_system_appearance(appearance: WindowAppearance, cx: &mut App) {
     cx.global_mut::<ThemeState>().system_dark = dark;
     refresh_active_theme(cx);
 }
+

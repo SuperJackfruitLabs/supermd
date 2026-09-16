@@ -2,7 +2,7 @@ name = "Solarized Dark"
 appearance = "dark"
 
 [colors]
-bg = "#002b36"
+bg = "#001d24"
 fg = "#839496"
 fg_strong = "#eee8d5"
 fg_muted = "#586e75"
@@ -11,9 +11,16 @@ link = "#268bd2"
 code_bg = "#073642"
 code_fg = "#93a1a1"
 border = "#0e3a46"
-panel_bg = "#03313d"
-hover_bg = "#0a4150"
-selected_bg = "#14505f"
+# base03 is the background base0 body text was designed against, and
+# base0 on anything brighter falls under 4.5:1. So the page keeps the
+# published pairing and the desk -- which carries no body text -- takes
+# the invented step down instead.
+page_bg = "#002b36"
+# Solarized's own dark end, so the shadow stays in the teal.
+shadow = "#00161c57"
+panel_bg = "#02232c"
+hover_bg = "#083440"
+selected_bg = "#114450"
 find_match_bg = "#58500e"
 find_active_bg = "#8a7a1a"
 

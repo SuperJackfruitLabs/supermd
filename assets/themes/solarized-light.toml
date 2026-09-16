@@ -5,12 +5,27 @@ appearance = "light"
 bg = "#fdf6e3"
 fg = "#657b83"
 fg_strong = "#073642"
-fg_muted = "#93a1a1"
+# base1 (#93a1a1) is Solarized's comment colour, and as UI text it never
+# cleared 2.5:1. Secondary chrome text is not one of the sixteen
+# published roles, so this one is tuned to the floor; base1 still spells
+# comments under [syntax].
+fg_muted = "#7e8c8e"
 accent = "#dc322f"
 link = "#268bd2"
 code_bg = "#eee8d5"
-code_fg = "#586e75"
+# base01 nudged four units darker: base01 on base2 is 4.39:1, just under
+# the floor for the smallest text in the app.
+code_fg = "#546a71"
 border = "#ded8c5"
+# The one theme where the page is NOT the theme's own background.
+# base00 on base3 is 4.13:1 and base00 on pure white is 4.45:1, so
+# Solarized's body ink cannot reach 4.5:1 on any page at all. Given
+# that, the page takes the brightest cream that still reads as
+# Solarized and base3 becomes the desk; handing base3 to the page
+# would have made the one unfixable number worse.
+page_bg = "#fffcf3"
+# Grey-teal, Solarized's neutral axis. A warm shadow muddies it.
+shadow = "#2a3d442e"
 panel_bg = "#f5efdc"
 hover_bg = "#eee8d5"
 selected_bg = "#e4ddc8"

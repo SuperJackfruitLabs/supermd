@@ -2,7 +2,7 @@ name = "Gruvbox Dark"
 appearance = "dark"
 
 [colors]
-bg = "#282828"
+bg = "#1d2021"
 fg = "#ebdbb2"
 fg_strong = "#fbf1c7"
 fg_muted = "#928374"
@@ -11,9 +11,17 @@ link = "#83a598"
 code_bg = "#32302f"
 code_fg = "#ebdbb2"
 border = "#3c3836"
+# dark0 for the page, dark0_hard for the desk and the sidebar --
+# gruvbox publishes both, so the second surface costs no invented
+# colour. hover and selection move down to dark0 and dark0_soft so the
+# whole ladder stays inside the palette.
+page_bg = "#282828"
+# A warm near-black rather than pure black: gruvbox's ground is warm
+# and a neutral shadow greys it.
+shadow = "#12100e57"
 panel_bg = "#1d2021"
-hover_bg = "#32302f"
-selected_bg = "#3c3836"
+hover_bg = "#282828"
+selected_bg = "#32302f"
 find_match_bg = "#6a5a10"
 find_active_bg = "#8a7a1a"
 

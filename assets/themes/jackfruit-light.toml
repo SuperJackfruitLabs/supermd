@@ -2,18 +2,26 @@ name = "Jackfruit Light"
 appearance = "light"
 
 [colors]
-bg = "#fdfbf6"
-fg = "#33302a"
-fg_strong = "#211f1a"
-fg_muted = "#918b7d"
+bg = "#f8f4ea"
+fg = "#353027"
+fg_strong = "#221f19"
+fg_muted = "#8c8373"
 accent = "#c9821c"
 link = "#c9821c"
 code_bg = "#f6f2e9"
 code_fg = "#4a463d"
 border = "#eae5d8"
-panel_bg = "#f8f5ec"
-hover_bg = "#f0ebdf"
-selected_bg = "#e8e1d0"
+# The warm cream IS Jackfruit Light -- it is the default theme and the
+# defaults carry the identity -- so the cream goes on the page rather
+# than being traded for pure white, and the desk is the same cream one
+# step down. Ink matches `Theme::light()` exactly; the Rust default is
+# a fallback nothing reaches, and this file is what a user sees.
+page_bg = "#fdfbf6"
+# Warm brown at low strength. A grey shadow on cream reads as dirt.
+shadow = "#3c30202e"
+panel_bg = "#f3efe2"
+hover_bg = "#ebe6d8"
+selected_bg = "#e3dcc9"
 find_match_bg = "#f6e3a8"
 find_active_bg = "#ecc153"
 
