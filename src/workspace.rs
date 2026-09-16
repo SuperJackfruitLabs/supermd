@@ -564,6 +564,17 @@ pub(crate) fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
     }
 }
 
+/// Chrome icons, quiet. The sidebar and tab strip use the theme's
+/// neutrals rather than its syntax palette: syntax colours are tuned
+/// for code legibility -- saturated, cool -- and reading them against
+/// warm chrome is what made the file list clash. The active row/tab
+/// takes the accent instead, which is how you tell it apart at a
+/// glance without the rest of the tree turning into confetti.
+pub(crate) fn seti_tint_muted(color: SetiColor, t: &Theme, active: bool) -> gpui::Hsla {
+    let _ = color;
+    if active { t.accent } else { t.fg_muted }
+}
+
 struct ThemePickerState {
     /// Theme indices in display order (lights, then darks).
     order: Vec<usize>,
@@ -3751,7 +3762,7 @@ impl Workspace {
                             (crate::ui_icons::path("folder"), t.fg_muted)
                         } else {
                             let (icon, color) = seti::icon_for(&entry.name);
-                            (format!("icons/seti/{icon}.svg"), seti_tint(color, &t))
+                            (format!("icons/seti/{icon}.svg"), seti_tint_muted(color, &t, is_active))
                         };
                         // Seti glyphs carry ~30% internal padding, so the box
                         // runs larger than the text for a matched visual size.
@@ -4378,7 +4389,7 @@ impl Workspace {
             let is_transient = preview_tab == Some(ix);
             let is_active = ix == active;
             let (icon, color) = seti::icon_for(&title);
-            let tint = seti_tint(color, &t);
+            let tint = seti_tint_muted(color, &t, is_active);
             div()
                 .id(SharedString::from(format!("tab-{ix}")))
                 .debug_selector(move || format!("tab-{ix}"))
@@ -9281,6 +9292,20 @@ pub(crate) mod tests {
         assert_eq!(seti_tint(SetiColor::Red, &t), t.accent);
         assert_eq!(seti_tint(SetiColor::White, &t), t.fg);
         assert_eq!(seti_tint(SetiColor::Yellow, &t), t.syntax.kind);
+    }
+
+    /// Chrome icons go quiet so the file list stops competing with the
+    /// document; the open file's icon takes the accent, which is how
+    /// you can see at a glance which one it is.
+    #[test]
+    fn chrome_icons_are_muted_and_the_active_one_takes_the_accent() {
+        let t = crate::theme::Theme::light();
+        assert_eq!(seti_tint_muted(SetiColor::Blue, &t, false), t.fg_muted);
+        assert_eq!(seti_tint_muted(SetiColor::Purple, &t, false), t.fg_muted);
+        assert_eq!(seti_tint_muted(SetiColor::Blue, &t, true), t.accent);
+        // The full-colour mapping survives for the finder, where telling
+        // file types apart quickly is the actual task.
+        assert_eq!(seti_tint(SetiColor::Blue, &t), t.syntax.function);
     }
 
     #[test]

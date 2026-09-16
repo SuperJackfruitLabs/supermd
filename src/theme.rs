@@ -136,9 +136,13 @@ impl Theme {
 
             colors: ThemeColors {
                 bg: rgb(0xfdfbf6).into(),
-                fg: rgb(0x33302a).into(),
-                fg_strong: rgb(0x211f1a).into(),
-                fg_muted: rgb(0x918b7d).into(),
+                // Ink shares the ground's warm hue rather than sitting
+                // neutral-to-black on it -- a warm palette reads as
+                // dated the moment the ink stops matching the paper's
+                // temperature.
+                fg: rgb(0x353027).into(),
+                fg_strong: rgb(0x221f19).into(),
+                fg_muted: rgb(0x8c8373).into(),
                 accent: rgb(0xc9821c).into(),
                 link: rgb(0xc9821c).into(),
                 code_bg: rgb(0xf6f2e9).into(),
@@ -191,9 +195,12 @@ impl Theme {
 
             colors: ThemeColors {
                 bg: rgb(0x211f1a).into(),
-                fg: rgb(0xd9d4c8).into(),
-                fg_strong: rgb(0xf2ede2).into(),
-                fg_muted: rgb(0x8f897a).into(),
+                // Same warm hue family as the light theme's ink, so
+                // light and dark read as one app rather than a warm
+                // theme and a cool one.
+                fg: rgb(0xdad3c8).into(),
+                fg_strong: rgb(0xf2ece3).into(),
+                fg_muted: rgb(0x968973).into(),
                 accent: rgb(0xe5a63b).into(),
                 link: rgb(0xe5a63b).into(),
                 code_bg: rgb(0x2b2822).into(),
@@ -505,6 +512,23 @@ mod theme_file_tests {
         assert!(!themes[0].theme.is_dark);
         assert!(themes[3].theme.is_dark);
         assert_eq!(themes.iter().filter(|t| t.theme.is_dark).count(), 5);
+    }
+
+    /// Warm ground, warm ink. A cream background with neutral-grey or
+    /// pure-black text is the temperature mismatch that makes a warm
+    /// palette read as dated rather than deliberate.
+    #[test]
+    fn the_default_themes_share_one_temperature() {
+        let light = Theme::light();
+        assert!(light.fg.s > 0.02, "light ink is warm-shifted, not neutral grey");
+        assert!(
+            (light.fg.h - light.bg.h).abs() < 0.15,
+            "ink hue {} should sit near the ground's {}",
+            light.fg.h,
+            light.bg.h
+        );
+        let dark = Theme::dark();
+        assert!(dark.bg.s > 0.01, "dark ground is warm-neutral, not blue-grey");
     }
 
     #[test]
