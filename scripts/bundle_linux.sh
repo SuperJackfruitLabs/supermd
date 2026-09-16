@@ -34,6 +34,12 @@ install -m 755 "$HERE/supermd" "$BIN/supermd"
 install -m 644 "$HERE/supermd.desktop" "$APPS/supermd.desktop"
 install -m 644 "$HERE/supermd-128.png" "$ICONS/128x128/apps/supermd.png"
 install -m 644 "$HERE/supermd-512.png" "$ICONS/512x512/apps/supermd.png"
+if [ -d "$HERE/plugins" ]; then
+    # platform::bundled_plugins_dir probes ../lib/supermd/plugins from BIN.
+    # Keep this seed payload separate from the user's ~/.supermd/plugins.
+    mkdir -p "$HOME/.local/lib/supermd"
+    cp -R "$HERE/plugins" "$HOME/.local/lib/supermd/"
+fi
 command -v update-desktop-database >/dev/null 2>&1 && \
     update-desktop-database "$APPS" || true
 echo "SuperMD installed. Make sure $BIN is on your PATH."
