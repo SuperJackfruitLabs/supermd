@@ -2230,6 +2230,22 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Set the explicit appearance, persist it, and re-resolve the
+    /// active theme immediately -- the same persist-then-refresh path
+    /// `toggle_flux` uses, so an explicit choice takes effect without
+    /// waiting for the minute timer.
+    fn set_appearance(&mut self, appearance: crate::settings::Appearance, cx: &mut Context<Self>) {
+        persist_setting(cx, move |s| s.appearance = appearance);
+        crate::theme::refresh_active_theme(cx);
+        // Unlike a theme-row click, this is already committed to disk --
+        // move the picker's escape/cancel baseline forward too, or
+        // Escape would visually revert a choice that outlived it.
+        if let Some(picker) = &mut self.theme_picker {
+            picker.saved_theme = theme(cx);
+        }
+        cx.notify();
+    }
+
     fn run_plugin_command(
         &mut self,
         plugin: String,
@@ -3174,6 +3190,39 @@ impl Workspace {
         let t = theme(cx);
         let state = cx.global::<crate::theme::ThemeState>();
 
+        // Three-way Light / Dark / System control at the top: an
+        // explicit choice here beats both the system appearance and
+        // flux's night override (see `ThemeState::resolve`).
+        let current_appearance = state.settings.appearance;
+        let appearance_options: Vec<AnyElement> = [
+            (crate::settings::Appearance::Light, "Light"),
+            (crate::settings::Appearance::Dark, "Dark"),
+            (crate::settings::Appearance::System, "System"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ix, (variant, label))| {
+            let selected = current_appearance == variant;
+            div()
+                .id(("appearance-option", ix))
+                .flex_1()
+                .py(px(4.))
+                .rounded_md()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_size(px(t.ui_size))
+                .when(selected, |d| d.bg(t.selected_bg).text_color(t.fg_strong))
+                .when(!selected, |d| d.text_color(t.fg_muted).hover(|s| s.bg(t.hover_bg)))
+                .child(label)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    this.set_appearance(variant, cx);
+                }))
+                .into_any_element()
+        })
+        .collect();
+
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut last_dark: Option<bool> = None;
         for (pos, &ix) in picker.order.iter().enumerate() {
@@ -3272,6 +3321,19 @@ impl Workspace {
                         .p_2()
                         .flex()
                         .flex_col()
+                        .child(
+                            div()
+                                .px_2()
+                                .pt_1()
+                                .pb_2()
+                                .mb_1()
+                                .border_b_1()
+                                .border_color(t.border)
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .children(appearance_options),
+                        )
                         .child(
                             div()
                                 .px_2()
@@ -8741,6 +8803,65 @@ pub(crate) mod tests {
             ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
         });
         cx.update(|_, app| assert!(ws.read(app).theme_picker.is_none()));
+    }
+
+    /// The appearance control in the theme picker persists and applies
+    /// immediately -- unlike the theme list, which only previews until
+    /// confirm. It survives a fresh load from disk, and re-resolves the
+    /// active theme without waiting for a confirm step.
+    #[gpui::test]
+    fn set_appearance_persists_and_refreshes_immediately(cx: &mut TestAppContext) {
+        let home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // The test harness starts every window on the dark theme (see
+        // `install_test_globals`), so picking Light is the choice that
+        // actually flips something -- picking Dark would look the same
+        // whether or not this applied at all.
+        cx.update(|_, app| assert!(theme(app).is_dark, "harness starts on dark"));
+        ws.update_in(cx, |ws, _, cx| {
+            ws.set_appearance(crate::settings::Appearance::Light, cx)
+        });
+        cx.update(|_, app| {
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(state.settings.appearance, crate::settings::Appearance::Light);
+            assert!(!theme(app).is_dark, "applies immediately, no confirm step needed");
+        });
+
+        let dir = home._dir.path().join(".supermd");
+        let on_disk = crate::settings::load(&dir);
+        assert_eq!(
+            on_disk.appearance,
+            crate::settings::Appearance::Light,
+            "persisted to disk, not just the live global"
+        );
+    }
+
+    /// Choosing an appearance is already committed (persisted + live)
+    /// the instant it's clicked -- unlike scrolling the theme list,
+    /// which only previews until confirm. Escape must not revert it:
+    /// that would be exactly the "says Light, goes dark" lie the whole
+    /// feature exists to avoid, just triggered by closing the popup
+    /// instead of by flux.
+    #[gpui::test]
+    fn escaping_the_picker_after_choosing_appearance_keeps_the_choice(cx: &mut TestAppContext) {
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        ws.update_in(cx, |ws, _, cx| {
+            ws.set_appearance(crate::settings::Appearance::Light, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_cancel(&ThemePickerCancel, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(ws.read(app).theme_picker.is_none());
+            assert!(!theme(app).is_dark, "escape keeps the just-chosen appearance");
+        });
     }
 
     #[gpui::test]

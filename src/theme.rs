@@ -894,12 +894,20 @@ impl Global for ThemeState {}
 impl ThemeState {
     pub fn resolve(&self) -> Arc<Theme> {
         let flux = &self.settings.flux;
-        // Flux night forces the dark theme; day still follows the
-        // system appearance.
-        let dark = if flux.enabled && flux.auto_dark && self.flux_blend >= 0.5 {
-            true
-        } else {
-            self.system_dark
+        // Precedence: an explicit appearance beats both flux's night
+        // override and the system. Under System, flux night still
+        // forces dark and day still follows the system appearance --
+        // unchanged from before this setting existed.
+        let dark = match self.settings.appearance {
+            crate::settings::Appearance::Light => false,
+            crate::settings::Appearance::Dark => true,
+            crate::settings::Appearance::System => {
+                if flux.enabled && flux.auto_dark && self.flux_blend >= 0.5 {
+                    true
+                } else {
+                    self.system_dark
+                }
+            }
         };
         let want = if dark {
             &self.settings.dark_theme
@@ -1001,6 +1009,48 @@ mod theme_state_tests {
         let resolved = s.resolve();
         assert!(!resolved.is_dark);
         assert_eq!(resolved.bg, Theme::light().bg); // Jackfruit Light
+    }
+
+    /// An explicit appearance beats both the system and flux. A
+    /// setting that says "always Light" and then goes dark at night is
+    /// a setting that lies.
+    #[test]
+    fn an_explicit_appearance_overrides_system_and_flux() {
+        use crate::settings::Appearance;
+        let mut st = state("Paper", "Nord", true);
+
+        st.settings.appearance = Appearance::Light;
+        assert!(!st.resolve().is_dark, "explicit Light beats a dark system");
+
+        st.settings.appearance = Appearance::Dark;
+        st.system_dark = false;
+        assert!(st.resolve().is_dark, "explicit Dark beats a light system");
+
+        // Flux night would force dark; an explicit Light still wins.
+        st.settings.appearance = Appearance::Light;
+        st.settings.flux.enabled = true;
+        st.settings.flux.auto_dark = true;
+        st.flux_blend = 1.0;
+        assert!(!st.resolve().is_dark, "explicit Light beats flux night");
+    }
+
+    /// System is the default and keeps today's behaviour exactly,
+    /// including flux's night override.
+    #[test]
+    fn system_appearance_keeps_todays_behaviour() {
+        use crate::settings::Appearance;
+        let mut st = state("Paper", "Nord", true);
+        st.settings.appearance = Appearance::System;
+
+        st.system_dark = true;
+        assert!(st.resolve().is_dark);
+        st.system_dark = false;
+        assert!(!st.resolve().is_dark);
+
+        st.settings.flux.enabled = true;
+        st.settings.flux.auto_dark = true;
+        st.flux_blend = 1.0;
+        assert!(st.resolve().is_dark, "flux night still forces dark under System");
     }
 
     #[test]
