@@ -13,15 +13,22 @@ code_fg = "#ebdbb2"
 border = "#3c3836"
 # dark0 for the page, dark0_hard for the desk and the sidebar --
 # gruvbox publishes both, so the second surface costs no invented
-# colour. hover and selection move down to dark0 and dark0_soft so the
-# whole ladder stays inside the palette.
+# colour. hover and selection then take dark0_soft and dark1, so the
+# whole ladder stays inside the palette and every rung is distinct from
+# the page it is painted on.
 page_bg = "#282828"
 # A warm near-black rather than pure black: gruvbox's ground is warm
 # and a neutral shadow greys it.
 shadow = "#12100e57"
 panel_bg = "#1d2021"
-hover_bg = "#282828"
-selected_bg = "#32302f"
+# hover_bg is painted ON THE PAGE -- the table projector hovers a row
+# with it, and the tab strip hovers an inactive tab with it while the
+# active tab carries page_bg. At dark0 it was the page exactly, so a
+# hovered table row changed nothing and a hovered tab looked active.
+# dark0_soft is the next published rung up, and dark1 carries selection
+# so the two states stay apart.
+hover_bg = "#32302f"
+selected_bg = "#3c3836"
 find_match_bg = "#6a5a10"
 find_active_bg = "#8a7a1a"
 

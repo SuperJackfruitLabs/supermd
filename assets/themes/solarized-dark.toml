@@ -5,7 +5,14 @@ appearance = "dark"
 bg = "#001d24"
 fg = "#839496"
 fg_strong = "#eee8d5"
-fg_muted = "#586e75"
+# base00, not base01. Muted text is painted on the PAGE (base03), and
+# base01 there is 2.79:1 -- under the floor, and unchanged by the desk
+# moving beneath it. base00 is the next published role up the ramp and
+# reaches 3.37:1 on the page, 3.69 on the sidebar, 3.93 on the desk.
+# Solarized does not publish a role for secondary chrome text, so this
+# picks one from the sixteen rather than inventing a colour; base01
+# stays exactly where Solarized does define it, as `comment` below.
+fg_muted = "#657b83"
 accent = "#dc322f"
 link = "#268bd2"
 code_bg = "#073642"

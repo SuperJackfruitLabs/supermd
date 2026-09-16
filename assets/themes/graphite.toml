@@ -19,7 +19,12 @@ page_bg = "#1f1f1e"
 # Neutral through and through: Graphite has no hue to protect, so the
 # page casts a plain black shadow.
 shadow = "#00000057"
-panel_bg = "#1d1d1b"
+# panel_bg is not only the sidebar: the table projector paints the
+# header row with it, on the page. At #1d1d1b that band was 1.023:1
+# against the page -- two levels out of 255, invisible. Dropped one step
+# towards the desk, which reads as a recess in the sheet and leaves the
+# sidebar still a hair above the ground.
+panel_bg = "#1a1a19"
 hover_bg = "#272725"
 selected_bg = "#31312e"
 find_match_bg = "#51431a"

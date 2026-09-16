@@ -267,6 +267,21 @@ impl Theme {
         Hsla { l, ..bg }
     }
 
+    /// The strongest a theme's `shadow` may be, enforced at load.
+    ///
+    /// Above this it is not a falloff, it is a slab: the page's outer
+    /// shadow layer carries 0.6 of the theme alpha, so an opaque black
+    /// paints a hard 60%-black band around the document. Six digits of
+    /// hex parse opaque, and `shadow = "#000000"` is the obvious thing
+    /// to write, so the format makes that mistake easy to make and the
+    /// user's own theme file is the one place no test can reach. A
+    /// documentation line asks; this enforces.
+    ///
+    /// It clamps rather than rejecting. A shadow that is too strong is
+    /// cosmetic, and a theme should not fail to load -- taking the
+    /// whole colour scheme away -- over one token.
+    pub const MAX_SHADOW_ALPHA: f32 = 0.5;
+
     /// One shadow colour. Warm-shifted in light themes so the page
     /// does not cast a cold grey shadow onto a warm ground.
     ///
@@ -422,7 +437,10 @@ impl LoadedTheme {
             None => Hsla { a: theme.border.a * 0.55, ..theme.border },
         };
         theme.shadow = match &c.shadow {
-            Some(hex) => parse_hex(hex)?,
+            Some(hex) => {
+                let c = parse_hex(hex)?;
+                Hsla { a: c.a.min(Theme::MAX_SHADOW_ALPHA), ..c }
+            }
             None => Theme::derive_shadow(is_dark),
         };
         theme.panel_bg = parse_hex(&c.panel_bg)?;
@@ -838,12 +856,41 @@ attribute = "#d19a66"
     /// against) and the muted text of `nord`, `solarized-dark` and
     /// `solarized-light`. Secondary chrome text is not a published
     /// Solarized or Nord role, so tuning it to the floor costs those
-    /// themes nothing they had.
+    /// themes nothing they had. `solarized-dark`'s muted entry came
+    /// back briefly once the assertion started reading the surface that
+    /// binds (see `worst_muted_contrast`) and was then fixed for real,
+    /// by moving `fg_muted` from base01 to base00 -- a different one of
+    /// the sixteen, not a new colour.
     ///
     /// The entry is a *band*, not a hole: drift in either direction
     /// fails. If it ever clears 4.5, delete it instead of widening it.
     const KNOWN_BODY_GAPS: &[(&str, f32, f32)] = &[("solarized-light", 4.2, 4.5)];
     const KNOWN_MUTED_GAPS: &[(&str, f32, f32)] = &[];
+
+    /// Every surface muted text is actually painted on, worst case
+    /// first.
+    ///
+    /// This used to read `contrast(fg_muted, bg)` alone, and that was
+    /// the wrong reference: `bg` is the *desk*, and almost nothing
+    /// writes muted text on the desk. It goes on the page (the
+    /// horizontal rule's label, strikethrough, projector captions --
+    /// `editor/mod.rs`, `view.rs`, `editor/projector.rs`), on the
+    /// sidebar and tab strip (`panel_bg`), and in the floating popups,
+    /// which are also `panel_bg`.
+    ///
+    /// `page_bg` is further from `fg_muted` than `bg` is in every
+    /// shipped theme, so measuring against `bg` flattered all ten of
+    /// them: when the desk moved down in Task 8, three themes' muted
+    /// numbers "improved" without a single pixel of their text
+    /// changing. Taking the minimum means a theme can only pass by
+    /// being readable everywhere it writes, and the surface moving
+    /// cannot fix it -- only the ink can.
+    fn worst_muted_contrast(t: &Theme) -> f32 {
+        [t.bg, t.page_bg, t.panel_bg]
+            .into_iter()
+            .map(|surface| Theme::contrast(t.fg_muted, surface))
+            .fold(f32::INFINITY, f32::min)
+    }
 
     #[test]
     fn every_shipped_theme_keeps_text_readable_on_the_page() {
@@ -856,13 +903,16 @@ attribute = "#d19a66"
                 ),
                 None => assert!(body >= 4.5, "{name}: body text on page is {body:.2}:1"),
             }
-            let muted = Theme::contrast(theme.fg_muted, theme.bg);
+            let muted = worst_muted_contrast(&theme);
             match KNOWN_MUTED_GAPS.iter().find(|(n, _, _)| *n == name) {
                 Some((_, floor, ceiling)) => assert!(
                     muted >= *floor && muted < *ceiling,
-                    "{name}: muted text on ground drifted to {muted:.2}:1, expected [{floor}, {ceiling}) --                      if it cleared {ceiling}, delete this exception instead of widening it"
+                    "{name}: muted text on its worst surface drifted to {muted:.2}:1, expected [{floor}, {ceiling}) --                      if it cleared {ceiling}, delete this exception instead of widening it"
                 ),
-                None => assert!(muted >= 3.0, "{name}: muted text on ground is {muted:.2}:1"),
+                None => assert!(
+                    muted >= 3.0,
+                    "{name}: muted text is {muted:.2}:1 on the worst of page, panel and ground"
+                ),
             }
             let surfaces = Theme::contrast(theme.page_bg, theme.bg);
             assert!(
@@ -891,6 +941,43 @@ attribute = "#d19a66"
             );
             let text = Theme::contrast(theme.code_fg, theme.code_bg);
             assert!(text >= 4.5, "{name}: code text is {text:.2}:1");
+        }
+    }
+
+    /// A background token is only a signal if it differs from what it
+    /// is painted on. `code_bg` was the first of these found collapsed
+    /// onto the page; it was not the only one.
+    ///
+    /// `hover_bg` and `panel_bg` land ON THE PAGE, not only in chrome.
+    /// The table projector paints its header row with `panel_bg` and
+    /// hovers a body row with `hover_bg` (`editor/mod.rs`), and the tab
+    /// strip hovers an inactive tab to `hover_bg` while the active tab
+    /// carries `page_bg` (`workspace.rs`) -- so a collision there both
+    /// kills the hover feedback and makes a hovered tab read as the
+    /// active one. `hover_bg` and `selected_bg` also land on `panel_bg`
+    /// (sidebar rows, the finder, the palette, the `[[` completion
+    /// popup), and the sidebar puts them directly side by side:
+    /// keyboard-selected is `hover_bg`, active is `selected_bg`.
+    ///
+    /// The floor is the fence's, for the fence's reason -- below it the
+    /// difference is a couple of levels out of 255 and nothing appears
+    /// to happen when the pointer moves.
+    #[test]
+    fn every_background_token_is_visible_on_what_it_is_painted_on() {
+        for (name, t) in shipped_themes() {
+            for (what, ink, surface) in [
+                ("a hovered table row, and a hovered tab", t.hover_bg, t.page_bg),
+                ("a table header", t.panel_bg, t.page_bg),
+                ("a hovered sidebar / finder / popup row", t.hover_bg, t.panel_bg),
+                ("a selected sidebar / finder / popup row", t.selected_bg, t.panel_bg),
+                ("selection against hover, side by side", t.selected_bg, t.hover_bg),
+            ] {
+                let separation = Theme::contrast(ink, surface);
+                assert!(
+                    separation >= 1.04,
+                    "{name}: {what} is invisible against what it sits on ({separation:.3}:1)"
+                );
+            }
         }
     }
 
@@ -959,12 +1046,12 @@ attribute = "#d19a66"
     fn explicit_page_border_and_shadow_keys_override_derivation() {
         let toml_src = THEME_WITHOUT_SURFACE_KEYS.replace(
             "[syntax]",
-            "page_bg = \"#123456\"\nborder_subtle = \"#654321\"\nshadow = \"#0f0f0f\"\n[syntax]",
+            "page_bg = \"#123456\"\nborder_subtle = \"#654321\"\nshadow = \"#0f0f0f57\"\n[syntax]",
         );
         let loaded = LoadedTheme::from_toml(&toml_src).unwrap();
         assert_eq!(loaded.theme.page_bg, gpui::rgb(0x123456).into());
         assert_eq!(loaded.theme.border_subtle, gpui::rgb(0x654321).into());
-        assert_eq!(loaded.theme.shadow, gpui::rgb(0x0f0f0f).into());
+        assert_eq!(loaded.theme.shadow, parse_hex("#0f0f0f57").unwrap());
     }
 
     /// A six-digit colour is opaque; an eight-digit one carries its own
@@ -991,15 +1078,45 @@ attribute = "#d19a66"
     /// one is not a shadow -- `elevation::shadows` multiplies it by the
     /// per-layer alpha, so at a: 1.0 the page's outer layer lands at
     /// 0.6 of solid colour and reads as a painted border.
+    ///
+    /// The bound is 0.4, not `MAX_SHADOW_ALPHA`: the load-time clamp
+    /// already guarantees 0.5, so asserting 0.5 here would be asserting
+    /// the clamp rather than the themes. The shipped values are 0.18
+    /// (light) and 0.34 (dark), so 0.4 leaves headroom and still bites.
     #[test]
     fn no_shipped_theme_casts_an_opaque_shadow() {
         for (name, theme) in shipped_themes() {
             assert!(
-                theme.shadow.a > 0.0 && theme.shadow.a < 0.5,
+                theme.shadow.a > 0.0 && theme.shadow.a < 0.4,
                 "{name}: shadow alpha {} is not a shadow",
                 theme.shadow.a
             );
         }
+    }
+
+    /// A theme file cannot cast a slab. Six-digit hex parses opaque,
+    /// which is what a theme author writing `shadow = "#000000"` gets,
+    /// and no test can reach a user's own theme directory -- so the
+    /// load clamps it. The tint survives; only the strength is capped.
+    #[test]
+    fn an_opaque_shadow_in_a_theme_file_is_clamped_not_honoured() {
+        let with = |hex: &str| {
+            let src = THEME_WITHOUT_SURFACE_KEYS
+                .replace("[syntax]", &format!("shadow = \"{hex}\"\n[syntax]"));
+            LoadedTheme::from_toml(&src).expect("loads").theme.shadow
+        };
+        let opaque = with("#000000");
+        assert_eq!(opaque.a, Theme::MAX_SHADOW_ALPHA, "an opaque shadow must be capped");
+        let tinted = with("#12100e");
+        let raw = parse_hex("#12100e").unwrap();
+        assert_eq!(
+            (tinted.h, tinted.s, tinted.l),
+            (raw.h, raw.s, raw.l),
+            "the clamp caps strength, it does not repaint the tint"
+        );
+        let honest = with("#12100e57");
+        assert_eq!(honest, parse_hex("#12100e57").unwrap(), "a shadow under the cap is untouched");
+        assert!(honest.a < Theme::MAX_SHADOW_ALPHA);
     }
 
     /// WCAG contrast is symmetric and bottoms out at 1.0 for identical

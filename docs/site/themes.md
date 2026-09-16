@@ -37,18 +37,21 @@ name = "My Theme"
 appearance = "dark"   # or "light" — decides which system mode it offers in
 
 [colors]
-bg = "#2e3440"          # page background
+bg = "#272c36"          # the desk the page rests on
+page_bg = "#2e3440"     # the document itself — where the reading happens
 fg = "#d8dee9"          # body text
 fg_strong = "#eceff4"   # headings, emphasis
-fg_muted = "#616e88"    # secondary text
+fg_muted = "#748199"    # secondary text
 accent = "#bf616a"      # highlights, links in chrome
 link = "#88c0d0"        # links in documents
 code_bg = "#3b4252"     # code block background
 code_fg = "#d8dee9"     # code text
 border = "#434c5e"
-panel_bg = "#292e39"    # sidebar, overlays
-hover_bg = "#3b4252"
-selected_bg = "#434c5e"
+border_subtle = "#434c5e8c"  # hairlines — table rules and the like
+shadow = "#10141c57"    # the page's drop shadow: tint + strength
+panel_bg = "#22262f"    # sidebar, overlays, table headers
+hover_bg = "#343a48"
+selected_bg = "#3c4454"
 find_match_bg = "#665c22"
 find_active_bg = "#8a7d33"
 
@@ -62,5 +65,20 @@ constant = "#b48ead"
 ```
 
 Optionally, `diff_added_bg`, `diff_added_fg`, `diff_deleted_bg`, and `diff_deleted_fg` under `[colors]` tune the git diff view; sensible defaults are used otherwise.
+
+### The page and the desk
+
+The document sits on its own surface. `page_bg` is that surface — the one a reader actually looks at — and `bg` is the desk behind and beneath it, which the sidebar, tab strip, outline and status bar share. If your theme predates this split, or you simply leave the three newer keys out, they are derived from the colors you did give: `page_bg` steps one notch away from `bg`, `border_subtle` is `border` at reduced alpha, and `shadow` is picked to suit your `appearance`. Your theme keeps working; setting them by hand is how you take control of the relationship.
+
+Two things are worth checking by eye once you set `page_bg` yourself, because both are drawn *on the page* rather than on the desk:
+
+- **`code_bg`** — a fence tuned against the old single background can vanish against a brighter page.
+- **`panel_bg` and `hover_bg`** — a table's header row is `panel_bg` and a hovered table row is `hover_bg`, both painted on the page. If either matches `page_bg`, that feedback disappears. `hover_bg` also highlights an inactive tab, and the active tab carries `page_bg`, so a collision there makes every hovered tab look active.
+
+### Colors with alpha
+
+A color is `#rrggbb`, or `#rrggbbaa` when it needs to be translucent — the last pair of digits is the alpha, `00` transparent through `ff` opaque.
+
+`shadow` really wants the second form. It is a tint *and* a strength: SuperMD scales that alpha across the shadow's layers, so a six-digit `shadow = "#000000"` means fully opaque black and would paint a hard band around the page instead of a falloff. Write `#00000057` — black at about a third — or pick a near-black in your theme's own hue so the shadow deepens the desk rather than draining it. Anything stronger than 50% alpha is capped at load, so a mistake here dims rather than disfigures.
 
 Restart SuperMD and your theme appears in the picker alongside the built-ins. A theme file that doesn't parse is skipped with a message in the terminal — it never breaks the app.

@@ -7,7 +7,10 @@ fg = "#37352f"
 fg_strong = "#1d1c19"
 # Four levels down from #8f8d87: the ground is no longer white, and the
 # old value only just held 3:1 against white.
-fg_muted = "#8b8983"
+# Two steps darker than it was: on panel_bg -- the sidebar and the tab
+# strip, where most muted text actually lands -- #8b8983 was 2.94:1,
+# under the floor even though it cleared on the page and the desk.
+fg_muted = "#85837d"
 accent = "#dd4c4f"
 link = "#dd4c4f"
 code_bg = "#f6f5f3"
