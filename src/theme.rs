@@ -835,49 +835,68 @@ attribute = "#d19a66"
     /// theme we ship -- a derived value that looks wrong in nord is
     /// caught here rather than by squinting at a screenshot.
     ///
-    /// One shipped theme cannot meet the body floor, and the exception
-    /// below is permanent rather than a to-do.
+    /// Both Solarized themes fail the body floor, and both exceptions
+    /// are permanent rather than to-dos. They are one fact: Solarized's
+    /// ink is published low-contrast, and every other theme we ship has
+    /// two to three times the headroom.
     ///
-    /// Solarized's light body ink is base00 `#657b83`. Against base3
-    /// `#fdf6e3` it is 4.13:1 and against pure white -- the brightest
-    /// page any theme could have -- it is 4.4546:1. There is no page
-    /// colour that lifts it to 4.5:1, so the only fix is to change
-    /// base00, and base00 is not a detail of the theme: Solarized is a
-    /// published sixteen-colour palette built on measured *relative*
-    /// lightness relationships, and its author chose those numbers
+    /// The light body ink is base00 `#657b83`. Against base3 `#fdf6e3`
+    /// it is 4.13:1 and against pure white -- the brightest page any
+    /// theme could have -- 4.4546:1, so no *page* colour reaches 4.5:1
+    /// even before the rest of the surface ramp is considered. The dark
+    /// body ink is base0 `#839496`, which clears on base03 at 4.75:1
+    /// and then loses it again on a selected row. The only fix in both
+    /// is to change the ink, and the ink is not a detail of the theme:
+    /// Solarized is a published sixteen-colour palette built on
+    /// measured *relative* lightness relationships, chosen
     /// deliberately. A Solarized theme with different ink is a theme
-    /// wearing Solarized's name. The page here is set as bright as it
-    /// can go while still reading as Solarized, which is the most that
-    /// can be done from this side.
+    /// wearing Solarized's name.
     ///
     /// Everything else that used to sit in this table is gone, fixed in
-    /// the theme rather than recorded here: `solarized-dark`'s body
-    /// (the page now carries base03, which is what base0 was designed
-    /// against) and the muted text of `nord`, `solarized-dark` and
-    /// `solarized-light`. Secondary chrome text is not a published
-    /// Solarized or Nord role, so tuning it to the floor costs those
-    /// themes nothing they had. `solarized-dark`'s muted entry came
-    /// back once the assertion started reading the surface that binds
-    /// (see `worst_muted_contrast`); moving `fg_muted` from base01 to
-    /// base00 bought it the page and the sidebar but not a selected
-    /// row, and it is now a permanent muted exception below, for the
-    /// same published-ink reason as this one.
+    /// the theme rather than recorded here: the muted text of `nord`,
+    /// `solarized-dark` and `solarized-light`, plus `paper` and
+    /// `jackfruit-light`. Secondary chrome text is not a published
+    /// Solarized or Nord role, so tuning it costs those themes nothing
+    /// they had -- but it only goes so far, and the muted table below
+    /// carries the two Solarized entries that the ink itself blocks.
     ///
-    /// The same fact has a third symptom that is recorded here and not
-    /// guarded: body ink on `selected_bg` is 3.38:1 in solarized-dark
-    /// and 3.28:1 in solarized-light (7.2-9.6:1 in the other eight).
-    /// That is the search overlay's matched line and an open file's
-    /// name in the sidebar. It is the same root cause and has the same
-    /// non-fix, so widening this assertion to `selected_bg` would add
-    /// two more entries to this table and change no pixel; the number
-    /// is written down here instead, where the next person measuring
-    /// will find it.
+    /// Both entries are *bands*, not holes: drift in either direction
+    /// fails, including the direction where the assertion stops reading
+    /// a surface. If either ever clears 4.5, delete it instead of
+    /// widening it.
+    const KNOWN_BODY_GAPS: &[(&str, f32, f32)] =
+        &[("solarized-dark", 3.3, 4.5), ("solarized-light", 3.2, 4.5)];
+
+    /// Every surface body text is actually painted on, reduced to the
+    /// worst one -- the same reduction `worst_muted_contrast` does, for
+    /// the same reason, over a list grepped for `fg` rather than
+    /// assumed to match muted ink's. It happens to be the same five:
     ///
-    /// The entry is a *band*, not a hole: drift in either direction
-    /// fails. If it ever clears 4.5, delete it instead of widening it.
-    const KNOWN_BODY_GAPS: &[(&str, f32, f32)] = &[("solarized-light", 4.2, 4.5)];
+    /// - `bg` -- a sidebar row at rest is `RowState::Resting`, whose
+    ///   background is the desk, and its name is `fg`;
+    /// - `page_bg` -- the document, and a table's body rows
+    ///   (`editor/mod.rs`);
+    /// - `panel_bg` -- the link-hover popover (`editor/mod.rs`,
+    ///   `preview.rs`), the selection toolbar, and the overlays;
+    /// - `hover_bg` -- a hovered table row, a hovered selection-toolbar
+    ///   button, a hovered sidebar row;
+    /// - `selected_bg` -- the search overlay's matched line on the
+    ///   selected result (`search_ui.rs`), and an open file's name in
+    ///   the sidebar.
+    ///
+    /// This was prose in a doc comment before it was a test: the
+    /// numbers were measured, written down, and deliberately not
+    /// guarded on the grounds that guarding them would change no pixel.
+    /// That is exactly how the muted defect survived two rounds. A
+    /// number nothing asserts is a number that drifts.
+    fn worst_body_contrast(t: &Theme) -> f32 {
+        [t.bg, t.page_bg, t.panel_bg, t.hover_bg, t.selected_bg]
+            .into_iter()
+            .map(|surface| Theme::contrast(t.fg, surface))
+            .fold(f32::INFINITY, f32::min)
+    }
     /// Two permanent muted exceptions, and they are the *same fact* as
-    /// the body exception above rather than a second problem.
+    /// the two body exceptions above rather than a second problem.
     ///
     /// Solarized's ink is published low-contrast by design: base0 on
     /// base03 is 4.75:1 and base00 on base3 is 4.34:1, the lowest body
@@ -901,6 +920,12 @@ attribute = "#d19a66"
     /// solarized-light the ink fails at 2.84:1 even on `hover_bg`, so
     /// no selection colour lighter than hover -- which would invert the
     /// ladder -- reaches 3:1 either.
+    ///
+    /// The same published-ink fact has a third symptom, and that one is
+    /// guarded rather than written down: *body* ink is 3.38:1 and
+    /// 3.28:1 on a selected row in these two themes, against 7.2-9.6:1
+    /// in the other eight -- see `worst_body_contrast` and the two
+    /// entries in `KNOWN_BODY_GAPS`.
     ///
     /// Both are *bands*, not holes: drift down fails, and so does
     /// drift up past the floor. If either ever clears 3.0, delete it
@@ -948,13 +973,16 @@ attribute = "#d19a66"
     #[test]
     fn every_shipped_theme_keeps_text_readable_on_the_page() {
         for (name, theme) in shipped_themes() {
-            let body = Theme::contrast(theme.fg, theme.page_bg);
+            let body = worst_body_contrast(&theme);
             match KNOWN_BODY_GAPS.iter().find(|(n, _, _)| *n == name) {
                 Some((_, floor, ceiling)) => assert!(
                     body >= *floor && body < *ceiling,
-                    "{name}: body text on page drifted to {body:.2}:1, expected [{floor}, {ceiling}) --                      if it cleared {ceiling}, delete this exception instead of widening it"
+                    "{name}: body text on its worst surface drifted to {body:.2}:1, expected [{floor}, {ceiling}) --                      if it cleared {ceiling}, delete this exception instead of widening it; if the assertion stopped reading a surface, put it back"
                 ),
-                None => assert!(body >= 4.5, "{name}: body text on page is {body:.2}:1"),
+                None => assert!(
+                    body >= 4.5,
+                    "{name}: body text is {body:.2}:1 on the worst of ground, page, panel, hover and selection"
+                ),
             }
             let muted = worst_muted_contrast(&theme);
             match KNOWN_MUTED_GAPS.iter().find(|(n, _, _)| *n == name) {

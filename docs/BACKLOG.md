@@ -51,6 +51,39 @@ _Last groomed: 2026-08-31, after the Mac App Store pass._
 | System location (opt-in) | Manual coordinates only today, by design; CoreLocation could be an explicit opt-in later |
 | Per-theme flux pairing | One global light/dark pair today; themes could declare their own day/night partners |
 
+### One row builder, so contrast can be enumerated instead of grepped
+
+Tuning the themes for the page surface turned up the same defect four
+times in a row, and each time it was found by a reviewer rather than by
+a test: a colour token painted on a background nobody had measured it
+against. `code_bg` on the page; `hover_bg` and `panel_bg` on the page;
+`fg_muted` on `hover_bg` and `selected_bg`; `fg` on `selected_bg`. The
+contrast tests now assert a **hand-maintained list of (ink, surface)
+pairs**. Nothing makes that list complete, and nothing fails when a new
+render site paints an existing token on a new surface — which is how the
+list grew from one pair to sixteen, one review at a time.
+
+Every violation so far has had one shape: **a selectable list row with a
+muted-or-body-ink child.** The sidebar, the tab strip, the finder, the
+palette, the search overlay, the install list and the `[[` completion
+popup each hand-roll their own `.when(is_selected, |d| d.bg(...))` plus
+a `.hover(|s| s.bg(t.hover_bg))`, and each then paints `fg` and
+`fg_muted` children onto whichever of those it chose. `RowState`,
+`RowStyle` and `sidebar_row_style` in `workspace.rs` are the bones of the
+shared abstraction — one of the seven uses them.
+
+The work: put all seven row builders behind one helper that owns the
+`resting / hovered / keyboard-selected / active` background choice and
+the ink slots that ride on it, then have the contrast test walk *that*
+one place to enumerate the pairs rather than carrying a list someone has
+to remember to extend. That closes the observed failure shape at a
+fraction of the cost of the general fix.
+
+The general fix — surface-typed colour handles, so painting ink on a
+surface is one typed operation rather than two independent `.bg()` and
+`.text_color()` calls — stays the fallback, and is only worth its cost
+if a violation ever shows up somewhere that is *not* a selectable row.
+
 ## Distribution & platform
 
 | Item | Notes |
