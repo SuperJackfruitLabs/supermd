@@ -6,9 +6,11 @@ bg = "#272c36"
 fg = "#d8dee9"
 fg_strong = "#eceff4"
 # nord3-bright (#616e88) never reached 3:1 against any Nord background;
-# this is the same blue-grey carried far enough up the ramp to be read.
-# Code comments keep #616e88, which sits on the lighter code fence.
-fg_muted = "#748199"
+# this is the same blue-grey carried far enough up the ramp to be read
+# on all five surfaces muted ink lands on -- the binding one is
+# selected_bg, the top of the Polar Night ladder, where #748199 was
+# 2.49:1. Code comments keep #616e88, which sits on the lighter fence.
+fg_muted = "#8492ad"
 accent = "#bf616a"
 link = "#88c0d0"
 code_bg = "#3b4252"

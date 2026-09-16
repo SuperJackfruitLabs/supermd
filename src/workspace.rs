@@ -478,8 +478,25 @@ pub(crate) fn should_offer_default_handler(markdown_opens_this_session: u32) -> 
 /// a `.gitignore` keeps out of the index -- are listed but recede:
 /// present when you need them, never competing with the notes, and the
 /// only affordance saying "this file is not in your graph".
-pub(crate) fn sidebar_row_color(ignored: bool, is_dir: bool, t: &Theme) -> gpui::Hsla {
-    if ignored {
+///
+/// The dim stops at the row you have open. Receding is a relationship
+/// to the *list* -- "do not compete with the notes" -- and the active
+/// row is not competing with anything, it is the one thing on the
+/// ground marking where you are, with the accent bar and the selection
+/// background to say so. `seti_tint_muted` already draws exactly this
+/// line for the same row's icon (muted at rest, accent when active);
+/// the name simply had not followed it, so an open ignored file showed
+/// an accent icon beside the dimmest name in the sidebar.
+///
+/// Directories are never active -- the active path is a file -- so the
+/// flag only reaches the file arms.
+pub(crate) fn sidebar_row_color(
+    ignored: bool,
+    is_dir: bool,
+    active: bool,
+    t: &Theme,
+) -> gpui::Hsla {
+    if ignored && !active {
         t.fg_muted
     } else if is_dir {
         t.fg_strong
@@ -3836,7 +3853,7 @@ impl Workspace {
                             .text_color(tint)
                     })
                     .child({
-                        let row_color = sidebar_row_color(entry.ignored, is_dir, &t);
+                        let row_color = sidebar_row_color(entry.ignored, is_dir, is_active, &t);
                         div()
                             .text_size(px(t.ui_size))
                             .text_color(row_color)
@@ -7744,11 +7761,35 @@ pub(crate) mod tests {
     #[test]
     fn an_ignored_sidebar_row_is_dimmed() {
         let t = crate::theme::Theme::dark();
-        assert_eq!(sidebar_row_color(true, false, &t), t.fg_muted, "an ignored file recedes");
-        assert_eq!(sidebar_row_color(true, true, &t), t.fg_muted, "an ignored folder too");
-        assert_ne!(sidebar_row_color(false, false, &t), t.fg_muted, "an indexed file does not");
-        assert_eq!(sidebar_row_color(false, false, &t), t.fg);
-        assert_eq!(sidebar_row_color(false, true, &t), t.fg_strong, "folders lead");
+        assert_eq!(sidebar_row_color(true, false, false, &t), t.fg_muted, "an ignored file recedes");
+        assert_eq!(sidebar_row_color(true, true, false, &t), t.fg_muted, "an ignored folder too");
+        assert_ne!(
+            sidebar_row_color(false, false, false, &t),
+            t.fg_muted,
+            "an indexed file does not"
+        );
+        assert_eq!(sidebar_row_color(false, false, false, &t), t.fg);
+        assert_eq!(sidebar_row_color(false, true, false, &t), t.fg_strong, "folders lead");
+    }
+
+    /// ...but the file you have open is not receding. It carries the
+    /// accent bar and the selection background; dimming its name makes
+    /// the one row that answers "where am I?" the hardest to read, and
+    /// leaves it disagreeing with its own icon, which `seti_tint_muted`
+    /// already brightens to the accent when the row is active.
+    #[test]
+    fn the_open_row_is_never_dimmed_even_when_ignored() {
+        let t = crate::theme::Theme::dark();
+        assert_eq!(
+            sidebar_row_color(true, false, true, &t),
+            t.fg,
+            "an ignored file you have open reads like any other open file"
+        );
+        assert_ne!(sidebar_row_color(true, false, true, &t), t.fg_muted);
+        // The rule the icon already followed, stated once here so the
+        // two cannot drift apart again.
+        assert_eq!(seti_tint_muted(&t, false), t.fg_muted, "icon dims at rest");
+        assert_ne!(seti_tint_muted(&t, true), t.fg_muted, "and brightens when active");
     }
 
     #[gpui::test]

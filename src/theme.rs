@@ -144,7 +144,7 @@ impl Theme {
                 // temperature.
                 fg: rgb(0x353027).into(),
                 fg_strong: rgb(0x221f19).into(),
-                fg_muted: rgb(0x8c8373).into(),
+                fg_muted: rgb(0x827969).into(),
                 accent: rgb(0xc9821c).into(),
                 link: rgb(0xc9821c).into(),
                 code_bg: rgb(0xf6f2e9).into(),
@@ -857,36 +857,89 @@ attribute = "#d19a66"
     /// `solarized-light`. Secondary chrome text is not a published
     /// Solarized or Nord role, so tuning it to the floor costs those
     /// themes nothing they had. `solarized-dark`'s muted entry came
-    /// back briefly once the assertion started reading the surface that
-    /// binds (see `worst_muted_contrast`) and was then fixed for real,
-    /// by moving `fg_muted` from base01 to base00 -- a different one of
-    /// the sixteen, not a new colour.
+    /// back once the assertion started reading the surface that binds
+    /// (see `worst_muted_contrast`); moving `fg_muted` from base01 to
+    /// base00 bought it the page and the sidebar but not a selected
+    /// row, and it is now a permanent muted exception below, for the
+    /// same published-ink reason as this one.
+    ///
+    /// The same fact has a third symptom that is recorded here and not
+    /// guarded: body ink on `selected_bg` is 3.38:1 in solarized-dark
+    /// and 3.28:1 in solarized-light (7.2-9.6:1 in the other eight).
+    /// That is the search overlay's matched line and an open file's
+    /// name in the sidebar. It is the same root cause and has the same
+    /// non-fix, so widening this assertion to `selected_bg` would add
+    /// two more entries to this table and change no pixel; the number
+    /// is written down here instead, where the next person measuring
+    /// will find it.
     ///
     /// The entry is a *band*, not a hole: drift in either direction
     /// fails. If it ever clears 4.5, delete it instead of widening it.
     const KNOWN_BODY_GAPS: &[(&str, f32, f32)] = &[("solarized-light", 4.2, 4.5)];
-    const KNOWN_MUTED_GAPS: &[(&str, f32, f32)] = &[];
+    /// Two permanent muted exceptions, and they are the *same fact* as
+    /// the body exception above rather than a second problem.
+    ///
+    /// Solarized's ink is published low-contrast by design: base0 on
+    /// base03 is 4.75:1 and base00 on base3 is 4.34:1, the lowest body
+    /// contrast of anything we ship, and everything else has to fit
+    /// underneath that. Muted ink must also clear 3:1 on `selected_bg`,
+    /// the far end of the surface ramp. Solving for the ink that does
+    /// gives 4.29:1 on the page in solarized-dark and 4.22:1 in
+    /// solarized-light -- 90% and 97% of the body ink's own contrast.
+    /// Contrast is a function of luminance alone, so there is no hue or
+    /// saturation that buys this back: the only `fg_muted` that clears
+    /// the floor is one that reads as body text, which is not a muted
+    /// token, it is a second body token. For comparison, the themes
+    /// that pass sit at 37-56% of their body ink.
+    ///
+    /// The surface side was checked before accepting this, and it is
+    /// worse. Lowering solarized-dark's `selected_bg` until base00
+    /// clears leaves `selected_bg`/`hover_bg` at 1.025:1 -- below the
+    /// floor in
+    /// `every_background_token_is_visible_on_what_it_is_painted_on`, so
+    /// a readable hint would cost a visible selection. In
+    /// solarized-light the ink fails at 2.84:1 even on `hover_bg`, so
+    /// no selection colour lighter than hover -- which would invert the
+    /// ladder -- reaches 3:1 either.
+    ///
+    /// Both are *bands*, not holes: drift down fails, and so does
+    /// drift up past the floor. If either ever clears 3.0, delete it
+    /// rather than widening it.
+    const KNOWN_MUTED_GAPS: &[(&str, f32, f32)] =
+        &[("solarized-dark", 2.3, 3.0), ("solarized-light", 2.45, 3.0)];
 
-    /// Every surface muted text is actually painted on, worst case
-    /// first.
+    /// Every surface muted text is actually painted on -- all five --
+    /// reduced to the worst one.
     ///
-    /// This used to read `contrast(fg_muted, bg)` alone, and that was
-    /// the wrong reference: `bg` is the *desk*, and almost nothing
-    /// writes muted text on the desk. It goes on the page (the
-    /// horizontal rule's label, strikethrough, projector captions --
-    /// `editor/mod.rs`, `view.rs`, `editor/projector.rs`), on the
-    /// sidebar and tab strip (`panel_bg`), and in the floating popups,
-    /// which are also `panel_bg`.
+    /// This began as `contrast(fg_muted, bg)` alone, and that was the
+    /// wrong reference: `bg` is the *desk*, and almost nothing writes
+    /// muted text on the desk. The five real surfaces are
     ///
-    /// `page_bg` is further from `fg_muted` than `bg` is in every
-    /// shipped theme, so measuring against `bg` flattered all ten of
-    /// them: when the desk moved down in Task 8, three themes' muted
-    /// numbers "improved" without a single pixel of their text
-    /// changing. Taking the minimum means a theme can only pass by
-    /// being readable everywhere it writes, and the surface moving
-    /// cannot fix it -- only the ink can.
+    /// - `bg`, the desk;
+    /// - `page_bg` -- the horizontal rule's label, strikethrough,
+    ///   projector captions (`editor/mod.rs`, `view.rs`,
+    ///   `editor/projector.rs`);
+    /// - `panel_bg` -- the sidebar, the tab strip's inactive labels,
+    ///   and every floating overlay's ground;
+    /// - `hover_bg` -- the sidebar chevron and folder icon are
+    ///   unconditionally `fg_muted` (`workspace.rs`), so hovering any
+    ///   directory row paints them on it, as does hovering an inactive
+    ///   tab;
+    /// - `selected_bg` -- the finder's directory hint, the palette's
+    ///   plugin name, the search results' line numbers, the install
+    ///   list's descriptions and the `[[` popup's path hint are all
+    ///   `fg_muted` on a *selected* row.
+    ///
+    /// The ramp runs `bg` -> `selected_bg` and `fg_muted` is one ink
+    /// for all of it, so `selected_bg` -- the far end -- is the binding
+    /// surface in every shipped theme. Each time this set grew, the
+    /// narrower version had been flattering every theme at once: `bg`
+    /// hid 2.79:1 muted text in solarized-dark, and the three-surface
+    /// version hid 2.67:1 in paper. Taking the minimum means a theme
+    /// can only pass by being readable everywhere it writes, and moving
+    /// a surface can never fix it -- only the ink can.
     fn worst_muted_contrast(t: &Theme) -> f32 {
-        [t.bg, t.page_bg, t.panel_bg]
+        [t.bg, t.page_bg, t.panel_bg, t.hover_bg, t.selected_bg]
             .into_iter()
             .map(|surface| Theme::contrast(t.fg_muted, surface))
             .fold(f32::INFINITY, f32::min)
@@ -907,11 +960,11 @@ attribute = "#d19a66"
             match KNOWN_MUTED_GAPS.iter().find(|(n, _, _)| *n == name) {
                 Some((_, floor, ceiling)) => assert!(
                     muted >= *floor && muted < *ceiling,
-                    "{name}: muted text on its worst surface drifted to {muted:.2}:1, expected [{floor}, {ceiling}) --                      if it cleared {ceiling}, delete this exception instead of widening it"
+                    "{name}: muted text on its worst surface drifted to {muted:.2}:1, expected [{floor}, {ceiling}) --                      if it cleared {ceiling}, delete this exception instead of widening it; if the assertion stopped reading a surface, put it back"
                 ),
                 None => assert!(
                     muted >= 3.0,
-                    "{name}: muted text is {muted:.2}:1 on the worst of page, panel and ground"
+                    "{name}: muted text is {muted:.2}:1 on the worst of ground, page, panel, hover and selection"
                 ),
             }
             let surfaces = Theme::contrast(theme.page_bg, theme.bg);
@@ -959,6 +1012,11 @@ attribute = "#d19a66"
     /// popup), and the sidebar puts them directly side by side:
     /// keyboard-selected is `hover_bg`, active is `selected_bg`.
     ///
+    /// `selected_bg` reaches the page too, in one place that a grep for
+    /// it next to `page_bg` will not show: a tab's close button hovers
+    /// to `selected_bg`, and the tab around it is `page_bg` when active
+    /// and `bg` when not (`workspace.rs`). Both pairs are listed.
+    ///
     /// The floor is the fence's, for the fence's reason -- below it the
     /// difference is a couple of levels out of 255 and nothing appears
     /// to happen when the pointer moves.
@@ -971,6 +1029,8 @@ attribute = "#d19a66"
                 ("a hovered sidebar / finder / popup row", t.hover_bg, t.panel_bg),
                 ("a selected sidebar / finder / popup row", t.selected_bg, t.panel_bg),
                 ("selection against hover, side by side", t.selected_bg, t.hover_bg),
+                ("a tab's close button, hovered on the active tab", t.selected_bg, t.page_bg),
+                ("a tab's close button, hovered on an inactive tab", t.selected_bg, t.bg),
             ] {
                 let separation = Theme::contrast(ink, surface);
                 assert!(

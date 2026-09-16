@@ -41,7 +41,7 @@ bg = "#272c36"          # the desk the page rests on
 page_bg = "#2e3440"     # the document itself — where the reading happens
 fg = "#d8dee9"          # body text
 fg_strong = "#eceff4"   # headings, emphasis
-fg_muted = "#748199"    # secondary text
+fg_muted = "#8492ad"    # secondary text
 accent = "#bf616a"      # highlights, links in chrome
 link = "#88c0d0"        # links in documents
 code_bg = "#3b4252"     # code block background
@@ -74,6 +74,8 @@ Two things are worth checking by eye once you set `page_bg` yourself, because bo
 
 - **`code_bg`** — a fence tuned against the old single background can vanish against a brighter page.
 - **`panel_bg` and `hover_bg`** — a table's header row is `panel_bg` and a hovered table row is `hover_bg`, both painted on the page. If either matches `page_bg`, that feedback disappears. `hover_bg` also highlights an inactive tab, and the active tab carries `page_bg`, so a collision there makes every hovered tab look active.
+
+And one that catches nearly every theme by surprise: **`fg_muted` is painted on all five backgrounds** — the desk, the page, `panel_bg`, `hover_bg` and `selected_bg`. The sidebar's chevrons and folder icons are muted on whatever the row is painted with, and the finder's directory hints, the palette's plugin names, the search results' line numbers and the `[[` completion popup's path hints are all muted text on a *selected* row. `selected_bg` is the far end of that ramp, so it is the one that decides: a `fg_muted` picked to look right on the page will usually be a step too faint there.
 
 ### Colors with alpha
 

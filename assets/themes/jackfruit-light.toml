@@ -5,7 +5,12 @@ appearance = "light"
 bg = "#f8f4ea"
 fg = "#353027"
 fg_strong = "#221f19"
-fg_muted = "#8c8373"
+# Muted ink has to read on five surfaces, not one: the desk, the page,
+# the sidebar, a hovered row and a SELECTED row. selected_bg is the far
+# end of that ramp and the binding one -- the finder's directory hint,
+# the palette's plugin name, the search results' line numbers and the
+# `[[` popup's path hint are all fg_muted on a selected row.
+fg_muted = "#827969"
 accent = "#c9821c"
 link = "#c9821c"
 code_bg = "#f6f2e9"
