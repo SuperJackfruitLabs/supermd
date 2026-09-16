@@ -570,8 +570,9 @@ pub(crate) fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
 /// warm chrome is what made the file list clash. The active row/tab
 /// takes the accent instead, which is how you tell it apart at a
 /// glance without the rest of the tree turning into confetti.
-pub(crate) fn seti_tint_muted(color: SetiColor, t: &Theme, active: bool) -> gpui::Hsla {
-    let _ = color;
+/// Chrome icon muting is deliberately uniform regardless of file type,
+/// so no color parameter is needed.
+pub(crate) fn seti_tint_muted(t: &Theme, active: bool) -> gpui::Hsla {
     if active { t.accent } else { t.fg_muted }
 }
 
@@ -3762,7 +3763,7 @@ impl Workspace {
                             (crate::ui_icons::path("folder"), t.fg_muted)
                         } else {
                             let (icon, color) = seti::icon_for(&entry.name);
-                            (format!("icons/seti/{icon}.svg"), seti_tint_muted(color, &t, is_active))
+                            (format!("icons/seti/{icon}.svg"), seti_tint_muted(&t, is_active))
                         };
                         // Seti glyphs carry ~30% internal padding, so the box
                         // runs larger than the text for a matched visual size.
@@ -4389,7 +4390,7 @@ impl Workspace {
             let is_transient = preview_tab == Some(ix);
             let is_active = ix == active;
             let (icon, color) = seti::icon_for(&title);
-            let tint = seti_tint_muted(color, &t, is_active);
+            let tint = seti_tint_muted(&t, is_active);
             div()
                 .id(SharedString::from(format!("tab-{ix}")))
                 .debug_selector(move || format!("tab-{ix}"))
@@ -9300,9 +9301,9 @@ pub(crate) mod tests {
     #[test]
     fn chrome_icons_are_muted_and_the_active_one_takes_the_accent() {
         let t = crate::theme::Theme::light();
-        assert_eq!(seti_tint_muted(SetiColor::Blue, &t, false), t.fg_muted);
-        assert_eq!(seti_tint_muted(SetiColor::Purple, &t, false), t.fg_muted);
-        assert_eq!(seti_tint_muted(SetiColor::Blue, &t, true), t.accent);
+        assert_eq!(seti_tint_muted(&t, false), t.fg_muted);
+        assert_eq!(seti_tint_muted(&t, false), t.fg_muted);
+        assert_eq!(seti_tint_muted(&t, true), t.accent);
         // The full-colour mapping survives for the finder, where telling
         // file types apart quickly is the actual task.
         assert_eq!(seti_tint(SetiColor::Blue, &t), t.syntax.function);
