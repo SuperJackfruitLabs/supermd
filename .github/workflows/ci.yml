@@ -13,6 +13,13 @@ on:
     paths-ignore: ['site/**', 'docs/**', 'README.md']
 
 jobs:
+  linux-installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check tarball installation layout
+        run: python3 scripts/test_linux_installer.py
+
   test:
     strategy:
       fail-fast: false
