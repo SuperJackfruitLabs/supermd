@@ -118,6 +118,13 @@ pub struct DiffState {
 }
 
 pub struct Editor {
+    /// Test seams standing in for a format-on-save plugin and a save
+    /// hook plugin, consulted at the exact points the plugins are, so
+    /// tests can make a save change the buffer without building wasm.
+    #[cfg(test)]
+    pub(crate) test_formatter: Option<fn(&str) -> String>,
+    #[cfg(test)]
+    pub(crate) test_save_hook: Option<fn(&str) -> String>,
     core: EditorCore,
     provider: Provider,
     diff: Option<DiffState>,
@@ -373,6 +380,10 @@ impl Editor {
             scroll_anim: None,
             pending_enrich: None,
             status_text: None,
+            #[cfg(test)]
+            test_formatter: None,
+            #[cfg(test)]
+            test_save_hook: None,
             status_task: None,
             completion: None,
             toolbar_visible: false,
@@ -1047,6 +1058,18 @@ impl Editor {
         if !crate::settings::load(&crate::settings::config_dir()).format_on_save {
             return;
         }
+        #[cfg(test)]
+        if let Some(format) = self.test_formatter {
+            let snapshot = self.core.buffer.text();
+            let formatted = format(&snapshot);
+            if formatted != snapshot {
+                self.apply_command_output(
+                    &crate::extensions::CommandOutput::ReplaceDocument(formatted),
+                    cx,
+                );
+            }
+            return;
+        }
         let plugins = crate::extensions::format_plugins();
         let Some(plugin) = plugins.first() else {
             return;
@@ -1071,6 +1094,18 @@ impl Editor {
     /// thread, so the buffer cannot move between snapshot and apply —
     /// the same guarantee the formatter relies on.
     fn run_save_hooks(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        if let Some(hook) = self.test_save_hook {
+            let snapshot = self.core.buffer.text();
+            let result = hook(&snapshot);
+            if result != snapshot {
+                self.apply_command_output(
+                    &crate::extensions::CommandOutput::ReplaceDocument(result),
+                    cx,
+                );
+            }
+            return;
+        }
         let plugins = crate::extensions::hook_plugins();
         if plugins.is_empty() {
             return;
@@ -1094,6 +1129,12 @@ impl Editor {
     /// Apply an edit that came from outside the editor (a checkbox
     /// clicked in the reading view) and save it now, through the one
     /// save path. One undo step; the selection stays where it was.
+    ///
+    /// The opt-in formatter is skipped (decided with the user): a click
+    /// is a one-byte change, and a formatter run on it rewrote the file
+    /// out of sight, added a second undo step and moved the caret. Save
+    /// hooks still run -- they are always on -- so the caller must
+    /// expect the buffer to differ from its own edit afterwards.
     pub fn replace_and_save(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
         let saved = self.core.selection;
         self.core.break_undo_group();
@@ -1104,11 +1145,17 @@ impl Editor {
         self.core.selection.anchor = self.core.selection.anchor.min(len);
         self.core.selection.head = self.core.selection.head.min(len);
         self.after_edit(cx);
-        self.flush(cx);
+        self.flush_with(false, cx);
     }
 
     pub fn flush(&mut self, cx: &mut Context<Self>) {
-        self.maybe_format_before_save(cx);
+        self.flush_with(true, cx);
+    }
+
+    fn flush_with(&mut self, format: bool, cx: &mut Context<Self>) {
+        if format {
+            self.maybe_format_before_save(cx);
+        }
         self.run_save_hooks(cx);
         if !self.save.take_flush_now() {
             return;

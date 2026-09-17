@@ -873,8 +873,14 @@ impl Workspace {
         let current = editor.read(cx).text();
         if current == before {
             editor.update(cx, |editor, cx| editor.replace_and_save(range, replacement, cx));
-        } else {
-            reader.update(cx, |reader, cx| reader.set_source(current, cx));
+        }
+        // Either way the preview ends on the buffer's text: a stale one
+        // catches up, and a save hook that rewrote the document on this
+        // save is followed -- otherwise the next click would fail the
+        // check above and be dropped.
+        let now = editor.read(cx).text();
+        if reader.read(cx).source() != now {
+            reader.update(cx, |reader, cx| reader.set_source(now, cx));
         }
     }
 
@@ -9288,6 +9294,87 @@ pub(crate) mod tests {
         cx.dispatch_action(crate::editor::Undo);
         cx.update(|_, app| {
             assert_eq!(editor.read(app).text(), "- [ ] one\r\n- [x] two\r\n", "one undo step")
+        });
+    }
+
+    /// Decided with the user: a checkbox click is a one-byte change on
+    /// disk. An enabled format-on-save formatter used to run on it --
+    /// rewriting the file out of sight, adding a second undo step, and
+    /// jumping the caret to the end of the document.
+    #[gpui::test]
+    fn a_reading_view_toggle_skips_the_formatter(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let dir = crate::settings::config_dir();
+        let mut settings = crate::settings::load(&dir);
+        settings.format_on_save = true;
+        crate::settings::save(&dir, &settings).unwrap();
+
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\n- [x] two\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        let editor = active_editor(&ws, cx);
+        editor.update(cx, |ed, _| ed.test_formatter = Some(|s: &str| s.to_uppercase()));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        active_preview(&ws, cx).update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [x] one\n- [x] two\n", "one byte");
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        cx.dispatch_action(crate::editor::Undo);
+        assert_eq!(
+            cx.update(|_, app| editor.read(app).text()),
+            "- [ ] one\n- [x] two\n",
+            "one undo step takes the click back"
+        );
+
+        // The formatter is live for an ordinary save -- the toggle is
+        // what skipped it, not a formatter that never ran.
+        editor.update(cx, |ed, cx| ed.flush(cx));
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [ ] ONE\n- [X] TWO\n");
+    }
+
+    /// Save hooks still run on a toggle (they are always on, not opt-in),
+    /// and one can change the buffer. The preview has to follow, or its
+    /// next click fails the staleness check and is silently dropped.
+    #[gpui::test]
+    fn after_a_hook_rewrites_the_save_the_next_click_still_lands(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\n- [ ] two\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        let editor = active_editor(&ws, cx);
+        editor.update(cx, |ed, _| {
+            ed.test_save_hook = Some(|s: &str| {
+                if s.ends_with("<!-- saved -->\n") {
+                    s.to_string()
+                } else {
+                    format!("{s}<!-- saved -->\n")
+                }
+            })
+        });
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        let reader = active_preview(&ws, cx);
+
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        reader.update(cx, |r, cx| r.toggle_task(1, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "- [x] one\n- [x] two\n<!-- saved -->\n",
+            "both clicks landed, and the hook ran"
+        );
+        cx.update(|_, app| {
+            assert_eq!(reader.read(app).source(), editor.read(app).text(), "the preview follows");
         });
     }
 

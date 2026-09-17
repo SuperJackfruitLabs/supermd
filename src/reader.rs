@@ -165,6 +165,11 @@ impl Reader {
         (std::sync::Arc::new(document), toc)
     }
 
+    /// The text the document was parsed from.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
     /// Let checkbox clicks edit the source. Only for a reader showing a
     /// Markdown file's own text; the owner applies the emitted edit.
     pub fn allow_task_toggles(&mut self) {
