@@ -355,6 +355,19 @@ pub fn body_start(src: &str) -> usize {
     frontmatter_range(src).map_or(0, |r| r.end)
 }
 
+/// Whether an HTML block is nothing but closed `<!-- -->` comments and
+/// whitespace.
+fn only_comments(html: &str) -> bool {
+    let mut rest = html.trim();
+    while let Some(after) = rest.strip_prefix("<!--") {
+        let Some(end) = after.find("-->") else {
+            return false;
+        };
+        rest = after[end + 3..].trim_start();
+    }
+    rest.is_empty()
+}
+
 /// The parser options for the reading path. `task_toggle` must see
 /// exactly the tasks `parse` does, so both take them from here.
 fn options() -> Options {
@@ -634,6 +647,11 @@ pub fn parse(source: &str) -> Document {
             Event::End(TagEnd::HtmlBlock) => {
                 if let Some(text) = html.take() {
                     let text = text.replace("\r\n", "\n");
+                    if only_comments(&text) {
+                        // Invisible in every renderer, so hiding it
+                        // erases nothing (the `toc` plugin's markers).
+                        continue;
+                    }
                     containers
                         .last_mut()
                         .unwrap()
@@ -1215,6 +1233,46 @@ mod tests {
             "{:?}",
             items[0].blocks
         );
+    }
+
+    /// A comment is invisible in every Markdown renderer, so hiding one
+    /// erases nothing -- and the seeded `toc` plugin writes a pair of
+    /// them around every table of contents, which drew as two empty
+    /// code boxes. Only a block that is nothing *but* comments hides:
+    /// real HTML beside a comment is still content.
+    #[test]
+    fn html_comments_stay_invisible_but_their_neighbours_do_not() {
+        let doc = parse("<!-- toc -->\n- [A](#a)\n<!-- /toc -->\n\n# A\n");
+        assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Html(_))), "{:?}", doc.blocks);
+        assert!(matches!(doc.blocks.first(), Some(Block::List { .. })), "the TOC itself stays");
+
+        let doc = parse("<!--\nmulti\nline\n-->\n\n<!-- a --> <!-- b -->\n");
+        assert!(doc.blocks.is_empty(), "{:?}", doc.blocks);
+
+        // The parser ends a comment block at its `-->` line, so HTML on
+        // the next line is its own block, and stays.
+        let doc = parse("<!-- note -->\n<div>kept</div>\n");
+        assert!(
+            matches!(doc.blocks.as_slice(), [Block::Html(s)] if s == "<div>kept</div>"),
+            "{:?}",
+            doc.blocks
+        );
+        // HTML after a comment in the same block keeps the whole block.
+        let doc = parse("<!-- note --><div>kept</div>\n");
+        assert!(
+            matches!(doc.blocks.as_slice(), [Block::Html(s)] if s == "<!-- note --><div>kept</div>"),
+            "{:?}",
+            doc.blocks
+        );
+        // Comments on both sides do not make the middle invisible.
+        let doc = parse("<!-- a --><div>x</div><!-- b -->\n");
+        assert!(matches!(doc.blocks.as_slice(), [Block::Html(_)]), "{:?}", doc.blocks);
+        // The shipped guide the toc plugin maintains renders no boxes.
+        let guide = parse(include_str!("../examples/vault/Guide/Plugins.md"));
+        assert!(!guide.blocks.iter().any(|b| matches!(b, Block::Html(_))));
+        // An unclosed comment is not provably invisible text; keep it.
+        let doc = parse("<!-- never closed\n");
+        assert!(matches!(doc.blocks.as_slice(), [Block::Html(_)]), "{:?}", doc.blocks);
     }
 
     /// Inline HTML is a different issue and keeps its old behaviour: the
