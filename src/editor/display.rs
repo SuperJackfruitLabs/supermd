@@ -986,6 +986,18 @@ mod tests {
         assert!(!draws_rule(&dl, &spans));
     }
 
+    /// The editor never erased HTML -- it shows source -- and nothing in
+    /// an HTML block is a marker, so every byte stays on screen.
+    #[test]
+    fn an_html_block_displays_verbatim_in_the_editor() {
+        let src = "<div align=\"center\">\n  **not bold**\n</div>\n";
+        for ix in 0..3 {
+            let (dl, spans) = shown(src, ix, 100..100);
+            assert_eq!(dl.text, src.split('\n').nth(ix).unwrap(), "line {ix}");
+            assert!(spans.is_empty(), "no styling claims HTML: {spans:?}");
+        }
+    }
+
     /// Metadata is literal: nothing in it hides, caret or no caret.
     #[test]
     fn frontmatter_lines_display_verbatim() {

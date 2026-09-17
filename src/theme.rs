@@ -1109,6 +1109,9 @@ attribute = "#d19a66"
     /// colour. Giving each page the theme's own background restores the
     /// separation the theme author drew, which is why this passes with
     /// room now rather than by a nudge.
+    ///
+    /// The text half also covers an HTML block in the reading view,
+    /// which is `code_fg` on `code_bg` (`view::html_style`).
     #[test]
     fn code_fences_stay_visible_on_the_page() {
         for (name, theme) in shipped_themes() {
@@ -1208,7 +1211,7 @@ attribute = "#d19a66"
     /// separator must not vanish into the page it sits on.
     ///
     /// The second consumer is the outline of a literal block in the
-    /// reading view -- frontmatter (`view::frontmatter`). gpui paints a
+    /// reading view -- frontmatter and HTML blocks (`view::literal_block`). gpui paints a
     /// border inside the quad, over its own fill, so the hairline is
     /// `border_subtle` composited on `code_bg`, and the edge it draws is
     /// against the page outside. That is the pair measured. Against the
@@ -1220,7 +1223,7 @@ attribute = "#d19a66"
         for (name, t) in shipped_themes() {
             for (what, under) in [
                 ("the table row hairline", t.page_bg),
-                ("a frontmatter block's outline", t.code_bg),
+                ("a literal block's outline (frontmatter, HTML)", t.code_bg),
             ] {
                 let composited = under.blend(t.border_subtle);
                 let separation = Theme::contrast(composited, t.page_bg);

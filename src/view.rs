@@ -547,12 +547,17 @@ fn rule(t: &Theme) -> AnyElement {
     div().my_2().h(px(thickness)).w_full().bg(color).into_any_element()
 }
 
-/// How a frontmatter block looks: quiet, readable, obviously not
-/// prose. Shared by the reading view (`frontmatter`, below) and the
-/// editor's frontmatter lines, which take the ink, family and size from
-/// here so the two cannot drift. The editor paints no surface or
-/// outline -- its lines sit on the page like every other source line.
-pub struct FrontMatterStyle {
+/// How a literal block looks -- source shown as written, on the code
+/// surface with a hairline outline. Two kinds use it:
+///
+/// - frontmatter (`frontmatter_style`): quiet, readable, obviously not
+///   prose -- small mono in muted ink. The editor's frontmatter lines
+///   take the ink, family and size from here too, so the two views
+///   cannot drift. The editor paints no surface or outline: its lines
+///   sit on the page like every other source line.
+/// - HTML blocks (`html_style`): not rendered, never erased -- mono in
+///   code ink at code size, the same as a fence's text.
+pub struct LiteralBlockStyle {
     pub bg: Hsla,
     pub outline: Hsla,
     pub ink: Hsla,
@@ -560,8 +565,8 @@ pub struct FrontMatterStyle {
     pub size: f32,
 }
 
-pub fn frontmatter_style(t: &Theme) -> FrontMatterStyle {
-    FrontMatterStyle {
+pub fn frontmatter_style(t: &Theme) -> LiteralBlockStyle {
+    LiteralBlockStyle {
         bg: t.code_bg,
         outline: t.border_subtle,
         ink: t.fg_muted,
@@ -570,14 +575,23 @@ pub fn frontmatter_style(t: &Theme) -> FrontMatterStyle {
     }
 }
 
-/// The metadata as written, delimiters dropped. One container carrying
+pub fn html_style(t: &Theme) -> LiteralBlockStyle {
+    LiteralBlockStyle {
+        bg: t.code_bg,
+        outline: t.border_subtle,
+        ink: t.code_fg,
+        family: t.mono_family.clone(),
+        size: t.code_size,
+    }
+}
+
+/// Source text as written in a literal block. One container carrying
 /// both the fill and the outline, with no filled child: a square child
 /// fill would paint over the rounded corners (gpui's content mask has
 /// no radii).
-fn frontmatter(text: &str, t: &Theme) -> AnyElement {
-    let s = frontmatter_style(t);
+fn literal_block(text: &str, s: LiteralBlockStyle, selector: &'static str) -> AnyElement {
     div()
-        .debug_selector(|| "frontmatter".into())
+        .debug_selector(move || selector.into())
         .rounded_md()
         .bg(s.bg)
         .border_1()
@@ -619,7 +633,8 @@ fn block(
         Block::List { start, items } => list(*start, items, t, cx, path, follow, describe),
         Block::Table { head, rows } => table(head, rows, t, path, follow, describe),
         Block::Rule => rule(t),
-        Block::FrontMatter(text) => frontmatter(text, t),
+        Block::FrontMatter(text) => literal_block(text, frontmatter_style(t), "frontmatter"),
+        Block::Html(text) => literal_block(text, html_style(t), "html-block"),
     }
 }
 
@@ -1165,6 +1180,43 @@ no language
             block.size.height
         );
         assert!(block.size.height >= px(3. * t.ui_size), "all three lines are there");
+    }
+
+    // ── HTML blocks ─────────────────────────────────────────────────
+
+    /// HTML is shown as the code it is: literal mono in code ink on the
+    /// code surface, outlined -- visibly not prose, visibly not lost.
+    #[test]
+    fn html_block_style_is_literal_code() {
+        let t = Theme::dark();
+        let s = html_style(&t);
+        assert_eq!(s.bg, t.code_bg);
+        assert_eq!(s.outline, t.border_subtle);
+        assert_eq!(s.ink, t.code_fg);
+        assert_eq!(s.family, t.mono_family);
+        assert_eq!(s.size, t.code_size);
+    }
+
+    /// Through a real reader: the snippet occupies space on the page.
+    /// It used to parse to nothing and render as nothing.
+    #[gpui::test]
+    fn an_html_block_renders_its_source(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(Theme::dark())));
+        });
+        let langs = crate::highlight::Languages::new();
+        let src = "before\n\n<div align=\"center\">\n  <img src=\"x.png\">\n</div>\n\nafter\n";
+        let (_reader, cx) = cx.add_window_view(|_, cx| {
+            crate::reader::Reader::from_source("html".into(), src, &langs, cx)
+        });
+        cx.run_until_parked();
+        let block = cx.debug_bounds("html-block").expect("the HTML block drew");
+        let t = Theme::dark();
+        assert!(
+            block.size.height >= px(3. * t.code_size),
+            "all three source lines take space: {:?}",
+            block.size.height
+        );
     }
 
     // ── table_borders ────────────────────────────────────────────────

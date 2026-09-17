@@ -20,6 +20,7 @@ You always edit real Markdown — SuperMD never rewrites your file behind your b
 - **Code fences** — syntax highlighting for 78+ languages, live as you type. The ``` fence delimiters hide while you're outside the block.
 - **Images** — display inline; click one to edit its `![alt](path)` source.
 - **Frontmatter** — a `---` metadata block at the very top of a note shows as small, quiet text and stays out of the outline. It must close with `---` (or `...`); anywhere else, `---` is a horizontal rule.
+- **HTML** — SuperMD doesn't render raw HTML. An HTML block shows as its literal source in both views, so nothing you paste disappears.
 
 Diagrams work the same way — see [Diagrams](diagrams.md).
 

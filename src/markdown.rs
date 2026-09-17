@@ -70,6 +70,8 @@ pub enum Block {
     /// stripped. Kept as literal text: this is not frontmatter support
     /// (no tags, aliases or properties), only the end of a misparse.
     FrontMatter(String),
+    /// A block of raw HTML, as written. Shown literally, never rendered.
+    Html(String),
 }
 
 #[derive(Debug, Default)]
@@ -364,6 +366,9 @@ pub fn parse(source: &str) -> Document {
 
     let mut code: Option<(Option<String>, String)> = None;
 
+    // An HTML block in progress: its raw source, line by line.
+    let mut html: Option<String> = None;
+
     // Table state: header cells, body rows, row in progress.
     let mut table: Option<(Vec<InlineText>, Vec<Vec<InlineText>>)> = None;
     let mut table_row: Vec<InlineText> = Vec::new();
@@ -571,7 +576,31 @@ pub fn parse(source: &str) -> Document {
                 containers.last_mut().unwrap().push(Block::Rule);
             }
 
-            // HTML, footnotes, math: out of scope for Phase 0.
+            // ── HTML blocks ─────────────────────────────────────────────
+            // Not rendered, but kept as the literal source. This arm used
+            // to be the catch-all below, and a pasted snippet vanished
+            // from the preview without a trace.
+            Event::Start(Tag::HtmlBlock) => {
+                flush_inline(&mut inline, &mut containers);
+                html = Some(String::new());
+            }
+            Event::Html(text) => {
+                if let Some(buffer) = html.as_mut() {
+                    buffer.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some(text) = html.take() {
+                    let text = text.replace("\r\n", "\n");
+                    containers
+                        .last_mut()
+                        .unwrap()
+                        .push(Block::Html(text.trim_end_matches('\n').to_string()));
+                }
+            }
+
+            // Inline HTML (a separate question from the block-level issue
+            // above), footnotes, math: out of scope.
             _ => {}
         }
     }
@@ -1005,10 +1034,70 @@ mod tests {
         assert!(matches!(doc.blocks.first(), Some(Block::Rule)), "{:?}", doc.blocks);
     }
 
+    /// HTML is not rendered, but it is never erased. The old behaviour
+    /// dropped the block entirely, so a pasted snippet vanished from
+    /// the preview with nothing to show the user it had gone.
     #[test]
-    fn html_is_ignored() {
-        let doc = parse("<div>raw</div>");
-        assert!(doc.blocks.is_empty());
+    fn html_blocks_are_kept_as_literal_text() {
+        let doc = parse("<div>raw</div>\n");
+        let Some(Block::Html(s)) = doc.blocks.first() else {
+            panic!("got {:?}", doc.blocks.first())
+        };
+        assert_eq!(s, "<div>raw</div>", "the source survives, trailing newline dropped");
+    }
+
+    /// A multi-line block keeps every line, in order, and the Markdown
+    /// around it still parses as Markdown.
+    #[test]
+    fn a_multi_line_html_block_keeps_every_line() {
+        let doc = parse("intro\n\n<details>\n<summary>More</summary>\nhidden\n</details>\n\n# After\n");
+        let kinds: Vec<_> = doc.blocks.iter().map(|b| match b {
+            Block::Paragraph(_) => "p",
+            Block::Html(_) => "html",
+            Block::Heading { .. } => "h",
+            _ => "other",
+        }).collect();
+        assert_eq!(kinds, ["p", "html", "h"]);
+        let Block::Html(s) = &doc.blocks[1] else { unreachable!() };
+        assert_eq!(s, "<details>\n<summary>More</summary>\nhidden\n</details>");
+    }
+
+    /// Containers hold HTML blocks too; they must not vanish there either.
+    #[test]
+    fn html_inside_a_quote_or_list_item_survives() {
+        let doc = parse("> <div>q</div>\n");
+        let Block::Quote(inner) = &doc.blocks[0] else { panic!("{:?}", doc.blocks) };
+        assert!(matches!(&inner[0], Block::Html(s) if s == "<div>q</div>"), "{inner:?}");
+
+        let doc = parse("- item\n\n  <div>l</div>\n");
+        let Block::List { items, .. } = &doc.blocks[0] else { panic!("{:?}", doc.blocks) };
+        assert!(
+            items[0].blocks.iter().any(|b| matches!(b, Block::Html(s) if s == "<div>l</div>")),
+            "{:?}",
+            items[0].blocks
+        );
+
+        // A tight item's text has no paragraph tag of its own; the HTML
+        // that interrupts it must land after it, not before.
+        let doc = parse("- a\n  <div>t</div>\n");
+        let Block::List { items, .. } = &doc.blocks[0] else { panic!("{:?}", doc.blocks) };
+        assert!(
+            matches!(
+                items[0].blocks.as_slice(),
+                [Block::Paragraph(p), Block::Html(h)] if p.text == "a" && h == "<div>t</div>"
+            ),
+            "{:?}",
+            items[0].blocks
+        );
+    }
+
+    /// Inline HTML is a different issue and keeps its old behaviour: the
+    /// paragraph around it is intact and no block appears.
+    #[test]
+    fn inline_html_is_not_a_block() {
+        let doc = parse("a <b>bold</b> c\n");
+        assert_eq!(doc.blocks.len(), 1);
+        assert!(matches!(&doc.blocks[0], Block::Paragraph(_)));
     }
 
     #[test]
@@ -1026,6 +1115,7 @@ mod tests {
                 Block::Table { .. } => "table",
                 Block::Rule => "rule",
                 Block::FrontMatter(_) => "frontmatter",
+                Block::Html(_) => "html",
             })
             .collect();
         assert_eq!(kinds, ["heading", "paragraph", "list", "quote", "code"]);
