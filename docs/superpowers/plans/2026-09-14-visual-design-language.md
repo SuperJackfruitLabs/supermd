@@ -2373,3 +2373,103 @@ Precedence: explicit appearance, then flux night, then the system."
 ```
 
 ---
+
+### Task 23: A surface for things that float
+
+**Files:**
+- Modify: `src/theme.rs` (new token through `theme_colors!`, `ThemeFileColors`, derivation, contrast guards)
+- Modify: `src/elevation.rs` (the `Overlay` tier mapping, if background joins shadow and radius there)
+- Modify: every overlay render site mapped by `Overlay::surface()` in Task 10
+- Modify: `assets/themes/*.toml` (all eight), `docs/site/themes.md` (+ regenerate `site/docs/`)
+- Test: inline in `src/theme.rs` and `src/elevation.rs`
+
+**Interfaces:**
+- Consumes: `elevation::Overlay`, `Overlay::surface()`, `.elevated()` from Task 10; `t.page_bg`, `t.panel_bg` from Tasks 2 and 8.
+- Produces: `t.floating_bg`.
+
+**Runs directly after Task 10**, despite its number. Decided with the user after Task 10's
+implementer measured that a shadow cannot fix the problem.
+
+In Gruvbox Dark the ⌘P finder reads as a hole in the page rather than a card above it:
+its background (30,32,33) is darker than the page (40), and a shadow can only darken
+the page beside it, which reads as a recess wall. The root cause is that `panel_bg`
+serves three unrelated jobs — overlays floating above the page, table headers on the
+page, and chrome — and no single value is right for all of them.
+
+The rule: **a surface that floats above the page is never darker than the page.** In
+dark themes that means a step lighter; in light themes, where the page is often at or
+near white, it may equal the page and let the shadow separate them.
+
+- [ ] **Step 1: Grep, do not assume, where `panel_bg` is painted**
+
+List every site. Split them into overlays (the fifteen `.elevated()` sites from Task 10
+and any container they sit in), table headers, and anything else. Only overlays move to
+the new token. Report the list.
+
+- [ ] **Step 2: Write the failing tests**
+
+```rust
+    /// A surface that floats above the page is never darker than it --
+    /// otherwise the shadow beneath reads as a recess, not a lift.
+    #[test]
+    fn floating_surfaces_are_never_sunken_below_the_page() {
+        for (name, t) in shipped_themes() {
+            let lf = t.floating_bg.l;
+            let lp = t.page_bg.l;
+            assert!(lf >= lp - 0.005, "{name}: floating {lf:.3} sits below page {lp:.3}");
+        }
+    }
+```
+
+Extend the existing guards rather than writing parallel ones: `floating_bg` joins the
+surface set in `worst_body_contrast` and `worst_muted_contrast`, and every pair that
+paints on it — `hover_bg`, `selected_bg`, `border` — joins
+`every_background_token_is_visible_on_what_it_is_painted_on`. Composite any
+translucent token with `Hsla::blend` before measuring; `Theme::contrast` ignores alpha.
+
+- [ ] **Step 3: Watch them fail**
+
+Expected: `floating_bg` does not exist.
+
+- [ ] **Step 4: Add the token**
+
+Optional in `ThemeFileColors` with a derivation, through `theme_colors!` so flux warms it:
+dark themes derive one step lighter than `page_bg`; light themes derive `page_bg` itself.
+A theme that omits the key must keep loading.
+
+- [ ] **Step 5: Point the overlays at it**
+
+If Task 10's `.elevated()` can set the background along with shadow and radius without
+fighting a site's own `.bg()`, centralise it there — then a new overlay cannot forget.
+Otherwise update each site and say why centralising did not work.
+
+- [ ] **Step 6: Tune the eight themes and look**
+
+Set `floating_bg` explicitly per theme where the derivation is not right. Open the
+finder, palette, search, theme picker and a dialog in Gruvbox Dark, one other dark
+theme and one light theme. Report per surface, per theme.
+
+- [ ] **Step 7: Docs, mutation check, suites, build**
+
+Document `floating_bg` in `docs/site/themes.md`, regenerate. Make `floating_bg` equal
+Gruvbox's old `panel_bg` and confirm the sunken test fails; remove it from the body-ink
+surface set and confirm a band ceiling or floor fires. Both suites; read the build's
+warnings.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src assets docs site
+git commit -m "feat: things that float get a surface of their own
+
+panel_bg served the sidebar, table headers and every popup, and no single
+value suits all three. In Gruvbox Dark the finder came out darker than the
+page it floats over, and a shadow can only darken the page beside it --
+so it read as a hole rather than a card.
+
+floating_bg is never darker than the page. Optional in theme files,
+derived when absent, and measured by the contrast guards on every pair
+painted on it."
+```
+
+---
