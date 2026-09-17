@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Tag, TagEnd};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockKind {
@@ -44,9 +44,7 @@ pub fn blocks(source: &str) -> Vec<BlockInfo> {
 
     // Tables and images from the event stream.
     let mut image: Option<(Range<usize>, String, String)> = None;
-    for (event, range) in
-        Parser::new_ext(source, crate::editor::spans::markdown_options()).into_offset_iter()
-    {
+    for (event, range) in crate::editor::spans::body_events(source) {
         match event {
             Event::Start(Tag::Table(_)) => {
                 let mut r = range;
@@ -305,6 +303,17 @@ mod tests {
         assert!(is_separator_row("|:-:|----:|"));
         assert!(!is_separator_row("| a | b |"));
         assert!(!is_separator_row(""));
+    }
+
+    /// The projector's block scan skips the metadata the same way: a
+    /// fence marker or an image line up there claims nothing.
+    #[test]
+    fn frontmatter_projects_no_blocks() {
+        let src = "---\n![x](y.png)\n```\n---\n\n|a|b|\n|-|-|\n";
+        let all = blocks(src);
+        assert_eq!(all.len(), 1, "only the body's table: {all:?}");
+        assert_eq!(all[0].kind, BlockKind::Table);
+        assert_eq!(&src[all[0].range.clone()], "|a|b|\n|-|-|");
     }
 
     #[test]

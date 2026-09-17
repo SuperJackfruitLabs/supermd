@@ -2859,7 +2859,13 @@ impl Editor {
                 (t.heading_size(*n), weight, t.body_family.clone(), 1.35)
             }
             Some(LineKind::Code) => (t.code_size, FontWeight::NORMAL, t.mono_family.clone(), 1.55),
-            _ => (t.body_size, FontWeight::NORMAL, t.body_family.clone(), 1.65),
+            Some(LineKind::FrontMatter) => {
+                let s = crate::view::frontmatter_style(t);
+                (s.size, FontWeight::NORMAL, s.family, 1.55)
+            }
+            Some(LineKind::Body) | None => {
+                (t.body_size, FontWeight::NORMAL, t.body_family.clone(), 1.65)
+            }
         }
     }
 
@@ -2932,6 +2938,7 @@ impl Editor {
                     StyleKind::FenceDelimiter => {
                         a.color = Hsla { a: 0.55, ..t.fg_muted };
                     }
+                    StyleKind::FrontMatter => a.color = crate::view::frontmatter_style(t).ink,
                     StyleKind::InlineReplace(_) => {
                         // Rendering handled by the display transform;
                         // source text (when revealed) keeps base style.
@@ -2953,7 +2960,10 @@ impl Editor {
 
         // Plugin decoration overlays (prose lines only).
         if !self.is_code_mode()
-            && !matches!(self.view_line_kinds().get(ix), Some(LineKind::Code))
+            && !matches!(
+                self.view_line_kinds().get(ix),
+                Some(LineKind::Code | LineKind::FrontMatter)
+            )
         {
             for (deco, color, is_bg) in crate::extensions::with_decoration_table(|table| {
                 decoration_overlay(&text, &range, table, t)
@@ -7272,6 +7282,33 @@ mod tests {
             editor.read(app).layout_cache.get(&0).unwrap().display.text.clone()
         });
         assert_eq!(shown, "---");
+    }
+
+    /// The editor shows metadata the way the reading view does: small
+    /// muted mono, never a heading line, and absent from the outline.
+    #[gpui::test]
+    fn frontmatter_lines_are_small_muted_mono_and_not_outlined(cx: &mut TestAppContext) {
+        let src = "---\ntitle: x\ntags: [a]\n---\n\n# Real\n";
+        let (_fx, editor, cx) = open_editor(cx, "fm.md", src);
+        cx.dispatch_action(DocEnd);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let t = crate::theme::Theme::dark();
+            let style = crate::view::frontmatter_style(&t);
+            for ix in 0..4 {
+                let (size, weight, family, _) = ed.line_typography(ix, &t);
+                assert_eq!(size, style.size, "line {ix} at the metadata size");
+                assert_eq!(family, style.family, "line {ix} in mono");
+                assert_eq!(weight, FontWeight::NORMAL, "line {ix} not bold");
+                let (_, attrs) = ed.line_attrs(ix, &t);
+                assert!(attrs.iter().all(|a| a.color == style.ink), "line {ix} in muted ink");
+            }
+            let (size, ..) = ed.line_typography(5, &t);
+            assert_eq!(size, t.heading_size(1), "the real heading is untouched");
+            let outline: Vec<_> = ed.heading_lines().into_iter().map(|(l, s, _)| (l, s)).collect();
+            assert_eq!(outline, vec![(1, "Real".to_string())]);
+        });
     }
 
     // ── widget interactions ────────────────────────────────────────────

@@ -258,7 +258,7 @@ fn collect_directives(
             }
             // Listed rather than wildcarded: a new span kind must be
             // decided here, not silently fall through to "shown as is".
-            StyleKind::FenceContent | StyleKind::FenceDelimiter | StyleKind::Syntax(_) => {}
+            StyleKind::FenceContent | StyleKind::FenceDelimiter | StyleKind::Syntax(_) | StyleKind::FrontMatter => {}
         }
     }
 
@@ -984,6 +984,16 @@ mod tests {
         let (dl, spans) = shown(src, 0, 100..100);
         assert_eq!(dl.text, "Title");
         assert!(!draws_rule(&dl, &spans));
+    }
+
+    /// Metadata is literal: nothing in it hides, caret or no caret.
+    #[test]
+    fn frontmatter_lines_display_verbatim() {
+        let src = "---\ntitle: **x**\n---\nbody\n";
+        for ix in 0..3 {
+            let (dl, _) = shown(src, ix, 100..100);
+            assert_eq!(dl.text, src.split('\n').nth(ix).unwrap(), "line {ix}");
+        }
     }
 
     #[test]

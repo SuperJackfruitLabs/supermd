@@ -27,6 +27,9 @@ pub enum StyleKind {
     /// Plugin inline replacement: the span's source text renders as
     /// this string when the cursor is elsewhere (reveal rule applies).
     InlineReplace(String),
+    /// A metadata block at the top of the file (`markdown::frontmatter_range`):
+    /// literal, quiet, never a heading.
+    FrontMatter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,8 +46,29 @@ pub(crate) fn markdown_options() -> Options {
     options
 }
 
+/// The Markdown event stream for the document *body*, with ranges
+/// in whole-source byte offsets. Frontmatter is skipped rather than
+/// parsed: fed to the parser it became a setext heading, and a fence
+/// marker inside it swallowed the rest of the file. Every editor pass
+/// that walks events goes through here so they agree on where the body
+/// starts -- the same `frontmatter_range` the reading path uses.
+pub(crate) fn body_events(source: &str) -> impl Iterator<Item = (Event<'_>, Range<usize>)> {
+    let body = crate::markdown::body_start(source);
+    Parser::new_ext(&source[body..], markdown_options())
+        .into_offset_iter()
+        .map(move |(event, r)| (event, r.start + body..r.end + body))
+}
+
 pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
     let mut spans = Vec::new();
+
+    if let Some(mut fm) = crate::markdown::frontmatter_range(source) {
+        trim_trailing_newline(source, &mut fm);
+        if source[..fm.end].ends_with('\r') {
+            fm.end -= 1;
+        }
+        spans.push(StyleSpan { range: fm, kind: StyleKind::FrontMatter });
+    }
 
     for fence in fence_infos(source) {
         if fence.fenced {
@@ -61,7 +85,7 @@ pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
         spans.push(StyleSpan { range: fence.body, kind: StyleKind::FenceContent });
     }
 
-    for (event, range) in Parser::new_ext(source, markdown_options()).into_offset_iter() {
+    for (event, range) in body_events(source) {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 let mut r = range.clone();
@@ -208,7 +232,7 @@ pub(crate) fn fence_infos(source: &str) -> Vec<FenceInfo> {
     use pulldown_cmark::{CodeBlockKind, TagEnd};
     let mut out = Vec::new();
     let mut current: Option<FenceInfo> = None;
-    for (event, range) in Parser::new_ext(source, markdown_options()).into_offset_iter() {
+    for (event, range) in body_events(source) {
         match event {
             Event::Start(Tag::CodeBlock(kind)) => {
                 let (lang, fenced) = match kind {
@@ -253,6 +277,7 @@ pub enum LineKind {
     Body,
     Heading(u8),
     Code,
+    FrontMatter,
 }
 
 pub fn line_kinds(source: &str, spans: &[StyleSpan]) -> Vec<LineKind> {
@@ -275,6 +300,7 @@ pub fn line_kinds(source: &str, spans: &[StyleSpan]) -> Vec<LineKind> {
             match span.kind {
                 StyleKind::Heading(n) => kind = LineKind::Heading(n),
                 StyleKind::FenceContent => kind = LineKind::Code,
+                StyleKind::FrontMatter => kind = LineKind::FrontMatter,
                 _ => {}
             }
         }
@@ -310,7 +336,10 @@ pub fn inline_pass(
         spans.iter().any(|s| {
             matches!(
                 s.kind,
-                StyleKind::InlineCode | StyleKind::FenceContent | StyleKind::FenceDelimiter
+                StyleKind::InlineCode
+                    | StyleKind::FenceContent
+                    | StyleKind::FenceDelimiter
+                    | StyleKind::FrontMatter
             ) && s.range.start < range.end
                 && range.start < s.range.end
         })
@@ -676,6 +705,45 @@ mod tests {
         let body = &src[bodies[0].clone()];
         assert!(body.contains("aa"), "body was {body:?}");
         assert!(body.contains("bb"), "body was {body:?}");
+    }
+
+    /// The editor sees the same block the reading view does: one quiet
+    /// span over the metadata, and no setext heading swallowing it.
+    #[test]
+    fn frontmatter_is_one_span_and_never_a_heading() {
+        let src = "---\ntitle: x\ntags: [a]\n---\n\n# Real\n";
+        assert_eq!(spans_of_kind(src, |k| *k == StyleKind::FrontMatter), vec![0..26]);
+        assert_eq!(
+            spans_of_kind(src, |k| matches!(k, StyleKind::Heading(_))),
+            vec![28..34],
+            "only the real heading, at its real offset"
+        );
+        assert!(spans_of_kind(src, |k| *k == StyleKind::Rule).is_empty(), "no delimiter rules");
+        let kinds = line_kinds(src, &markdown_spans(src));
+        assert_eq!(&kinds[..4], &[LineKind::FrontMatter; 4]);
+        assert_eq!(kinds[4], LineKind::Body);
+        assert_eq!(kinds[5], LineKind::Heading(1));
+    }
+
+    /// Everything after the metadata keeps absolute offsets, and a fence
+    /// marker inside the metadata cannot turn the body into code.
+    #[test]
+    fn body_spans_after_frontmatter_keep_their_offsets() {
+        let src = "---\na: 1\n```\n---\n- [ ] **b** `c`\n";
+        let body = src.find("- [ ]").unwrap();
+        assert_eq!(spans_of_kind(src, |k| *k == StyleKind::ListMarker), vec![body..body + 2]);
+        assert_eq!(spans_of_kind(src, |k| *k == StyleKind::TaskMarker(false)), vec![body + 2..body + 5]);
+        assert_eq!(spans_of_kind(src, |k| *k == StyleKind::Strong), vec![body + 6..body + 11]);
+        assert!(spans_of_kind(src, |k| *k == StyleKind::FenceContent).is_empty());
+        assert!(fence_infos(src).is_empty());
+    }
+
+    /// Unclosed, the opening --- is a thematic break, as Task 11 draws it.
+    #[test]
+    fn an_unclosed_opening_is_still_a_rule_span() {
+        let src = "---\n\nbody\n";
+        assert_eq!(spans_of_kind(src, |k| *k == StyleKind::Rule), vec![0..3]);
+        assert!(spans_of_kind(src, |k| *k == StyleKind::FrontMatter).is_empty());
     }
 
     #[test]

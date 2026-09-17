@@ -66,6 +66,10 @@ pub enum Block {
     List { start: Option<u64>, items: Vec<ListItem> },
     Table { head: Vec<InlineText>, rows: Vec<Vec<InlineText>> },
     Rule,
+    /// A metadata block at the very top of the file, delimiters
+    /// stripped. Kept as literal text: this is not frontmatter support
+    /// (no tags, aliases or properties), only the end of a misparse.
+    FrontMatter(String),
 }
 
 #[derive(Debug, Default)]
@@ -293,6 +297,54 @@ enum Frame {
     Item { checked: Option<bool> },
 }
 
+/// Byte range of a YAML frontmatter block, if the source opens with
+/// one. Only at the very start, and only when it closes -- a `---`
+/// anywhere else is a thematic break and stays one.
+///
+/// The one definition shared by the reading path (`parse`), the
+/// editor's span and block passes, and link previews. The rules follow
+/// pulldown-cmark's own metadata scanner, which we cannot simply switch
+/// on: it accepts a block at the start of *any* paragraph, not only the
+/// file's.
+///
+/// - The first line is exactly `---` (trailing spaces allowed).
+/// - The next line is neither blank nor a closing delimiter, so a note
+///   that opens with a rule and a blank line is still that.
+/// - It closes on a line that is `---` or `...`; the range runs through
+///   that line's newline (or to the end of the file).
+///
+/// `\r\n` endings are accepted throughout and covered by the range.
+pub fn frontmatter_range(src: &str) -> Option<Range<usize>> {
+    fn delimiter(line: &str) -> &str {
+        line.trim_end_matches(['\r', '\n']).trim_end_matches([' ', '\t'])
+    }
+    let mut lines = src.split_inclusive('\n');
+    let first = lines.next()?;
+    if delimiter(first) != "---" || !first.ends_with('\n') {
+        return None;
+    }
+    let mut offset = first.len();
+    let mut inner_lines = 0usize;
+    for line in lines {
+        let d = delimiter(line);
+        let closes = d == "---" || d == "...";
+        if inner_lines == 0 && (closes || d.trim().is_empty()) {
+            return None;
+        }
+        offset += line.len();
+        if closes {
+            return Some(0..offset);
+        }
+        inner_lines += 1;
+    }
+    None
+}
+
+/// Where the Markdown body starts: after the frontmatter, else 0.
+pub fn body_start(src: &str) -> usize {
+    frontmatter_range(src).map_or(0, |r| r.end)
+}
+
 pub fn parse(source: &str) -> Document {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -315,6 +367,19 @@ pub fn parse(source: &str) -> Document {
     // Table state: header cells, body rows, row in progress.
     let mut table: Option<(Vec<InlineText>, Vec<Vec<InlineText>>)> = None;
     let mut table_row: Vec<InlineText> = Vec::new();
+
+    // Metadata first, then the body parsed on its own: parsing the
+    // whole file is what made the block a setext heading, and a fence
+    // marker inside it would otherwise swallow the document.
+    let body = body_start(source);
+    if body > 0 {
+        // Everything between the opening and closing delimiter lines.
+        let lines: Vec<&str> = source[..body].split_inclusive('\n').collect();
+        let inner: String = lines[1..lines.len() - 1].concat();
+        let inner = inner.replace("\r\n", "\n");
+        containers[0].push(Block::FrontMatter(inner.trim_end_matches('\n').to_string()));
+    }
+    let source = &source[body..];
 
     // Flush any loose inline content (tight list items have no Paragraph tag).
     fn flush_inline(inline: &mut Option<InlineBuilder>, containers: &mut [Vec<Block>]) {
@@ -862,6 +927,84 @@ mod tests {
         assert!(matches!(doc.blocks[1], Block::Rule));
     }
 
+    /// The delimited block at the top of a file is metadata, not a
+    /// heading. CommonMark's setext rule turns it into one, which is
+    /// why a note's title line used to render as the loudest thing on
+    /// the page.
+    #[test]
+    fn frontmatter_is_its_own_block_not_a_heading() {
+        let src = "---\ntitle: Weekly Review\ntags: [planning]\n---\n\n# Real Heading\n\nBody.\n";
+        let doc = parse(src);
+        let Some(Block::FrontMatter(inner)) = doc.blocks.first() else {
+            panic!("first block is frontmatter, got {:?}", doc.blocks.first())
+        };
+        assert_eq!(inner, "title: Weekly Review\ntags: [planning]", "the metadata, delimiters gone");
+        let headings: Vec<_> = doc
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Heading { level, content } => Some((*level, content.text.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings, vec![(1, "Real Heading".to_string())], "only the real heading");
+        assert!(
+            !doc.blocks.iter().any(|b| matches!(b, Block::Rule)),
+            "neither delimiter survives as a rule"
+        );
+    }
+
+    /// Only at the very start, and only when it closes. A --- further
+    /// down is a thematic break and must stay one.
+    #[test]
+    fn frontmatter_is_recognised_only_at_the_top_and_only_when_closed() {
+        assert_eq!(frontmatter_range("---\na: 1\n---\nbody\n"), Some(0..13));
+        assert_eq!(frontmatter_range("---\na: 1\n..."), Some(0..12), "`...` closes, EOF ends");
+        assert!(frontmatter_range("\n---\na: 1\n---\n").is_none(), "not at the top");
+        assert!(frontmatter_range("---\na: 1\nnever closes\n").is_none(), "unclosed");
+        assert!(frontmatter_range("body\n\n---\n\nmore\n").is_none(), "a real rule");
+        assert!(frontmatter_range("").is_none());
+        // A document that opens with a break, a blank line, and later a
+        // setext underline is ordinary Markdown, not metadata: the
+        // first line inside must be neither blank nor the close.
+        assert!(frontmatter_range("---\n\nPara\n---\n").is_none(), "blank first line");
+        assert!(frontmatter_range("---\n---\n").is_none(), "two rules, not an empty block");
+        assert!(frontmatter_range("----\na: 1\n---\n").is_none(), "four hyphens is a rule");
+        assert!(frontmatter_range("   ---\na: 1\n---\n").is_none(), "indented");
+    }
+
+    /// Windows line endings and trailing spaces on a delimiter are the
+    /// same block; the range still covers every byte of it.
+    #[test]
+    fn frontmatter_tolerates_crlf_and_trailing_spaces() {
+        let src = "--- \r\na: 1\r\n---\r\nbody\r\n";
+        assert_eq!(frontmatter_range(src), Some(0..17));
+        let Some(Block::FrontMatter(inner)) = parse(src).blocks.first().cloned() else {
+            panic!("crlf frontmatter")
+        };
+        assert_eq!(inner, "a: 1");
+    }
+
+    /// A fence opened inside the metadata must not run on into the
+    /// body: the body is parsed on its own.
+    #[test]
+    fn a_fence_marker_inside_frontmatter_does_not_swallow_the_body() {
+        let doc = parse("---\nnote: ```\n```\n---\n# Body\n");
+        assert!(matches!(doc.blocks.first(), Some(Block::FrontMatter(_))));
+        assert!(
+            doc.blocks.iter().any(|b| matches!(b, Block::Heading { level: 1, .. })),
+            "the body heading survives: {:?}",
+            doc.blocks
+        );
+    }
+
+    /// Unclosed, the opening --- is what CommonMark says it is.
+    #[test]
+    fn an_unclosed_opening_stays_a_rule() {
+        let doc = parse("---\n\nbody\n");
+        assert!(matches!(doc.blocks.first(), Some(Block::Rule)), "{:?}", doc.blocks);
+    }
+
     #[test]
     fn html_is_ignored() {
         let doc = parse("<div>raw</div>");
@@ -882,6 +1025,7 @@ mod tests {
                 Block::Code { .. } => "code",
                 Block::Table { .. } => "table",
                 Block::Rule => "rule",
+                Block::FrontMatter(_) => "frontmatter",
             })
             .collect();
         assert_eq!(kinds, ["heading", "paragraph", "list", "quote", "code"]);

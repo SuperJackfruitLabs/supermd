@@ -19,6 +19,7 @@ You always edit real Markdown — SuperMD never rewrites your file behind your b
 - **Tables** — rendered as proper tables. Click a row and the whole table dissolves into editable pipe syntax; click away and it re-renders.
 - **Code fences** — syntax highlighting for 78+ languages, live as you type. The ``` fence delimiters hide while you're outside the block.
 - **Images** — display inline; click one to edit its `![alt](path)` source.
+- **Frontmatter** — a `---` metadata block at the very top of a note shows as small, quiet text and stays out of the outline. It must close with `---` (or `...`); anywhere else, `---` is a horizontal rule.
 
 Diagrams work the same way — see [Diagrams](diagrams.md).
 

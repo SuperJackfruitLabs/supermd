@@ -547,6 +547,51 @@ fn rule(t: &Theme) -> AnyElement {
     div().my_2().h(px(thickness)).w_full().bg(color).into_any_element()
 }
 
+/// How a frontmatter block looks: quiet, readable, obviously not
+/// prose. Shared by the reading view (`frontmatter`, below) and the
+/// editor's frontmatter lines, which take the ink, family and size from
+/// here so the two cannot drift. The editor paints no surface or
+/// outline -- its lines sit on the page like every other source line.
+pub struct FrontMatterStyle {
+    pub bg: Hsla,
+    pub outline: Hsla,
+    pub ink: Hsla,
+    pub family: SharedString,
+    pub size: f32,
+}
+
+pub fn frontmatter_style(t: &Theme) -> FrontMatterStyle {
+    FrontMatterStyle {
+        bg: t.code_bg,
+        outline: t.border_subtle,
+        ink: t.fg_muted,
+        family: t.mono_family.clone(),
+        size: t.ui_size,
+    }
+}
+
+/// The metadata as written, delimiters dropped. One container carrying
+/// both the fill and the outline, with no filled child: a square child
+/// fill would paint over the rounded corners (gpui's content mask has
+/// no radii).
+fn frontmatter(text: &str, t: &Theme) -> AnyElement {
+    let s = frontmatter_style(t);
+    div()
+        .debug_selector(|| "frontmatter".into())
+        .rounded_md()
+        .bg(s.bg)
+        .border_1()
+        .border_color(s.outline)
+        .px_3()
+        .py_2()
+        .font_family(s.family)
+        .text_size(px(s.size))
+        .line_height(relative(1.5))
+        .text_color(s.ink)
+        .child(SharedString::from(text.to_string()))
+        .into_any_element()
+}
+
 /// `path` uniquely identifies a block within the document, including
 /// nested ones, so every `InteractiveText` gets a stable distinct id.
 fn block(
@@ -574,6 +619,7 @@ fn block(
         Block::List { start, items } => list(*start, items, t, cx, path, follow, describe),
         Block::Table { head, rows } => table(head, rows, t, path, follow, describe),
         Block::Rule => rule(t),
+        Block::FrontMatter(text) => frontmatter(text, t),
     }
 }
 
@@ -1075,6 +1121,50 @@ no language
             assert!(!msg.is_empty());
             let _ = list_item(&doc, 0, &t, cx, None, None); // error strip + plain code branch
         });
+    }
+
+    // ── frontmatter ──────────────────────────────────────────────────
+
+    /// Metadata is quiet: small mono in muted ink on the code surface,
+    /// outlined with a hairline. One style for the reading view and the
+    /// editor, which reads its ink and size from here too.
+    #[test]
+    fn frontmatter_style_is_small_muted_mono() {
+        let t = Theme::light();
+        let s = frontmatter_style(&t);
+        assert_eq!(s.bg, t.code_bg);
+        assert_eq!(s.outline, t.border_subtle);
+        assert_eq!(s.ink, t.fg_muted);
+        assert_eq!(s.family, t.mono_family);
+        assert_eq!(s.size, t.ui_size);
+        assert!(s.size < t.body_size, "smaller than prose");
+    }
+
+    /// Rendered through a real reader: the block is there, it is small,
+    /// and the first heading below it is the only large text. It used to
+    /// be a level-two heading five lines tall.
+    #[gpui::test]
+    fn frontmatter_renders_as_a_compact_block(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(Theme::dark())));
+        });
+        let langs = crate::highlight::Languages::new();
+        let src = "---\ntitle: Weekly Review\ntags: [planning]\nstatus: draft\n---\n\n# Real\n";
+        let (_reader, cx) = cx.add_window_view(|_, cx| {
+            crate::reader::Reader::from_source("fm".into(), src, &langs, cx)
+        });
+        cx.run_until_parked();
+        let block = cx.debug_bounds("frontmatter").expect("the metadata block drew");
+        let t = Theme::dark();
+        // Three lines of ui-size text plus the block's padding and
+        // outline. A heading-sized block of the same text is well over.
+        let most = 3. * t.ui_size * 1.5 + 2. * 8. + 2. + 1.;
+        assert!(
+            block.size.height <= px(most),
+            "compact: {:?} for three lines, at most {most}",
+            block.size.height
+        );
+        assert!(block.size.height >= px(3. * t.ui_size), "all three lines are there");
     }
 
     // ── table_borders ────────────────────────────────────────────────

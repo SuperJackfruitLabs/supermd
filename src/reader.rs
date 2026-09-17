@@ -442,6 +442,22 @@ mod tests {
         });
     }
 
+    /// The outline lists the document's headings. A metadata block is
+    /// not one, and it used to appear there as a garbled row.
+    #[gpui::test]
+    fn the_outline_skips_frontmatter(cx: &mut TestAppContext) {
+        let src = "---\ntitle: x\ntags: [a]\n---\n\n# Only Me\n";
+        let langs = Languages::new();
+        let entity = cx.new(|cx| Reader::from_source("fm".into(), src, &langs, cx));
+        entity.read_with(cx, |reader, _| {
+            let toc: Vec<(u8, &str)> =
+                reader.toc.iter().map(|e| (e.level, e.text.as_ref())).collect();
+            assert_eq!(toc, [(1, "Only Me")]);
+            assert!(matches!(reader.document.blocks[0], Block::FrontMatter(_)));
+            assert_eq!(reader.toc[0].block_ix, 1, "the entry points past the metadata");
+        });
+    }
+
     #[gpui::test]
     fn welcome_document_carries_the_bundled_tour(cx: &mut TestAppContext) {
         let langs = Languages::new();

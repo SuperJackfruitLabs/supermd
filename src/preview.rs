@@ -20,17 +20,11 @@ pub const DWELL: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// The first lines of a document, for a preview body. Front matter and
 /// leading blank lines are skipped: a preview that opens with `---`
-/// and a YAML block tells the reader nothing about the note.
+/// and a YAML block tells the reader nothing about the note. What
+/// counts as front matter is `markdown::frontmatter_range`, the same
+/// rule the editor and the reading view use.
 pub fn excerpt(text: &str, max_lines: usize) -> String {
-    let mut lines = text.lines().peekable();
-    if lines.peek().is_some_and(|l| l.trim_end() == "---") {
-        lines.next();
-        for line in lines.by_ref() {
-            if line.trim_end() == "---" {
-                break;
-            }
-        }
-    }
+    let lines = text[crate::markdown::body_start(text)..].lines();
     let body: Vec<&str> = lines
         .skip_while(|l| l.trim().is_empty())
         .take(max_lines)
@@ -42,7 +36,8 @@ pub fn excerpt(text: &str, max_lines: usize) -> String {
 /// whitespace check is the one CommonMark requires — without it a tag
 /// line like `#guide` reads as a heading.
 pub fn title_of(text: &str, path: &Path) -> String {
-    for line in text.lines() {
+    // A `# comment` in the metadata is YAML, not a heading.
+    for line in text[crate::markdown::body_start(text)..].lines() {
         let t = line.trim();
         let hashes = t.chars().take_while(|&c| c == '#').count();
         if (1..=6).contains(&hashes)
@@ -457,6 +452,18 @@ mod tests {
         // No front matter: just the first lines.
         assert_eq!(excerpt("alpha\nbeta\ngamma\ndelta\n", 2), "alpha\nbeta");
         assert_eq!(excerpt("", 3), "");
+    }
+
+    /// One definition of frontmatter. The excerpt used its own, which
+    /// skipped everything up to the next `---` even when the file just
+    /// opened with a thematic break -- so the preview of such a note
+    /// was its second section.
+    #[test]
+    fn excerpt_skips_only_closed_frontmatter() {
+        assert_eq!(excerpt("---\n\nIntro\n\nNext\n---\ntail\n", 1), "---");
+        // A YAML comment is not the note's title.
+        let p = Path::new("/vault/Roadmap.md");
+        assert_eq!(title_of("---\n# owner: me\n---\n# The Plan\n", p), "The Plan");
     }
 
     #[test]

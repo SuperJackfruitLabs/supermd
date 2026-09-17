@@ -1006,6 +1006,13 @@ attribute = "#d19a66"
     ///   and empty state, the search status line, the About dialog's
     ///   version, and every menu's shortcut column are muted on it.
     ///
+    /// - `code_bg` -- a fence's language label in the reading view, and
+    ///   since frontmatter stopped being a heading, the whole metadata
+    ///   block there (`view::frontmatter_style`). Measured when it
+    ///   joined: 2.84-2.92:1 in the two solarized themes, inside their
+    ///   existing bands (the same published-ink fact), and 3.21:1 at
+    ///   worst elsewhere (nord); it binds in none of the eight.
+    ///
     /// The ramp runs `bg` -> `selected_bg` and `fg_muted` is one ink
     /// for all of it, so `selected_bg` -- the far end -- is the binding
     /// surface in every shipped theme. Each time this set grew, the
@@ -1015,7 +1022,7 @@ attribute = "#d19a66"
     /// can only pass by being readable everywhere it writes, and moving
     /// a surface can never fix it -- only the ink can.
     fn worst_muted_contrast(t: &Theme) -> f32 {
-        [t.bg, t.page_bg, t.panel_bg, t.floating_bg, t.hover_bg, t.selected_bg]
+        [t.bg, t.page_bg, t.panel_bg, t.floating_bg, t.hover_bg, t.selected_bg, t.code_bg]
             .into_iter()
             .map(|surface| Theme::contrast(t.fg_muted, surface))
             .fold(f32::INFINITY, f32::min)
@@ -1086,6 +1093,11 @@ attribute = "#d19a66"
             set(&mut t, muted);
             assert_eq!(worst_muted_contrast(&t), 1.0, "muted ink guard does not read {surface}");
         }
+        // Muted only: body ink is not written on the code surface (code
+        // text is `code_fg`, guarded with the fence itself).
+        let mut t = base.map_colors(|c| c);
+        t.code_bg = t.fg_muted;
+        assert_eq!(worst_muted_contrast(&t), 1.0, "muted ink guard does not read code_bg");
     }
 
     /// A code fence must stay visible against the page it now sits on.
@@ -1194,15 +1206,29 @@ attribute = "#d19a66"
     /// The floor is the same 1.04 as the pairs above: a hairline is not
     /// text, so WCAG's 4.5:1 text ratio does not apply, but the row
     /// separator must not vanish into the page it sits on.
+    ///
+    /// The second consumer is the outline of a literal block in the
+    /// reading view -- frontmatter (`view::frontmatter`). gpui paints a
+    /// border inside the quad, over its own fill, so the hairline is
+    /// `border_subtle` composited on `code_bg`, and the edge it draws is
+    /// against the page outside. That is the pair measured. Against the
+    /// block's own fill it is weaker (1.032:1 in solarized-dark) and not
+    /// guarded: the fill itself already clears the fence floor against
+    /// the page, so the outline is a second cue, not the only one.
     #[test]
     fn table_row_hairline_is_visible_on_the_page() {
         for (name, t) in shipped_themes() {
-            let composited = t.page_bg.blend(t.border_subtle);
-            let separation = Theme::contrast(composited, t.page_bg);
-            assert!(
-                separation >= 1.04,
-                "{name}: the table row hairline is invisible on the page ({separation:.3}:1)"
-            );
+            for (what, under) in [
+                ("the table row hairline", t.page_bg),
+                ("a frontmatter block's outline", t.code_bg),
+            ] {
+                let composited = under.blend(t.border_subtle);
+                let separation = Theme::contrast(composited, t.page_bg);
+                assert!(
+                    separation >= 1.04,
+                    "{name}: {what} is invisible on the page ({separation:.3}:1)"
+                );
+            }
         }
     }
 
