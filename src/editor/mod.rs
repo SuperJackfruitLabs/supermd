@@ -3869,10 +3869,9 @@ impl Render for Editor {
                     .items_center()
                     .gap(px(2.))
                     .p(px(3.))
-                    .bg(t.panel_bg)
                     .border_1()
                     .border_color(t.border)
-                    .elevated(crate::elevation::Overlay::FormatToolbar, t.shadow)
+                    .elevated(crate::elevation::Overlay::FormatToolbar, &t)
                     .child(button(0, "B").font_weight(FontWeight::BOLD).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|ed, _, w, cx| {
@@ -3994,10 +3993,9 @@ impl Render for Editor {
                     .child(
                         div()
                             .w(px(280.))
-                            .bg(t.panel_bg)
                             .border_1()
                             .border_color(t.border)
-                            .elevated(crate::elevation::Overlay::LinkCompletion, t.shadow)
+                            .elevated(crate::elevation::Overlay::LinkCompletion, &t)
                             .overflow_hidden()
                             // The first row is selected by default and
                             // its fill is square: flush with the rounded
@@ -4148,10 +4146,9 @@ impl Render for Editor {
                                 }
                             }))
                             .max_w(px(360.))
-                            .bg(t.panel_bg)
                             .border_1()
                             .border_color(t.border)
-                            .elevated(crate::elevation::Overlay::LinkHover, t.shadow)
+                            .elevated(crate::elevation::Overlay::LinkHover, &t)
                             .overflow_hidden()
                             .p_3()
                             .child(inner),

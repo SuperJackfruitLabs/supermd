@@ -24,6 +24,10 @@ border = "#eae5d8"
 page_bg = "#fdfbf6"
 # Warm brown at low strength. A grey shadow on cream reads as dirt.
 shadow = "#3c30202e"
+# Overlays float above the page and are never darker than it. The page is
+# near white with no brighter step to take, so they share it and the
+# shadow does the lifting.
+floating_bg = "#fdfbf6"
 panel_bg = "#f3efe2"
 hover_bg = "#ebe6d8"
 selected_bg = "#e3dcc9"

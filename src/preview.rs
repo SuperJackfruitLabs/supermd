@@ -744,10 +744,9 @@ impl gpui::Render for PreviewTooltip {
         let (title, sub, body) = describe(&self.preview);
         div()
             .max_w(px(360.))
-            .bg(t.panel_bg)
             .border_1()
             .border_color(t.border)
-            .elevated(crate::elevation::Overlay::PreviewTooltip, t.shadow)
+            .elevated(crate::elevation::Overlay::PreviewTooltip, &t)
             .p_3()
             .flex()
             .flex_col()

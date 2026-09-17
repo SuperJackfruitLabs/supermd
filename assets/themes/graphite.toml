@@ -19,6 +19,10 @@ page_bg = "#1f1f1e"
 # Neutral through and through: Graphite has no hue to protect, so the
 # page casts a plain black shadow.
 shadow = "#00000057"
+# Overlays -- the finder, palette, menus, dialogs -- float above the page,
+# so they are never darker than it. Halfway from the page to hover_bg: a
+# step up, and a hovered row painted on it still reads.
+floating_bg = "#232322"
 # panel_bg is not only the sidebar: the table projector paints the
 # header row with it, on the page. At #1d1d1b that band was 1.023:1
 # against the page -- two levels out of 255, invisible. Dropped one step

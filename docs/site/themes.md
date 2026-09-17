@@ -49,7 +49,8 @@ code_fg = "#d8dee9"     # code text
 border = "#434c5e"
 border_subtle = "#434c5e8c"  # hairlines — table rules and the like
 shadow = "#10141c57"    # the page's drop shadow: tint + strength
-panel_bg = "#22262f"    # sidebar, overlays, table headers
+floating_bg = "#313744" # the finder, palette, menus and dialogs
+panel_bg = "#22262f"    # table headers, the knowledge panel, banners
 hover_bg = "#343a48"
 selected_bg = "#3c4454"
 find_match_bg = "#665c22"
@@ -68,14 +69,20 @@ Optionally, `diff_added_bg`, `diff_added_fg`, `diff_deleted_bg`, and `diff_delet
 
 ### The page and the desk
 
-The document sits on its own surface. `page_bg` is that surface — the one a reader actually looks at — and `bg` is the desk behind and beneath it, which the sidebar, tab strip, outline and status bar share. If your theme predates this split, or you simply leave the three newer keys out, they are derived from the colors you did give: `page_bg` steps one notch away from `bg`, `border_subtle` is `border` at reduced alpha, and `shadow` is picked to suit your `appearance`. Your theme keeps working; setting them by hand is how you take control of the relationship.
+The document sits on its own surface. `page_bg` is that surface — the one a reader actually looks at — and `bg` is the desk behind and beneath it, which the sidebar, tab strip, outline and status bar share. If your theme predates this split, or you simply leave the four newer keys out, they are derived from the colors you did give: `page_bg` steps one notch away from `bg`, `border_subtle` is `border` at reduced alpha, `shadow` is picked to suit your `appearance`, and `floating_bg` is worked out as described below. Your theme keeps working; setting them by hand is how you take control of the relationship.
 
 Two things are worth checking by eye once you set `page_bg` yourself, because both are drawn *on the page* rather than on the desk:
 
 - **`code_bg`** — a fence tuned against the old single background can vanish against a brighter page.
 - **`panel_bg` and `hover_bg`** — a table's header row is `panel_bg` and a hovered table row is `hover_bg`, both painted on the page. If either matches `page_bg`, that feedback disappears. `hover_bg` also highlights an inactive tab, and the active tab carries `page_bg`, so a collision there makes every hovered tab look active.
 
-And one that catches nearly every theme by surprise: **`fg_muted` is painted on all five backgrounds** — the desk, the page, `panel_bg`, `hover_bg` and `selected_bg`. The sidebar's chevrons and folder icons are muted on whatever the row is painted with, and the finder's directory hints, the palette's plugin names, the search results' line numbers and the `[[` completion popup's path hints are all muted text on a *selected* row. `selected_bg` is the far end of that ramp, so it is the one that decides: a `fg_muted` picked to look right on the page will usually be a step too faint there.
+### Things that float
+
+`floating_bg` is the surface of everything that floats above the page: the finder, the command palette, workspace search, the theme picker, menus, link previews, the selection toolbar, and dialogs. The rule it follows is simple — **a surface that floats above the page is never darker than the page**. A shadow can only darken what is beside a surface, so an overlay darker than the page under it reads as a hole with a recess wall rather than as a card lifted off it.
+
+In a dark theme that means a step lighter than `page_bg`. Left out, it is derived halfway between `page_bg` and `hover_bg`, which keeps it a visible step up while a hovered or selected row painted on it still stands out. If you set it yourself, keep it below `hover_bg` for the same reason. In a light theme the page is usually at or near white, with no brighter step to take, so the derived `floating_bg` is `page_bg` itself and the shadow does the separating. It should be opaque: an overlay is drawn over whatever is beneath it.
+
+And one that catches nearly every theme by surprise: **`fg_muted` is painted on all six backgrounds** — the desk, the page, `panel_bg`, `floating_bg`, `hover_bg` and `selected_bg`. The sidebar's chevrons and folder icons are muted on whatever the row is painted with, and the finder's directory hints, the palette's plugin names, the search results' line numbers and the `[[` completion popup's path hints are all muted text on a *selected* row. `selected_bg` is the far end of that ramp, so it is the one that decides: a `fg_muted` picked to look right on the page will usually be a step too faint there.
 
 ### Colors with alpha
 

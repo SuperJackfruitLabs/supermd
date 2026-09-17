@@ -20,6 +20,12 @@ page_bg = "#282828"
 # A warm near-black rather than pure black: gruvbox's ground is warm
 # and a neutral shadow greys it.
 shadow = "#12100e57"
+# Overlays float above the page, so they are never darker than it. They
+# used to be panel_bg, dark0_hard, and a shadow under a surface darker than
+# the page reads as a hole. Gruvbox publishes no rung between dark0 and
+# dark0_soft, so this is their midpoint: a step up from the page, a step
+# below the hovered row painted on it.
+floating_bg = "#2d2c2c"
 panel_bg = "#1d2021"
 # hover_bg is painted ON THE PAGE -- the table projector hovers a row
 # with it, and the tab strip hovers an inactive tab with it while the

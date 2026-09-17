@@ -23,6 +23,9 @@ page_bg = "#2e3440"
 # A blue-black rather than black, so the shadow deepens the ground's
 # hue instead of draining it.
 shadow = "#10141c57"
+# Overlays float above the page, so they are never darker than it.
+# Halfway from nord0 to hover_bg: a step up, and a hovered row still reads.
+floating_bg = "#313744"
 panel_bg = "#22262f"
 hover_bg = "#343a48"
 selected_bg = "#3c4454"

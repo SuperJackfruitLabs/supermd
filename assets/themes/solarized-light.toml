@@ -26,6 +26,10 @@ border = "#ded8c5"
 page_bg = "#fffcf3"
 # Grey-teal, Solarized's neutral axis. A warm shadow muddies it.
 shadow = "#2a3d442e"
+# Overlays float above the page and are never darker than it. The page is
+# near white with no brighter step to take, so they share it and the
+# shadow does the lifting.
+floating_bg = "#fffcf3"
 panel_bg = "#f5efdc"
 hover_bg = "#eee8d5"
 selected_bg = "#e4ddc8"

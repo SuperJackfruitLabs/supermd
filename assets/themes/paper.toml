@@ -28,6 +28,9 @@ border = "#e0dfdc"
 page_bg = "#ffffff"
 # Neutral warm-grey. Paper has no hue of its own to protect.
 shadow = "#33312d2e"
+# Overlays float above the page and are never darker than it. The page is
+# white, so they share it and the shadow does the lifting.
+floating_bg = "#ffffff"
 panel_bg = "#ecebe9"
 hover_bg = "#e1e0dd"
 selected_bg = "#dbd8d2"

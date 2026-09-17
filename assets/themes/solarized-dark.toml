@@ -25,6 +25,9 @@ border = "#0e3a46"
 page_bg = "#002b36"
 # Solarized's own dark end, so the shadow stays in the teal.
 shadow = "#00161c57"
+# Overlays float above the page, so they are never darker than it.
+# Halfway from base03 to hover_bg: a step up, and a hovered row still reads.
+floating_bg = "#04303b"
 panel_bg = "#02232c"
 hover_bg = "#083440"
 selected_bg = "#114450"

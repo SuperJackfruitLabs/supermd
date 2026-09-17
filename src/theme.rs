@@ -55,6 +55,9 @@ theme_colors!(ThemeColors {
     page_bg,
     border_subtle,
     shadow,
+    // Anything that floats above the page: the finder, the palette,
+    // menus, popovers, dialogs. Never darker than the page.
+    floating_bg,
 
     // Chrome: sidebar, tab bar, panels
     panel_bg,
@@ -156,6 +159,10 @@ impl Theme {
                 page_bg: rgb(0xfdfbf6).into(),
                 border_subtle: Hsla { a: 0.55, ..rgb(0xeae5d8).into() },
                 shadow: Hsla { h: 0.095, s: 0.30, l: 0.18, a: 0.18 },
+                // The page itself. A light page is already near white,
+                // so there is no brighter step to take; the shadow is
+                // what lifts an overlay off it.
+                floating_bg: rgb(0xfdfbf6).into(),
 
                 panel_bg: rgb(0xf3efe2).into(),
                 hover_bg: rgb(0xebe6d8).into(),
@@ -215,9 +222,14 @@ impl Theme {
                 page_bg: rgb(0x211f1a).into(),
                 border_subtle: Hsla { a: 0.55, ..rgb(0x383428).into() },
                 shadow: Hsla { h: 0., s: 0., l: 0., a: 0.34 },
+                // One rung above the page and one below hover, so a
+                // hovered row still reads on it. Hover moved up from
+                // 0x25231d to make that rung: it sat 1.048:1 from the
+                // page, with no room for a surface in between.
+                floating_bg: rgb(0x24221c).into(),
 
                 panel_bg: rgb(0x1c1b18).into(),
-                hover_bg: rgb(0x25231d).into(),
+                hover_bg: rgb(0x282620).into(),
                 selected_bg: rgb(0x302d24).into(),
                 find_match_bg: rgb(0x574a1c).into(),
                 find_active_bg: rgb(0x7d6a24).into(),
@@ -265,6 +277,29 @@ impl Theme {
             (bg.l - step).max(0.0)
         };
         Hsla { l, ..bg }
+    }
+
+    /// The surface overlays float on, for a theme that does not say.
+    ///
+    /// It is never darker than the page: a shadow can only darken what
+    /// is *beside* a surface, so a surface darker than the page it sits
+    /// over reads as a hole with a recess wall, not as a card. In a
+    /// light theme the page is at or near white and there is no
+    /// brighter step, so the overlay takes the page itself and the
+    /// shadow separates them. In a dark theme it goes halfway from the
+    /// page to `hover_bg` -- a step up, while a hovered row painted on
+    /// it still differs from it. A theme whose hover is not lighter
+    /// than its page gives nothing to go halfway to, so it takes a
+    /// fixed lift instead.
+    pub fn derive_floating_bg(page_bg: Hsla, hover_bg: Hsla, is_dark: bool) -> Hsla {
+        if !is_dark {
+            return page_bg;
+        }
+        if hover_bg.l > page_bg.l {
+            page_bg.blend(Hsla { a: 0.5, ..hover_bg })
+        } else {
+            Hsla { l: (page_bg.l + 0.02).min(1.0), ..page_bg }
+        }
     }
 
     /// The strongest a theme's `shadow` may be, enforced at load.
@@ -361,6 +396,8 @@ struct ThemeFileColors {
     border_subtle: Option<String>,
     #[serde(default)]
     shadow: Option<String>,
+    #[serde(default)]
+    floating_bg: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -445,6 +482,11 @@ impl LoadedTheme {
         };
         theme.panel_bg = parse_hex(&c.panel_bg)?;
         theme.hover_bg = parse_hex(&c.hover_bg)?;
+        // After `page_bg` and `hover_bg`: the derivation sits between them.
+        theme.floating_bg = match &c.floating_bg {
+            Some(hex) => parse_hex(hex)?,
+            None => Theme::derive_floating_bg(theme.page_bg, theme.hover_bg, is_dark),
+        };
         theme.selected_bg = parse_hex(&c.selected_bg)?;
         theme.find_match_bg = parse_hex(&c.find_match_bg)?;
         theme.find_active_bg = parse_hex(&c.find_active_bg)?;
@@ -870,14 +912,18 @@ attribute = "#d19a66"
     /// Every surface body text is actually painted on, reduced to the
     /// worst one -- the same reduction `worst_muted_contrast` does, for
     /// the same reason, over a list grepped for `fg` rather than
-    /// assumed to match muted ink's. It happens to be the same five:
+    /// assumed to match muted ink's. It happens to be the same six:
     ///
     /// - `bg` -- a sidebar row at rest is `RowState::Resting`, whose
     ///   background is the desk, and its name is `fg`;
     /// - `page_bg` -- the document, and a table's body rows
     ///   (`editor/mod.rs`);
-    /// - `panel_bg` -- the link-hover popover (`editor/mod.rs`,
-    ///   `preview.rs`), the selection toolbar, and the overlays;
+    /// - `panel_bg` -- the install and default-app banners' messages
+    ///   (`workspace.rs`);
+    /// - `floating_bg` -- every overlay `elevation::Elevated` lifts: the
+    ///   link-hover popover (`editor/mod.rs`, `preview.rs`), the selection
+    ///   toolbar, the search preview, the context and app menus, the theme
+    ///   picker's rows, the About, shortcuts, consent and install dialogs;
     /// - `hover_bg` -- a hovered table row, a hovered selection-toolbar
     ///   button, a hovered sidebar row;
     /// - `selected_bg` -- the search overlay's matched line on the
@@ -890,7 +936,7 @@ attribute = "#d19a66"
     /// That is exactly how the muted defect survived two rounds. A
     /// number nothing asserts is a number that drifts.
     fn worst_body_contrast(t: &Theme) -> f32 {
-        [t.bg, t.page_bg, t.panel_bg, t.hover_bg, t.selected_bg]
+        [t.bg, t.page_bg, t.panel_bg, t.floating_bg, t.hover_bg, t.selected_bg]
             .into_iter()
             .map(|surface| Theme::contrast(t.fg, surface))
             .fold(f32::INFINITY, f32::min)
@@ -933,7 +979,7 @@ attribute = "#d19a66"
     const KNOWN_MUTED_GAPS: &[(&str, f32, f32)] =
         &[("solarized-dark", 2.3, 3.0), ("solarized-light", 2.45, 3.0)];
 
-    /// Every surface muted text is actually painted on -- all five --
+    /// Every surface muted text is actually painted on -- all six --
     /// reduced to the worst one.
     ///
     /// This began as `contrast(fg_muted, bg)` alone, and that was the
@@ -945,7 +991,7 @@ attribute = "#d19a66"
     ///   projector captions (`editor/mod.rs`, `view.rs`,
     ///   `editor/projector.rs`);
     /// - `panel_bg` -- the sidebar, the tab strip's inactive labels,
-    ///   and every floating overlay's ground;
+    ///   the find bar's match count, and the knowledge panel;
     /// - `hover_bg` -- the sidebar chevron and folder icon are
     ///   unconditionally `fg_muted` (`workspace.rs`), so hovering any
     ///   directory row paints them on it, as does hovering an inactive
@@ -954,6 +1000,11 @@ attribute = "#d19a66"
     ///   plugin name, the search results' line numbers, the install
     ///   list's descriptions and the `[[` popup's path hint are all
     ///   `fg_muted` on a *selected* row.
+    ///
+    /// - `floating_bg` -- since overlays got a surface of their own, the
+    ///   finder's file preview and path header, the palette's failures
+    ///   and empty state, the search status line, the About dialog's
+    ///   version, and every menu's shortcut column are muted on it.
     ///
     /// The ramp runs `bg` -> `selected_bg` and `fg_muted` is one ink
     /// for all of it, so `selected_bg` -- the far end -- is the binding
@@ -964,7 +1015,7 @@ attribute = "#d19a66"
     /// can only pass by being readable everywhere it writes, and moving
     /// a surface can never fix it -- only the ink can.
     fn worst_muted_contrast(t: &Theme) -> f32 {
-        [t.bg, t.page_bg, t.panel_bg, t.hover_bg, t.selected_bg]
+        [t.bg, t.page_bg, t.panel_bg, t.floating_bg, t.hover_bg, t.selected_bg]
             .into_iter()
             .map(|surface| Theme::contrast(t.fg_muted, surface))
             .fold(f32::INFINITY, f32::min)
@@ -981,7 +1032,7 @@ attribute = "#d19a66"
                 ),
                 None => assert!(
                     body >= 4.5,
-                    "{name}: body text is {body:.2}:1 on the worst of ground, page, panel, hover and selection"
+                    "{name}: body text is {body:.2}:1 on the worst of ground, page, panel, floating, hover and selection"
                 ),
             }
             let muted = worst_muted_contrast(&theme);
@@ -992,7 +1043,7 @@ attribute = "#d19a66"
                 ),
                 None => assert!(
                     muted >= 3.0,
-                    "{name}: muted text is {muted:.2}:1 on the worst of ground, page, panel, hover and selection"
+                    "{name}: muted text is {muted:.2}:1 on the worst of ground, page, panel, floating, hover and selection"
                 ),
             }
             let surfaces = Theme::contrast(theme.page_bg, theme.bg);
@@ -1000,6 +1051,40 @@ attribute = "#d19a66"
                 surfaces >= 1.03,
                 "{name}: page and ground are indistinguishable ({surfaces:.3}:1)"
             );
+        }
+    }
+
+    /// Both ink guards take the *worst* surface, and a minimum hides
+    /// every surface that is not the worst. `selected_bg` binds in all
+    /// eight shipped themes, so deleting `floating_bg` -- or any other
+    /// surface -- from either list changes no measured number, and no
+    /// band floor or ceiling can notice. Measured when `floating_bg`
+    /// joined the lists: dropping it again left
+    /// `every_shipped_theme_keeps_text_readable_on_the_page` green.
+    ///
+    /// So each surface is proved to be read directly: paint it the ink's
+    /// own colour, and the worst contrast must collapse to 1:1. A surface
+    /// missing from a list leaves the reduction untouched and fails here.
+    #[test]
+    fn the_ink_guards_read_every_surface_they_name() {
+        let setters: [(&str, fn(&mut Theme, Hsla)); 6] = [
+            ("bg", |t, c| t.bg = c),
+            ("page_bg", |t, c| t.page_bg = c),
+            ("panel_bg", |t, c| t.panel_bg = c),
+            ("floating_bg", |t, c| t.floating_bg = c),
+            ("hover_bg", |t, c| t.hover_bg = c),
+            ("selected_bg", |t, c| t.selected_bg = c),
+        ];
+        let base = Theme::dark();
+        for (surface, set) in setters {
+            let mut t = base.map_colors(|c| c);
+            let fg = t.fg;
+            set(&mut t, fg);
+            assert_eq!(worst_body_contrast(&t), 1.0, "body ink guard does not read {surface}");
+            let mut t = base.map_colors(|c| c);
+            let muted = t.fg_muted;
+            set(&mut t, muted);
+            assert_eq!(worst_muted_contrast(&t), 1.0, "muted ink guard does not read {surface}");
         }
     }
 
@@ -1035,10 +1120,26 @@ attribute = "#d19a66"
     /// strip hovers an inactive tab to `hover_bg` while the active tab
     /// carries `page_bg` (`workspace.rs`) -- so a collision there both
     /// kills the hover feedback and makes a hovered tab read as the
-    /// active one. `hover_bg` and `selected_bg` also land on `panel_bg`
-    /// (sidebar rows, the finder, the palette, the `[[` completion
-    /// popup), and the sidebar puts them directly side by side:
-    /// keyboard-selected is `hover_bg`, active is `selected_bg`.
+    /// active one.
+    ///
+    /// `hover_bg` also lands on `panel_bg` (the knowledge panel's rows and
+    /// tag chips, a banner's "Not now"). The sidebar puts `hover_bg` and
+    /// `selected_bg` directly side by side: keyboard-selected is
+    /// `hover_bg`, active is `selected_bg`.
+    ///
+    /// Everything an overlay's container carries lands on `floating_bg`,
+    /// grepped from the fifteen `.elevated(` sites rather than assumed:
+    /// hovered and selected rows (finder, palette, search, install list,
+    /// theme picker, menus, `[[` popup, the link popover's "Enable
+    /// previews" button); `border` as each overlay's outline, its
+    /// input/list dividers and the app menu's group rules; the search
+    /// preview's hit line in `find_match_bg`; the shortcuts dialog's
+    /// keycaps in `code_bg`; and the consent and install prompts' primary
+    /// buttons in `accent`.
+    ///
+    /// Each ink is composited over its surface before it is measured.
+    /// `Theme::contrast` ignores alpha, and a translucent token measured
+    /// raw would report the contrast of an opaque one.
     ///
     /// `selected_bg` reaches the page too, in one place that a grep for
     /// it next to `page_bg` will not show: a tab's close button hovers
@@ -1054,13 +1155,18 @@ attribute = "#d19a66"
             for (what, ink, surface) in [
                 ("a hovered table row, and a hovered tab", t.hover_bg, t.page_bg),
                 ("a table header", t.panel_bg, t.page_bg),
-                ("a hovered sidebar / finder / popup row", t.hover_bg, t.panel_bg),
-                ("a selected sidebar / finder / popup row", t.selected_bg, t.panel_bg),
+                ("a hovered knowledge-panel row or tag, a banner button", t.hover_bg, t.panel_bg),
+                ("a hovered finder / palette / menu / popup row", t.hover_bg, t.floating_bg),
+                ("a selected finder / palette / picker / popup row", t.selected_bg, t.floating_bg),
+                ("an overlay's outline, dividers and menu rules", t.border, t.floating_bg),
+                ("the search preview's hit line", t.find_match_bg, t.floating_bg),
+                ("a keycap in the shortcuts dialog", t.code_bg, t.floating_bg),
+                ("the consent / install prompt's primary button", t.accent, t.floating_bg),
                 ("selection against hover, side by side", t.selected_bg, t.hover_bg),
                 ("a tab's close button, hovered on the active tab", t.selected_bg, t.page_bg),
                 ("a tab's close button, hovered on an inactive tab", t.selected_bg, t.bg),
             ] {
-                let separation = Theme::contrast(ink, surface);
+                let separation = Theme::contrast(surface.blend(ink), surface);
                 assert!(
                     separation >= 1.04,
                     "{name}: {what} is invisible against what it sits on ({separation:.3}:1)"
@@ -1094,6 +1200,86 @@ attribute = "#d19a66"
                 "{name}: the table row hairline is invisible on the page ({separation:.3}:1)"
             );
         }
+    }
+
+    /// A surface that floats above the page is never darker than it --
+    /// otherwise the shadow beneath reads as a recess, not a lift.
+    ///
+    /// Every overlay used to paint `panel_bg`, and `panel_bg` is darker
+    /// than the page in all eight shipped themes, light ones included.
+    /// A shadow can only darken what is *beside* a surface, so no shadow
+    /// could turn that hole into a card.
+    ///
+    /// It must also be opaque. An overlay is drawn over whatever is
+    /// under it -- the page, the sidebar, a code fence -- so a
+    /// translucent one has no single colour to measure, and every guard
+    /// that reads `floating_bg` would be reading a fiction.
+    #[test]
+    fn floating_surfaces_are_never_sunken_below_the_page() {
+        for (name, t) in shipped_themes() {
+            let lf = t.floating_bg.l;
+            let lp = t.page_bg.l;
+            assert!(lf >= lp - 0.005, "{name}: floating {lf:.3} sits below page {lp:.3}");
+            assert_eq!(t.floating_bg.a, 1.0, "{name}: floating_bg must be opaque");
+        }
+    }
+
+    /// In a dark theme "never darker" is not enough: an overlay that is
+    /// the page's own colour is a card only by virtue of its shadow, and
+    /// a dark shadow on a dark page is the weakest separation there is.
+    /// So it takes a visible step up. Light themes are exempt -- a page
+    /// at or near white has no brighter step to take, and there the
+    /// shadow does read.
+    ///
+    /// 1.02:1 is under the 1.04 floor for a *signal* token on purpose:
+    /// hover and selection must still read on top of this surface, and
+    /// in the tightest theme (jackfruit-dark) the page-to-hover span is
+    /// 1.088:1 in total, so the step has to leave room above it.
+    #[test]
+    fn dark_floating_surfaces_lift_a_step_above_the_page() {
+        for (name, t) in shipped_themes().into_iter().filter(|(_, t)| t.is_dark) {
+            let lift = Theme::contrast(t.floating_bg, t.page_bg);
+            assert!(
+                t.floating_bg.l > t.page_bg.l && lift >= 1.02,
+                "{name}: floating_bg does not lift off the page ({lift:.3}:1)"
+            );
+        }
+    }
+
+    /// A theme file without `floating_bg` -- every user theme written
+    /// before it existed -- gets one that obeys the same rules the shipped
+    /// themes are held to: not below the page, a step above it in the
+    /// dark, and still carrying a visible hovered row.
+    #[test]
+    fn floating_bg_is_derived_when_a_theme_omits_it() {
+        assert!(!THEME_WITHOUT_SURFACE_KEYS.contains("floating_bg"));
+        let dark = LoadedTheme::from_toml(THEME_WITHOUT_SURFACE_KEYS).unwrap().theme;
+        assert_eq!(
+            dark.floating_bg,
+            Theme::derive_floating_bg(dark.page_bg, dark.hover_bg, true)
+        );
+        assert!(dark.floating_bg.l > dark.page_bg.l, "dark: a step above the page");
+        assert!(dark.floating_bg.l < dark.hover_bg.l, "dark: a step below hover");
+        let hover = Theme::contrast(dark.hover_bg, dark.floating_bg);
+        assert!(hover >= 1.04, "dark: a hovered row vanishes on the derived surface ({hover:.3}:1)");
+
+        let light_src = THEME_WITHOUT_SURFACE_KEYS.replace("\"dark\"", "\"light\"");
+        let light = LoadedTheme::from_toml(&light_src).unwrap().theme;
+        assert_eq!(light.floating_bg, light.page_bg, "light: the page itself");
+    }
+
+    /// A dark theme whose hover is not lighter than its page leaves
+    /// nothing to go halfway to; the derivation must still lift rather
+    /// than fall back onto, or under, the page.
+    #[test]
+    fn floating_bg_derivation_lifts_even_when_hover_does_not() {
+        let page = Hsla { h: 0.1, s: 0.1, l: 0.2, a: 1. };
+        let hover = Hsla { l: 0.18, ..page };
+        let floating = Theme::derive_floating_bg(page, hover, true);
+        assert!(floating.l > page.l, "{} must sit above {}", floating.l, page.l);
+        assert_eq!((floating.h, floating.s), (page.h, page.s), "same hue, only lighter");
+        let white = Hsla { l: 1.0, ..page };
+        assert_eq!(Theme::derive_floating_bg(white, hover, true).l, 1.0, "clamped");
     }
 
     /// A theme that omits `shadow` gets the appearance-appropriate
@@ -1161,12 +1347,13 @@ attribute = "#d19a66"
     fn explicit_page_border_and_shadow_keys_override_derivation() {
         let toml_src = THEME_WITHOUT_SURFACE_KEYS.replace(
             "[syntax]",
-            "page_bg = \"#123456\"\nborder_subtle = \"#654321\"\nshadow = \"#0f0f0f57\"\n[syntax]",
+            "page_bg = \"#123456\"\nborder_subtle = \"#654321\"\nshadow = \"#0f0f0f57\"\nfloating_bg = \"#0a0b0c\"\n[syntax]",
         );
         let loaded = LoadedTheme::from_toml(&toml_src).unwrap();
         assert_eq!(loaded.theme.page_bg, gpui::rgb(0x123456).into());
         assert_eq!(loaded.theme.border_subtle, gpui::rgb(0x654321).into());
         assert_eq!(loaded.theme.shadow, parse_hex("#0f0f0f57").unwrap());
+        assert_eq!(loaded.theme.floating_bg, gpui::rgb(0x0a0b0c).into());
     }
 
     /// A six-digit colour is opaque; an eight-digit one carries its own

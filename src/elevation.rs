@@ -55,7 +55,7 @@ pub fn radius(surface: Surface) -> Pixels {
 ///
 /// The tier each one sits at is decided here, in `surface`, and nowhere
 /// else: a call site names *what it is* and `Elevated::elevated` turns
-/// that into shadow and radius. Before this, fifteen sites each reached
+/// that into surface, shadow and radius. Before this, fifteen sites each reached
 /// for gpui's `shadow_lg()` on their own, so depth was a default nobody
 /// had chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,12 +143,22 @@ pub fn corner_inset(overlay: Overlay) -> Pixels {
     radius(overlay.surface())
 }
 
-/// Lift an element to an overlay's tier: its shadow and its corner
-/// radius together, so the two cannot disagree about how far away it is.
+/// Lift an element to an overlay's tier: its surface, its shadow and its
+/// corner radius together, so none of the three can disagree about how
+/// far away it is.
+///
+/// The surface is here, not at the call site, because it is the one a
+/// site is most likely to get wrong. Every overlay used to paint
+/// `panel_bg`, which is also the table header and the knowledge panel,
+/// and in most themes it is darker than the page -- so a shadow under it
+/// read as a recess. Setting it here means a new overlay cannot choose
+/// it. A site must not follow this with its own `.bg(...)`: gpui keeps
+/// the last fill set, and `no_overlay_paints_its_own_surface` holds the
+/// sites to that.
 pub(crate) trait Elevated: gpui::Styled + Sized {
-    fn elevated(self, overlay: Overlay, shadow: Hsla) -> Self {
+    fn elevated(self, overlay: Overlay, t: &crate::theme::Theme) -> Self {
         let surface = overlay.surface();
-        self.shadow(shadows(surface, shadow)).rounded(radius(surface))
+        self.bg(t.floating_bg).shadow(shadows(surface, t.shadow)).rounded(radius(surface))
     }
 }
 
@@ -291,16 +301,19 @@ mod tests {
         );
     }
 
-    /// `elevated` applies the tier's shadow AND its radius. A popover
-    /// with a modal's corners, or no shadow at all, is the drift this
+    /// `elevated` applies the floating surface, the tier's shadow AND its
+    /// radius. A popover with a modal's corners, no shadow at all, or a
+    /// surface darker than the page it floats over, is the drift this
     /// helper exists to prevent.
     #[test]
-    fn elevated_applies_the_tiers_shadow_and_radius() {
+    fn elevated_applies_the_surface_and_the_tiers_shadow_and_radius() {
         use gpui::Styled as _;
-        let s = Hsla { h: 0., s: 0., l: 0., a: 0.3 };
+        let t = crate::theme::Theme::dark();
+        let s = t.shadow;
         for o in Overlay::ALL {
-            let mut el = gpui::div().elevated(o, s);
+            let mut el = gpui::div().elevated(o, &t);
             let st = el.style();
+            assert_eq!(st.background, Some(t.floating_bg.into()), "{o:?} surface");
             assert_eq!(st.box_shadow, Some(shadows(o.surface(), s)), "{o:?} shadow");
             let r: Option<gpui::AbsoluteLength> = Some(radius(o.surface()).into());
             let c = &st.corner_radii;
@@ -334,6 +347,63 @@ mod tests {
         };
         assert!(drop(Surface::Floating) > drop(Surface::Page), "a popover sits above the page");
         assert!(drop(Surface::Modal) > drop(Surface::Floating), "a dialog sits above a popover");
+    }
+
+    /// Every overlay takes its surface from `elevated`, and none paints
+    /// its own over it. gpui keeps the last fill set on an element, so a
+    /// `.bg(...)` anywhere in the same builder chain -- before the call or
+    /// after -- either is overwritten or overwrites; after is the silent
+    /// one. Both are a site choosing its own surface, which is how every
+    /// overlay came to be `panel_bg`, a colour darker than the page in
+    /// all eight shipped themes.
+    ///
+    /// The chain is every line from the `.elevated(` call outward until
+    /// the indentation drops below it (the `div()` that starts the
+    /// builder, or whatever consumes it). Of those, only the lines at the
+    /// call's own indentation are the container's methods: a child's fill
+    /// sits deeper, so a selected row's `.bg(t.selected_bg)` is not
+    /// mistaken for the container's, and a multi-line closure argument's
+    /// closing `})` does not end the walk early.
+    #[test]
+    fn no_overlay_paints_its_own_surface() {
+        let sources = [
+            ("finder.rs", include_str!("finder.rs")),
+            ("palette.rs", include_str!("palette.rs")),
+            ("search_ui.rs", include_str!("search_ui.rs")),
+            ("install_ui.rs", include_str!("install_ui.rs")),
+            ("preview.rs", include_str!("preview.rs")),
+            ("workspace.rs", include_str!("workspace.rs")),
+            ("editor/mod.rs", include_str!("editor/mod.rs")),
+        ];
+        let mut sites = 0;
+        for (file, src) in sources {
+            let lines: Vec<&str> = src.lines().collect();
+            for (ix, line) in lines.iter().enumerate() {
+                let body = line.trim_start();
+                if !body.starts_with(".elevated(crate::elevation::Overlay::") {
+                    continue;
+                }
+                sites += 1;
+                let indent = line.len() - body.len();
+                let depth = |l: &str| l.len() - l.trim_start().len();
+                let in_chain = |l: &&&str| l.trim().is_empty() || depth(l) >= indent;
+                let before = lines[..ix].iter().rev().take_while(in_chain);
+                let after = lines[ix + 1..].iter().take_while(in_chain);
+                let own = |l: &&&str| depth(l) == indent && l.trim_start().starts_with('.');
+                for l in before.chain(after).filter(own) {
+                    assert!(
+                        !l.contains(".bg("),
+                        "{file}:{}: an overlay paints its own surface ({}) -- `elevated` owns it",
+                        ix + 1,
+                        l.trim()
+                    );
+                }
+            }
+        }
+        // Not a count of overlays -- `Overlay::ALL` is that -- but proof
+        // the scan found the call shape at all. If a refactor respells
+        // the call, this fires rather than the test passing on nothing.
+        assert!(sites >= Overlay::ALL.len(), "found only {sites} `.elevated(` sites");
     }
 
     /// Apple's concentric rule: a rounded thing inside a rounded thing

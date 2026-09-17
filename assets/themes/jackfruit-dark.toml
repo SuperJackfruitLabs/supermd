@@ -18,8 +18,13 @@ border = "#383428"
 page_bg = "#211f1a"
 # Warm, to match the ground it falls on.
 shadow = "#100d0857"
+# Overlays float above the page, so they are never darker than it: one
+# rung above the page and one below hover_bg.
+floating_bg = "#24221c"
 panel_bg = "#1c1b18"
-hover_bg = "#25231d"
+# hover_bg was #25231d, 1.048:1 from the page -- no room for the floating
+# surface between them. Raised to leave a rung for it.
+hover_bg = "#282620"
 selected_bg = "#302d24"
 find_match_bg = "#574a1c"
 find_active_bg = "#7d6a24"
