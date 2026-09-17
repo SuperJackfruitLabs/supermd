@@ -36,6 +36,7 @@ use gpui::{
     TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 
+use crate::elevation::Elevated as _;
 use crate::highlight::Languages;
 use crate::reader::language_for_path;
 use crate::theme::{theme, Theme};
@@ -3871,8 +3872,7 @@ impl Render for Editor {
                     .bg(t.panel_bg)
                     .border_1()
                     .border_color(t.border)
-                    .rounded_lg()
-                    .shadow_lg()
+                    .elevated(crate::elevation::Overlay::FormatToolbar, t.shadow)
                     .child(button(0, "B").font_weight(FontWeight::BOLD).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|ed, _, w, cx| {
@@ -3997,9 +3997,14 @@ impl Render for Editor {
                             .bg(t.panel_bg)
                             .border_1()
                             .border_color(t.border)
-                            .rounded_lg()
-                            .shadow_lg()
+                            .elevated(crate::elevation::Overlay::LinkCompletion, t.shadow)
                             .overflow_hidden()
+                            // The first row is selected by default and
+                            // its fill is square: flush with the rounded
+                            // edge it would paint over the corner arcs.
+                            .py(crate::elevation::corner_inset(
+                                crate::elevation::Overlay::LinkCompletion,
+                            ))
                             .flex()
                             .flex_col()
                             .children(rows),
@@ -4146,8 +4151,7 @@ impl Render for Editor {
                             .bg(t.panel_bg)
                             .border_1()
                             .border_color(t.border)
-                            .rounded_lg()
-                            .shadow_lg()
+                            .elevated(crate::elevation::Overlay::LinkHover, t.shadow)
                             .overflow_hidden()
                             .p_3()
                             .child(inner),

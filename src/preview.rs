@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::elevation::Elevated as _;
+
 /// How long the popover survives after the pointer leaves the link.
 ///
 /// Without this the popover vanished the instant the pointer moved off
@@ -745,8 +747,7 @@ impl gpui::Render for PreviewTooltip {
             .bg(t.panel_bg)
             .border_1()
             .border_color(t.border)
-            .rounded_lg()
-            .shadow_lg()
+            .elevated(crate::elevation::Overlay::PreviewTooltip, t.shadow)
             .p_3()
             .flex()
             .flex_col()
