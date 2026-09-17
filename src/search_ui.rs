@@ -438,7 +438,7 @@ impl Render for SearchOverlay {
             .on_action(cx.listener(Self::dismiss))
             .w(px(680.))
             .max_w(gpui::relative(0.9))
-            .h(px(440.))
+            .h(px(448.))
             .flex_none()
             .bg(t.panel_bg)
             .border_1()
