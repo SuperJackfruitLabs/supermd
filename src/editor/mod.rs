@@ -3627,12 +3627,13 @@ fn render_table(
         }
     }
     let ncols = rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(1);
+    let borders = crate::view::table_borders(t);
 
     let mut container = div()
         .my_1()
         .rounded_lg()
         .border_1()
-        .border_color(t.border)
+        .border_color(borders.outer)
         .font_family(t.body_family.clone())
         .flex()
         .flex_col()
@@ -3640,6 +3641,12 @@ fn render_table(
 
     for (row_ix, (line, cells)) in rows.into_iter().enumerate() {
         let is_header = row_ix == 0;
+        // The rule under the header keeps full weight; every other row
+        // separates from its neighbour with a hairline. The first body
+        // row's separator IS the header rule, drawn as the header's own
+        // bottom border -- giving it a second, hairline top border here
+        // would double the line.
+        let is_first_body_row = row_ix == 1;
         let handle = editor.clone();
         let mut row = div()
             .id(("trow", item_ix * 1024 + row_ix))
@@ -3649,14 +3656,17 @@ fn render_table(
             .cursor_pointer()
             .when(is_header, |d| {
                 d.bg(t.panel_bg)
+                    .rounded_t_lg()
+                    .border_b_1()
+                    .border_color(borders.header)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(t.fg_strong)
             })
+            .when(!is_header && !is_first_body_row, |d| {
+                d.border_t_1().border_color(borders.row)
+            })
             .when(!is_header, |d| {
-                d.border_t_1()
-                    .border_color(t.border)
-                    .text_color(t.fg)
-                    .hover(|s| s.bg(t.hover_bg))
+                d.text_color(t.fg).hover(|s| s.bg(t.hover_bg))
             })
             .on_click(move |_, window, cx| {
                 handle.update(cx, |editor, cx| {

@@ -448,6 +448,28 @@ fn list(
     div().flex().flex_col().gap_1().children(rows).into_any_element()
 }
 
+/// Which borders a table draws. Outer and header keep weight, rows get
+/// a hairline, and interior verticals are gone -- they are what made a
+/// table read as a spreadsheet rather than part of the document. One
+/// pure rule shared by the reading view (`table`, below) and the
+/// editor's table widget (`editor::render_table`) so the two cannot
+/// drift apart.
+pub struct TableBorders {
+    pub outer: Hsla,
+    pub header: Hsla,
+    pub row: Hsla,
+    // Always `None` -- there is no interior vertical rule to paint, so
+    // neither renderer reads this outside the test that pins it. Kept
+    // as a field rather than dropped so the struct states the absence
+    // explicitly instead of by omission.
+    #[allow(dead_code)]
+    pub column: Option<Hsla>,
+}
+
+pub fn table_borders(t: &Theme) -> TableBorders {
+    TableBorders { outer: t.border, header: t.border, row: t.border_subtle, column: None }
+}
+
 fn table(
     head: &[InlineText],
     rows: &[Vec<InlineText>],
@@ -458,6 +480,7 @@ fn table(
 ) -> AnyElement {
     let cell_base = BaseStyle { weight: FontWeight::NORMAL, color: t.fg };
     let head_base = BaseStyle { weight: FontWeight::SEMIBOLD, color: t.fg_strong };
+    let borders = table_borders(t);
 
     // Cells get the same link handling as prose. They were rendered
     // with `inline_text`, so a link in a table was coloured and
@@ -490,17 +513,22 @@ fn table(
     div()
         .rounded_lg()
         .border_1()
-        .border_color(t.border)
+        .border_color(borders.outer)
         .flex()
         .flex_col()
-        .child(render_row(head, head_base, t, "h").bg(t.code_bg).rounded_t_lg())
+        .child(
+            render_row(head, head_base, t, "h")
+                .bg(t.code_bg)
+                .rounded_t_lg()
+                .border_b_1()
+                .border_color(borders.header),
+        )
         .children(
             rows.iter()
                 .enumerate()
                 .map(|(i, row)| {
                     render_row(row, cell_base, t, &i.to_string())
-                        .border_t_1()
-                        .border_color(t.border)
+                        .when(i > 0, |d| d.border_t_1().border_color(borders.row))
                 }),
         )
         .into_any_element()
@@ -1038,5 +1066,19 @@ no language
             assert!(!msg.is_empty());
             let _ = list_item(&doc, 0, &t, cx, None, None); // error strip + plain code branch
         });
+    }
+
+    // ── table_borders ────────────────────────────────────────────────
+
+    /// A table is a document element, not a spreadsheet. Vertical
+    /// rules between every cell are what made it read as one.
+    #[test]
+    fn table_borders_are_outer_and_horizontal_only() {
+        let t = Theme::light();
+        let b = table_borders(&t);
+        assert_eq!(b.outer, t.border, "the outer boundary keeps weight");
+        assert_eq!(b.header, t.border, "so does the rule under the header");
+        assert_eq!(b.row, t.border_subtle, "rows separate with a hairline");
+        assert!(b.column.is_none(), "no interior vertical rules");
     }
 }

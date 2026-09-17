@@ -1069,6 +1069,33 @@ attribute = "#d19a66"
         }
     }
 
+    /// `border_subtle`'s first real consumer is the table row rule that
+    /// replaces the old full-strength grid line (`view::table_borders`,
+    /// painted on `page_bg` in both the reading view and the editor's
+    /// table widget). It is translucent by design -- 55% of `border`'s
+    /// alpha, same hue -- so it needs its own check rather than joining
+    /// the pairs above: `Theme::contrast` ignores alpha, and comparing
+    /// `border_subtle` directly against `page_bg` would report the
+    /// contrast of a fully OPAQUE line, overstating what actually
+    /// paints. Composite it with `Hsla::blend` (what the compositor
+    /// does) before measuring, so a theme that set an alpha low enough
+    /// to disappear is still caught.
+    ///
+    /// The floor is the same 1.04 as the pairs above: a hairline is not
+    /// text, so WCAG's 4.5:1 text ratio does not apply, but the row
+    /// separator must not vanish into the page it sits on.
+    #[test]
+    fn table_row_hairline_is_visible_on_the_page() {
+        for (name, t) in shipped_themes() {
+            let composited = t.page_bg.blend(t.border_subtle);
+            let separation = Theme::contrast(composited, t.page_bg);
+            assert!(
+                separation >= 1.04,
+                "{name}: the table row hairline is invisible on the page ({separation:.3}:1)"
+            );
+        }
+    }
+
     /// A theme that omits `shadow` gets the appearance-appropriate
     /// derived shadow (warm-shifted in light, opaque black in dark) --
     /// not a leftover value from whichever appearance `Theme::light()`/
