@@ -13,6 +13,8 @@ Zed. Plain CommonMark on disk, always.
 
 **[supermd.app](https://supermd.app)** ·
 **[Download](https://github.com/SuperJackfruitLabs/supermd/releases/latest)** ·
+**[User guide](docs/site/index.md)** ·
+**[Plugin authoring](docs/site/writing-plugins.md)** ·
 built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
 [Zed](https://zed.dev)
 
@@ -28,14 +30,15 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   in the workspace; follow links with ⌘-click (unresolved links create
   the note); backlinks with context and `#tags` in the knowledge panel
   (⌘3); a native force-directed **graph view** (⌘⇧G) of the whole
-  workspace. Renaming or moving a note rewrites every link pointing at
-  it — the graph never breaks. All computed from your plain files: no
+  workspace. Renaming or moving a note through the sidebar updates links
+  indexed in the workspace. All computed from your plain files: no
   database.
 - **Writing that keeps up** — select text and a floating toolbar
   appears (bold, italic, code, strike, link, heading, quote — every
   action a toggle, ⌘B/⌘I from the keyboard); lists continue on Enter
   and indent with Tab; Tab hops table cells while the pipes align
-  themselves; paste an image and it lands in `assets/` with the link
+  themselves; insert or delete rows and columns from the Format menu;
+  paste an image and it lands in `assets/` with the link
   inserted.
 - **Live blocks** — tables render as real tables and whole-line images
   render inline while you edit; touch them and they dissolve back into
@@ -43,16 +46,19 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   highlighting.
 - **Live diagrams** — ` ```mermaid ` fences render as native,
   theme-matched diagrams (merman — pure Rust, no browser). Click one
-  to edit its source; click away and it's a picture again. All 35
-  mermaid diagram families.
+  to edit its source; click away and it's a picture again. See the
+  [diagram guide](docs/site/diagrams.md) for supported usage.
 - **A real workspace** — folder sidebar with Seti UI file icons
-  (gitignore-aware: no `node_modules`/`target` noise) and full
+  (gitignored entries appear dimmed; the index and fuzzy finder omit
+  them) and full
   keyboard file management (rename, create, move via fuzzy picker,
   delete to trash — open tabs follow along), tabs with VS Code-style
   preview behavior (arrow through files in the sidebar, pin with Enter
   or a double-click), outline panel, fuzzy file finder (nucleo-scored
-  with match highlighting), find in file, pretty preview toggle, image
-  viewer tabs, light/dark following the system.
+  with match highlighting), find and replace in file, pretty preview
+  toggle, image viewer tabs, light/dark following the system. Open
+  multiple workspaces in separate windows; right-click menus are
+  available in the sidebar, tabs, editor and graph.
 - **Search in workspace** — ⌘⇧F streams ripgrep-powered results into a
   two-pane overlay: matches grouped by file, live preview centered on
   the hit, Enter jumps straight to the line.
@@ -64,8 +70,8 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   word-level marks rendered in the editor's own typography (added words
   on a green wash, deleted words struck through in red, inline in the
   flow). Code files get line diffs with a diff-aware gutter; modified
-  files get a dot in the sidebar. Pure-Rust git (gix), read-only —
-  SuperMD never writes to your repo.
+  files get a dot in the sidebar. Pure-Rust git (gix) reads the baseline;
+  editing saves your files without staging or committing changes.
 - **Themes** — eight built-in (Jackfruit ×2, Paper, Graphite,
   Solarized ×2, Nord, Gruvbox Dark), live picker, custom themes as
   TOML files in `~/.supermd/themes/`. Your light and dark picks follow
@@ -95,8 +101,9 @@ built in Rust on [GPUI](https://www.gpui.rs), the UI framework behind
   a home.
 - **Update aware** — a quiet launch-time check against GitHub releases
   shows an "update available" pill in the titlebar when a newer version
-  ships; clicking opens the download page. Nothing phones home beyond
-  that one request, and failures are silent.
+  ships; clicking opens the download page. Check failures are silent.
+  Plugin installation also downloads from GitHub; plugins with network
+  capabilities require per-domain consent.
 - **Safe by default** — autosave with atomic writes, per-session
   backups in `~/.supermd/backups`, external-change detection that never
   silently clobbers anything, and live reload of clean buffers when
@@ -126,17 +133,20 @@ Grab the build for your platform from the
 
 **macOS** — download the DMG, drag **SuperMD** onto **Applications**, done. If you
 launch it straight from the disk image instead, SuperMD notices and
-offers to move itself. Releases are signed and notarized — no
-Gatekeeper warnings. Double-click any `.md` file to open it ("Open
+offers to move itself. The [v0.0.16 release notes](https://github.com/SuperJackfruitLabs/supermd/releases/tag/v0.0.16)
+identify its DMG as signed and notarized. Double-click any `.md` file to open it ("Open
 With → SuperMD" for other text), drop a folder on the window or Dock
 icon to open a workspace, and SuperMD reopens your last workspace on
 launch (File → Open Recent has the rest).
 
-**Linux** *(new)* — install the `.deb`, or unpack the tarball and run
+**Linux (x86_64)** — install the `.deb`, or unpack the tarball and run
 `./install.sh` (installs to `~/.local`, registers the .desktop entry
-and markdown association). Wayland and X11 both supported.
+and markdown association). Wayland and X11 both supported. In v0.0.16,
+`install.sh` does not copy the bundled plugins: use the `.deb` or run the
+unpacked binary beside its `plugins/` directory to keep them available.
+The installer fix is on the default branch for a subsequent release.
 
-**Windows** *(new)* — run `SuperMD-Setup-<version>.exe` (Start Menu
+**Windows (x64)** — run `SuperMD-Setup-<version>.exe` (Start Menu
 entry, optional `.md` association, uninstaller) or use the portable
 zip. Builds are not yet code-signed, so SmartScreen shows one
 "unrecognized app" prompt — More info → Run anyway.
@@ -153,9 +163,25 @@ sudo apt-get install libxkbcommon-dev libxkbcommon-x11-dev \
 ```
 
 ```sh
-cargo run            # opens an empty workspace (Open Folder… to pick one)
+git clone https://github.com/SuperJackfruitLabs/supermd.git
+cd supermd
+cargo run            # launch; may restore the most recent workspace
 cargo run -- .       # open the current directory as a workspace
 cargo run -- <path>  # open a file or folder
+```
+
+Open the included [example vault](examples/vault) with
+`cargo run -- examples/vault` to explore a sample workspace. Source builds
+do not automatically bundle the release plugin payload; see the
+[plugin guide](docs/site/plugins.md) for installation and
+[plugin authoring guide](docs/site/writing-plugins.md) for local builds.
+
+For the test suite, build the extension-host fixtures first (Bash required;
+CI builds these on Linux and macOS):
+
+```sh
+rustup target add wasm32-wasip2
+bash scripts/build_plugins.sh --fixtures
 cargo test
 ```
 
@@ -168,12 +194,35 @@ cargo llvm-cov                 # summary table
 cargo llvm-cov --html --open   # browsable line-by-line report
 ```
 
+## Documentation and contributing
+
+| Start here | What it covers |
+| --- | --- |
+| [User guide](docs/site/index.md) | Editing, workspaces, themes, links and plugins |
+| [Shortcuts](docs/site/shortcuts.md) | The generated command reference |
+| [Architecture and development](CLAUDE.md) | Editor pipeline, platform rules and test prerequisites |
+| [Plugin examples](plugins/) | First-party plugins, templates and WIT interfaces |
+| [Backlog](docs/BACKLOG.md) | Deferred work and explicit non-goals |
+| [CI workflow](.github/workflows/ci.yml) | Platform builds, tests and coverage enforcement |
+
+Before contributing, read [AGENTS.md](AGENTS.md) and its development guide.
+Keep editing logic in the tested Rust core and the GPUI shell thin. User docs
+are authored in `docs/site/`; regenerate their committed HTML with
+`cargo run --example build_docs` after changing those sources. Report the
+checks you ran and include a screenshot when a change affects the UI.
+
 ## Status
 
 Early and moving fast — built as a working editor first, a product
 second. macOS is the primary platform; Linux and Windows builds are
 new — [feedback and issues](https://github.com/SuperJackfruitLabs/supermd/issues)
-welcome.
+welcome. README capabilities describe the current source; published downloads
+can lag behind it. Check the [release notes](https://github.com/SuperJackfruitLabs/supermd/releases)
+for fixes and known issues in the version you install.
+
+In v0.0.16, closing every window can leave the app running without a way to
+open a new one. Quit and relaunch to recover, or keep a second window open;
+see [#53](https://github.com/SuperJackfruitLabs/supermd/issues/53).
 
 ## License
 
