@@ -15,7 +15,7 @@ You always edit real Markdown — SuperMD never rewrites your file behind your b
 
 ## Checkboxes, tables, and code
 
-- **Task lists** — click a checkbox to toggle it. `- [ ]` becomes `- [x]`, one undo step.
+- **Task lists** — click a checkbox to toggle it, in the editor or the rendered preview (⌘E). `- [ ]` becomes `- [x]`, one undo step.
 - **Tables** — rendered as proper tables. Click a row and the whole table dissolves into editable pipe syntax; click away and it re-renders.
 - **Code fences** — syntax highlighting for 78+ languages, live as you type. The ``` fence delimiters hide while you're outside the block.
 - **Images** — display inline; click one to edit its `![alt](path)` source.

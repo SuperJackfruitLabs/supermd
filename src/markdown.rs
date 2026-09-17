@@ -48,6 +48,11 @@ pub struct InlineText {
 pub struct ListItem {
     /// Some(done) for task-list items, None for plain items.
     pub checked: Option<bool>,
+    /// For a task item, which task it is: its position among every
+    /// task in the document, in source order. `task_toggle` finds a
+    /// task by the same number, so the reading view can hand it back
+    /// without knowing any byte offsets.
+    pub task: Option<usize>,
     pub blocks: Vec<Block>,
 }
 
@@ -296,7 +301,7 @@ impl StyleStack {
 /// What produced the currently-open container of blocks.
 enum Frame {
     Quote,
-    Item { checked: Option<bool> },
+    Item { checked: Option<bool>, task: Option<usize> },
 }
 
 /// Byte range of a YAML frontmatter block, if the source opens with
@@ -347,11 +352,38 @@ pub fn body_start(src: &str) -> usize {
     frontmatter_range(src).map_or(0, |r| r.end)
 }
 
-pub fn parse(source: &str) -> Document {
+/// The parser options for the reading path. `task_toggle` must see
+/// exactly the tasks `parse` does, so both take them from here.
+fn options() -> Options {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    options
+}
+
+/// Byte range of the Nth task marker's state character, and what it
+/// should become. `None` when the index is past the last task.
+///
+/// The range is the single character between the brackets -- ` `, `x`
+/// or `X` -- so applying the edit changes one byte of the file and
+/// nothing else: not the brackets, not the line ending. Tasks are
+/// counted exactly as `parse` numbers `ListItem::task`: the body after
+/// any frontmatter, in source order, nested and quoted ones included,
+/// look-alikes in code excluded.
+pub fn task_toggle(src: &str, nth: usize) -> Option<(Range<usize>, &'static str)> {
+    let body = body_start(src);
+    let (_, marker) = Parser::new_ext(&src[body..], options())
+        .into_offset_iter()
+        .filter(|(event, _)| matches!(event, Event::TaskListMarker(_)))
+        .nth(nth)?;
+    let state = body + marker.start + 1;
+    let with = if src.as_bytes().get(state) == Some(&b' ') { "x" } else { " " };
+    Some((state..state + 1, with))
+}
+
+pub fn parse(source: &str) -> Document {
+    let options = options();
 
     // Open containers. The bottom Vec is the document itself; quotes and list
     // items push a new Vec and fold it into a Block when they close.
@@ -365,6 +397,9 @@ pub fn parse(source: &str) -> Document {
     let mut styles = StyleStack::default();
 
     let mut code: Option<(Option<String>, String)> = None;
+
+    // How many task markers have been seen, for `ListItem::task`.
+    let mut tasks_seen = 0usize;
 
     // An HTML block in progress: its raw source, line by line.
     let mut html: Option<String> = None;
@@ -465,7 +500,7 @@ pub fn parse(source: &str) -> Document {
                 containers.last_mut().unwrap().push(Block::List { start, items });
             }
             Event::Start(Tag::Item) => {
-                frames.push(Frame::Item { checked: None });
+                frames.push(Frame::Item { checked: None, task: None });
                 containers.push(Vec::new());
                 // Tight list items carry inline content with no Paragraph tag.
                 inline = Some(InlineBuilder::default());
@@ -473,20 +508,24 @@ pub fn parse(source: &str) -> Document {
             Event::End(TagEnd::Item) => {
                 flush_inline(&mut inline, &mut containers);
                 let blocks = containers.pop().unwrap();
-                let checked = match frames.pop() {
-                    Some(Frame::Item { checked }) => checked,
-                    _ => None,
+                let (checked, task) = match frames.pop() {
+                    Some(Frame::Item { checked, task }) => (checked, task),
+                    _ => (None, None),
                 };
                 lists
                     .last_mut()
                     .expect("item outside list")
                     .1
-                    .push(ListItem { checked, blocks });
+                    .push(ListItem { checked, task, blocks });
             }
             Event::TaskListMarker(done) => {
-                if let Some(Frame::Item { checked }) = frames.last_mut() {
+                // Counted for every marker the parser reports, so the
+                // numbering cannot drift from `task_toggle`'s.
+                if let Some(Frame::Item { checked, task }) = frames.last_mut() {
                     *checked = Some(done);
+                    *task = Some(tasks_seen);
                 }
+                tasks_seen += 1;
             }
 
             // ── Tables ──────────────────────────────────────────────────
@@ -915,6 +954,81 @@ mod tests {
         assert_eq!(items[0].checked, Some(true));
         assert_eq!(items[1].checked, Some(false));
         assert_eq!(items[2].checked, None);
+    }
+
+    /// Apply what `task_toggle` asks for, the way a caller would.
+    fn toggled(src: &str, nth: usize) -> Option<String> {
+        let (range, with) = task_toggle(src, nth)?;
+        let mut out = src.to_string();
+        out.replace_range(range, with);
+        Some(out)
+    }
+
+    /// A toggle is one byte: the state character between the brackets.
+    /// Nothing else in the file moves.
+    #[test]
+    fn task_toggle_flips_exactly_the_state_character() {
+        let src = "- [ ] one\n- [x] two\n";
+        assert_eq!(task_toggle(src, 0), Some((3..4, "x")));
+        assert_eq!(task_toggle(src, 1), Some((13..14, " ")));
+        assert_eq!(task_toggle(src, 2), None, "past the last task");
+        assert_eq!(toggled(src, 0).as_deref(), Some("- [x] one\n- [x] two\n"));
+        assert_eq!(toggled(src, 1).as_deref(), Some("- [ ] one\n- [ ] two\n"));
+        // An upper-case X is checked too, and unchecks the same way.
+        assert_eq!(toggled("* [X] up\n", 0).as_deref(), Some("* [ ] up\n"));
+        // Windows line endings are left exactly as they were.
+        assert_eq!(
+            toggled("- [ ] a\r\n- [ ] b\r\n", 1).as_deref(),
+            Some("- [ ] a\r\n- [x] b\r\n")
+        );
+        assert_eq!(task_toggle("no tasks here\n", 0), None);
+    }
+
+    /// Only real tasks count: not a look-alike in a fence, not one in
+    /// the metadata block, and nested or quoted ones in document order.
+    #[test]
+    fn task_toggle_counts_what_the_parser_calls_a_task() {
+        let src = "---\n- [ ] meta\n---\n```\n- [ ] code\n```\n- [ ] a\n  - [x] nested\n> - [ ] quoted\n1. [ ] ordered\n";
+        let at = |needle: &str| src.find(needle).unwrap() + 1;
+        assert_eq!(task_toggle(src, 0), Some((at("[ ] a"), "x")).map(|(s, w)| (s..s + 1, w)));
+        assert_eq!(task_toggle(src, 1), Some((at("[x] nested")..at("[x] nested") + 1, " ")));
+        assert_eq!(task_toggle(src, 2), Some((at("[ ] quoted")..at("[ ] quoted") + 1, "x")));
+        assert_eq!(task_toggle(src, 3), Some((at("[ ] ordered")..at("[ ] ordered") + 1, "x")));
+        assert_eq!(task_toggle(src, 4), None);
+    }
+
+    /// The reading view numbers each task it draws from `ListItem::task`,
+    /// and the toggle finds the Nth task on its own. They must agree, or
+    /// a click flips a different box than the one under the pointer.
+    #[test]
+    fn parsed_task_indices_match_the_toggle_targets() {
+        let src = "---\na: 1\n---\n- [ ] a\n  - [x] b\n    - plain\n    - [ ] c\n\n> - [X] d\n\n- e\n- [ ] f\n";
+        fn walk(blocks: &[Block], out: &mut Vec<(Option<usize>, Option<bool>)>) {
+            for b in blocks {
+                match b {
+                    Block::List { items, .. } => {
+                        for item in items {
+                            out.push((item.task, item.checked));
+                            walk(&item.blocks, out);
+                        }
+                    }
+                    Block::Quote(inner) => walk(inner, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut seen = Vec::new();
+        walk(&parse(src).blocks, &mut seen);
+        let tasks: Vec<_> = seen.iter().filter(|(t, _)| t.is_some()).collect();
+        assert_eq!(tasks.len(), 5, "{seen:?}");
+        for (i, (task, checked)) in tasks.iter().enumerate() {
+            assert_eq!(*task, Some(i), "numbered in the order they are drawn");
+            let (range, with) = task_toggle(src, i).expect("the toggle finds it");
+            let state = &src[range];
+            assert_eq!(*checked == Some(true), state != " ", "task {i} is the same box");
+            assert_eq!(with == " ", *checked == Some(true));
+        }
+        assert!(seen.iter().all(|(t, c)| t.is_some() == c.is_some()), "plain items have no index");
     }
 
     #[test]

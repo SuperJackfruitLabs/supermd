@@ -1091,6 +1091,22 @@ impl Editor {
         }
     }
 
+    /// Apply an edit that came from outside the editor (a checkbox
+    /// clicked in the reading view) and save it now, through the one
+    /// save path. One undo step; the selection stays where it was.
+    pub fn replace_and_save(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        let saved = self.core.selection;
+        self.core.break_undo_group();
+        self.core.replace_range(range, text, Instant::now());
+        self.core.break_undo_group();
+        let len = self.core.buffer.len_bytes();
+        self.core.selection = saved;
+        self.core.selection.anchor = self.core.selection.anchor.min(len);
+        self.core.selection.head = self.core.selection.head.min(len);
+        self.after_edit(cx);
+        self.flush(cx);
+    }
+
     pub fn flush(&mut self, cx: &mut Context<Self>) {
         self.maybe_format_before_save(cx);
         self.run_save_hooks(cx);

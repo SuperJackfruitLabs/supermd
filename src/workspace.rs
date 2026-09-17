@@ -835,15 +835,49 @@ fn make_reader(
         reader.set_knowledge(knowledge);
         reader
     });
-    cx.subscribe(&reader, |this, _reader, event, cx| {
-        let crate::reader::ReaderEvent::Follow(dest) = event;
-        this.follow_from_reader(dest, cx);
+    cx.subscribe(&reader, |this, reader, event, cx| match event {
+        crate::reader::ReaderEvent::Follow(dest) => this.follow_from_reader(dest, cx),
+        crate::reader::ReaderEvent::EditSource { before, range, replacement } => {
+            this.apply_reader_edit(&reader, before, range.clone(), replacement, cx)
+        }
     })
     .detach();
     reader
 }
 
 impl Workspace {
+    /// A checkbox was clicked in a rendered preview. The editor behind
+    /// that preview owns the file, so the edit goes into its buffer and
+    /// out through its save -- the file on disk and the buffer never
+    /// disagree, and one undo takes it back. If the buffer is no longer
+    /// the text the preview showed, the preview's task numbering may
+    /// not match the file's: nothing is written, and the preview
+    /// re-renders from the buffer instead.
+    fn apply_reader_edit(
+        &mut self,
+        reader: &Entity<Reader>,
+        before: &str,
+        range: std::ops::Range<usize>,
+        replacement: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.tabs.iter().find_map(|tab| match tab {
+            Tab::Editor { editor, view: EditorView::Preview(r) } if r == reader => {
+                Some(editor.clone())
+            }
+            _ => None,
+        });
+        let Some(editor) = editor else {
+            return;
+        };
+        let current = editor.read(cx).text();
+        if current == before {
+            editor.update(cx, |editor, cx| editor.replace_and_save(range, replacement, cx));
+        } else {
+            reader.update(cx, |reader, cx| reader.set_source(current, cx));
+        }
+    }
+
     /// A link was clicked in a rendered preview. Same rules as the
     /// editor: only http(s) leaves the app, an anchor stays put, and a
     /// path is resolved inside the workspace or ignored.
@@ -1797,10 +1831,11 @@ impl Workspace {
                 // doc comments into paragraphs, reflowed the source, and
                 // made every 4-space-indented block an indented code
                 // block.
-                let source = if matches!(
+                let is_markdown = matches!(
                     path.extension().and_then(|e| e.to_str()),
                     Some("md" | "markdown" | "mdown" | "mdx")
-                ) {
+                );
+                let source = if is_markdown {
                     text
                 } else {
                     let lang = crate::reader::language_for_path(&path);
@@ -1808,6 +1843,11 @@ impl Workspace {
                 };
                 let k = self.knowledge.clone();
                 let reader = make_reader(Some(path.clone()), title, &source, &langs, &k, cx);
+                if is_markdown {
+                    // The preview is the file's own text, so a checkbox
+                    // click can be written back through this editor.
+                    reader.update(cx, |reader, _| reader.allow_task_toggles());
+                }
                 if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(tab_ix) {
                     *view = EditorView::Preview(reader);
                 }
@@ -9197,6 +9237,92 @@ pub(crate) mod tests {
             assert_eq!(lang.as_deref(), Some("rust"), "highlighted as Rust");
             assert!(code.contains("#[derive(Debug)]"), "the source survives verbatim");
             assert!(code.contains("    fn indented() {}"), "indentation preserved");
+        });
+    }
+
+    fn active_preview(ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> Entity<Reader> {
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("active tab is not a preview")
+            };
+            reader.clone()
+        })
+    }
+
+    /// The editor has toggled checkboxes since the marker carried a
+    /// toggle payload. The reading view drew the same glyph and did
+    /// nothing with it. A toggle there is written through the editor
+    /// that owns the file -- its buffer, its save -- and changes one
+    /// byte on disk: not the brackets, not the CRLF line endings.
+    #[gpui::test]
+    fn clicking_a_checkbox_in_the_reading_view_toggles_the_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\r\n- [x] two\r\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        let reader = active_preview(&ws, cx);
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "- [x] one\r\n- [x] two\r\n",
+            "the file is the truth"
+        );
+        let editor = active_editor(&ws, cx);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "- [x] one\r\n- [x] two\r\n", "the buffer agrees with the disk");
+            assert!(!ed.save.is_dirty(), "already saved, nothing pending");
+        });
+
+        // Back in the editor, one undo takes the click back.
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        cx.dispatch_action(crate::editor::Undo);
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).text(), "- [ ] one\r\n- [x] two\r\n", "one undo step")
+        });
+    }
+
+    /// A preview can outlive the text it was built from. If the buffer
+    /// moved on, the Nth task in the preview may not be the Nth task in
+    /// the file: nothing is written, and the preview re-renders from the
+    /// buffer so the next click lands on the right box.
+    #[gpui::test]
+    fn a_stale_preview_writes_nothing_and_catches_up(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        let reader = active_preview(&ws, cx);
+        let editor = active_editor(&ws, cx);
+        // The buffer changes under the open preview (a reload, a plugin).
+        editor.update(cx, |ed, cx| ed.replace_and_save(0..0, "- [ ] zero\n", cx));
+        cx.run_until_parked();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), on_disk, "nothing written");
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).text(), "- [ ] zero\n- [ ] one\n");
+            let doc = &reader.read(app).document;
+            let crate::markdown::Block::List { items, .. } = &doc.blocks[0] else {
+                panic!("{:?}", doc.blocks)
+            };
+            assert_eq!(items.len(), 2, "the preview re-rendered from the buffer");
+            assert!(items.iter().all(|i| i.checked == Some(false)));
         });
     }
 

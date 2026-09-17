@@ -88,6 +88,11 @@ fn runs_for(inline: &InlineText, base: BaseStyle, t: &Theme) -> Vec<TextRun> {
 /// Called when a link is clicked in the rendered view.
 pub type Follow = std::rc::Rc<dyn Fn(&str, &mut gpui::Window, &mut gpui::App)>;
 
+/// Called with a task's number (`ListItem::task`) when its checkbox is
+/// clicked in the rendered view. `None` where the rendered text is not
+/// a file that could take the edit, and the checkbox stays decoration.
+pub type ToggleTask = std::rc::Rc<dyn Fn(usize, &mut gpui::Window, &mut gpui::App)>;
+
 /// Builds a hover preview for a link destination in the rendered view.
 /// Returns None when there is nothing worth showing.
 pub type Describe =
@@ -362,8 +367,7 @@ fn quote(
     t: &Theme,
     cx: &mut gpui::App,
     path: &str,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
+    links: Links,
 ) -> AnyElement {
     div()
         .flex()
@@ -382,7 +386,7 @@ fn quote(
                     blocks
                         .iter()
                         .enumerate()
-                        .map(|(i, b)| block(b, t, cx, &format!("{path}q{i}"), follow, describe))
+                        .map(|(i, b)| block(b, t, cx, &format!("{path}q{i}"), links))
                         .collect::<Vec<_>>(),
                 ),
         )
@@ -395,16 +399,32 @@ fn list(
     t: &Theme,
     cx: &mut gpui::App,
     path: &str,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
+    links: Links,
 ) -> AnyElement {
     let rows = items.iter().enumerate().map(|(index, item)| {
         let marker: AnyElement = match (item.checked, start) {
-            (Some(done), _) => div()
-                .text_size(px(t.body_size))
-                .text_color(if done { t.accent } else { t.fg_muted })
-                .child(if done { "✓" } else { "○" })
-                .into_any_element(),
+            (Some(done), _) => {
+                let glyph = div()
+                    .text_size(px(t.body_size))
+                    .text_color(if done { t.accent } else { t.fg_muted })
+                    .child(if done { "✓" } else { "○" });
+                // The same glyph the editor toggles on click. The task's
+                // document-wide number is its id and its payload, so the
+                // element stays unique across nested lists and the edit
+                // lands on the box that was drawn.
+                match (links.toggle, item.task) {
+                    (Some(toggle), Some(task)) => {
+                        let toggle = toggle.clone();
+                        glyph
+                            .id(gpui::ElementId::Name(format!("task-{task}").into()))
+                            .debug_selector(move || format!("task-{task}"))
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| toggle(task, window, cx))
+                            .into_any_element()
+                    }
+                    _ => glyph.into_any_element(),
+                }
+            }
             (None, Some(first)) => div()
                 .text_size(px(t.body_size))
                 .text_color(t.fg_muted)
@@ -439,7 +459,7 @@ fn list(
                         item.blocks
                             .iter()
                             .enumerate()
-                            .map(|(i, b)| block(b, t, cx, &format!("{path}l{index}b{i}"), follow, describe))
+                            .map(|(i, b)| block(b, t, cx, &format!("{path}l{index}b{i}"), links))
                             .collect::<Vec<_>>(),
                     ),
             )
@@ -475,9 +495,9 @@ fn table(
     rows: &[Vec<InlineText>],
     t: &Theme,
     path: &str,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
+    links: Links,
 ) -> AnyElement {
+    let Links { follow, describe, .. } = links;
     let cell_base = BaseStyle { weight: FontWeight::NORMAL, color: t.fg };
     let head_base = BaseStyle { weight: FontWeight::SEMIBOLD, color: t.fg_strong };
     let borders = table_borders(t);
@@ -606,16 +626,18 @@ fn literal_block(text: &str, s: LiteralBlockStyle, selector: &'static str) -> An
         .into_any_element()
 }
 
+/// The rendered view's interactive handlers, passed down together.
+#[derive(Clone, Copy, Default)]
+pub struct Links<'a> {
+    pub follow: Option<&'a Follow>,
+    pub describe: Option<&'a Describe>,
+    pub toggle: Option<&'a ToggleTask>,
+}
+
 /// `path` uniquely identifies a block within the document, including
 /// nested ones, so every `InteractiveText` gets a stable distinct id.
-fn block(
-    b: &Block,
-    t: &Theme,
-    cx: &mut gpui::App,
-    path: &str,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
-) -> AnyElement {
+fn block(b: &Block, t: &Theme, cx: &mut gpui::App, path: &str, links: Links) -> AnyElement {
+    let Links { follow, describe, .. } = links;
     match b {
         Block::Paragraph(inline) => {
             paragraph(inline, t, gpui::SharedString::from(format!("p-{path}")), follow, describe)
@@ -629,9 +651,9 @@ fn block(
             describe,
         ),
         Block::Code { lang, code, spans } => code_block(lang.as_deref(), code, spans, t, cx),
-        Block::Quote(blocks) => quote(blocks, t, cx, path, follow, describe),
-        Block::List { start, items } => list(*start, items, t, cx, path, follow, describe),
-        Block::Table { head, rows } => table(head, rows, t, path, follow, describe),
+        Block::Quote(blocks) => quote(blocks, t, cx, path, links),
+        Block::List { start, items } => list(*start, items, t, cx, path, links),
+        Block::Table { head, rows } => table(head, rows, t, path, links),
         Block::Rule => rule(t),
         Block::FrontMatter(text) => literal_block(text, frontmatter_style(t), "frontmatter"),
         Block::Html(text) => literal_block(text, html_style(t), "html-block"),
@@ -644,8 +666,7 @@ pub fn list_item(
     ix: usize,
     t: &Theme,
     cx: &mut gpui::App,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
+    links: Links,
 ) -> AnyElement {
     let Some(b) = doc.blocks.get(ix) else {
         return div().into_any_element();
@@ -664,7 +685,7 @@ pub fn list_item(
                 .px(px(48.))
                 .when(first, |d| d.pt(px(40.)))
                 .pb(if last { px(96.) } else { px(12.) })
-                .child(block(b, t, cx, &ix.to_string(), follow, describe)),
+                .child(block(b, t, cx, &ix.to_string(), links)),
         )
         .into_any_element()
 }
@@ -1079,10 +1100,10 @@ no language
             // First, middle, and last positions all build; the loop walks every
             // branch of `block` (headings, code, quote, lists, table, rule).
             for ix in 0..doc.blocks.len() {
-                let _ = list_item(&doc, ix, &t, cx, None, None);
+                let _ = list_item(&doc, ix, &t, cx, Links::default());
             }
             // Out-of-range index degrades to an empty element instead of panicking.
-            let _ = list_item(&doc, doc.blocks.len(), &t, cx, None, None);
+            let _ = list_item(&doc, doc.blocks.len(), &t, cx, Links::default());
         });
     }
 
@@ -1099,7 +1120,7 @@ no language
 
         // First render: cache miss → pending placeholder, render job spawned.
         cx.update(|cx| {
-            let _ = list_item(&doc, 0, &t, cx, None, None);
+            let _ = list_item(&doc, 0, &t, cx, Links::default());
             assert!(matches!(
                 crate::diagram::diagram_state(&code, 664.0, cx),
                 crate::diagram::DiagramState::Pending
@@ -1112,7 +1133,7 @@ no language
                 crate::diagram::diagram_state(&code, 664.0, cx),
                 crate::diagram::DiagramState::Ready { .. }
             ));
-            let _ = list_item(&doc, 0, &t, cx, None, None);
+            let _ = list_item(&doc, 0, &t, cx, Links::default());
         });
     }
 
@@ -1127,14 +1148,14 @@ no language
         let code = code.clone();
 
         cx.update(|cx| {
-            let _ = list_item(&doc, 0, &t, cx, None, None); // spawns the render, shows pending
+            let _ = list_item(&doc, 0, &t, cx, Links::default()); // spawns the render, shows pending
         });
         cx.run_until_parked();
         cx.update(|cx| {
             let state = crate::diagram::diagram_state(&code, 664.0, cx);
             let crate::diagram::DiagramState::Failed(msg) = state else { panic!("expected failure") };
             assert!(!msg.is_empty());
-            let _ = list_item(&doc, 0, &t, cx, None, None); // error strip + plain code branch
+            let _ = list_item(&doc, 0, &t, cx, Links::default()); // error strip + plain code branch
         });
     }
 
