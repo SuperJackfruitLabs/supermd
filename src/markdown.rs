@@ -320,17 +320,20 @@ enum Frame {
 /// - It closes on a line that is `---` or `...`; the range runs through
 ///   that line's newline (or to the end of the file).
 ///
-/// `\r\n` endings are accepted throughout and covered by the range.
+/// `\r\n` endings are accepted throughout and covered by the range,
+/// as is a leading UTF-8 byte-order mark.
 pub fn frontmatter_range(src: &str) -> Option<Range<usize>> {
     fn delimiter(line: &str) -> &str {
         line.trim_end_matches(['\r', '\n']).trim_end_matches([' ', '\t'])
     }
-    let mut lines = src.split_inclusive('\n');
+    // A byte-order mark is not content; the range covers it.
+    let bom = if src.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let mut lines = src[bom..].split_inclusive('\n');
     let first = lines.next()?;
     if delimiter(first) != "---" || !first.ends_with('\n') {
         return None;
     }
-    let mut offset = first.len();
+    let mut offset = bom + first.len();
     let mut inner_lines = 0usize;
     for line in lines {
         let d = delimiter(line);
@@ -1114,6 +1117,15 @@ mod tests {
         assert!(frontmatter_range("---\n---\n").is_none(), "two rules, not an empty block");
         assert!(frontmatter_range("----\na: 1\n---\n").is_none(), "four hyphens is a rule");
         assert!(frontmatter_range("   ---\na: 1\n---\n").is_none(), "indented");
+        // A byte-order mark before the opening line is not content; the
+        // range covers it so the body still starts after the block.
+        assert_eq!(frontmatter_range("\u{feff}---\na: 1\n---\nbody\n"), Some(0..16));
+        let Some(Block::FrontMatter(inner)) =
+            parse("\u{feff}---\na: 1\n---\n# H\n").blocks.first().cloned()
+        else {
+            panic!("BOM frontmatter")
+        };
+        assert_eq!(inner, "a: 1");
     }
 
     /// Windows line endings and trailing spaces on a delimiter are the

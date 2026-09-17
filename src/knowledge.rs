@@ -109,8 +109,9 @@ pub fn heading_slug(heading: &str) -> String {
 pub fn heading_offset(text: &str, anchor: &str) -> Option<usize> {
     let wanted = anchor.to_ascii_lowercase();
     let mut in_fence = false;
-    let mut offset = 0usize;
-    for line in text.split_inclusive('\n') {
+    // A `# comment` in the frontmatter is YAML, not a heading.
+    let mut offset = crate::markdown::body_start(text);
+    for line in text[offset..].split_inclusive('\n') {
         let trimmed = line.trim();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
@@ -158,8 +159,18 @@ fn scan(text: &str, notes_only: bool) -> Vec<RawLink> {
     let mut out = Vec::new();
     let mut in_fence = false;
     let mut line_start = 0usize;
+    // Frontmatter lines are YAML: their links count, but a ``` among
+    // them is text, not a fence -- toggling on it hid every link in the
+    // body while the editor, which skips the metadata, drew them. Where
+    // the metadata ends is `markdown::body_start`, the one rule.
+    let body = crate::markdown::body_start(text);
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_end();
+        if line_start < body {
+            scan_line(trimmed, line_start, notes_only, &mut out);
+            line_start += line.len();
+            continue;
+        }
         if trimmed.trim_start().starts_with("```") {
             in_fence = !in_fence;
             line_start += line.len();
@@ -1317,6 +1328,28 @@ mod tests {
     fn heading_offset_ignores_fenced_code_and_tag_lines() {
         assert_eq!(heading_offset("```\n# Fenced\n```\n", "fenced"), None);
         assert_eq!(heading_offset("#guide #plugins\n", "guide-plugins"), None);
+    }
+
+    /// A fence line inside frontmatter is YAML text, not a code fence.
+    /// Toggling on it put the whole body "inside a fence": the editor
+    /// styled `[x](other.md)` as a link (its own pass skips the
+    /// metadata) while the index found nothing, so the link could not
+    /// be followed and had no backlink.
+    #[test]
+    fn a_fence_line_in_frontmatter_does_not_hide_the_body_links() {
+        let text = "---\nsnippet: |\n```\n---\nsee [x](other.md) and [[Wiki]]\n";
+        let targets: Vec<_> = extract_links(text).into_iter().map(|l| l.target).collect();
+        assert_eq!(targets, ["other.md", "Wiki"]);
+        let hit = Index::link_at(text, text.find("[x]").unwrap() + 1).expect("followable");
+        assert_eq!(hit.target, "other.md");
+        // The metadata's own links still count -- only the fence rule
+        // stops there.
+        let text = "---\nrelated: \"[[Plan]]\"\n---\nbody\n";
+        let targets: Vec<_> = extract_links(text).into_iter().map(|l| l.target).collect();
+        assert_eq!(targets, ["Plan"]);
+        // And a YAML comment is not a heading an anchor can land on.
+        let doc = "---\n# owner\n---\n# Owner\n";
+        assert_eq!(heading_offset(doc, "owner"), doc.find("# Owner"));
     }
 
     #[test]
