@@ -3051,6 +3051,24 @@ impl Editor {
         (text, attrs)
     }
 
+    /// The colour of the divider drawn over a hidden thematic break.
+    /// In diff mode a change covering the break is painted into it:
+    /// the per-character wash lands on hyphens that are not drawn.
+    fn rule_color(&self, ix: usize, t: &Theme) -> Hsla {
+        let (_, plain) = crate::view::rule_style(t);
+        let Some(d) = &self.diff else {
+            return plain;
+        };
+        let range = self.view_buffer().line_range(ix);
+        d.changes
+            .iter()
+            .find(|c| c.range.start < range.end && range.start < c.range.end)
+            .map_or(plain, |c| match c.kind {
+                crate::diff::ChangeKind::Added => t.diff_added_fg,
+                crate::diff::ChangeKind::Deleted => t.diff_deleted_fg,
+            })
+    }
+
     /// Display text, styled runs, and the source↔display map for a line.
     fn display_for_line(
         &self,
@@ -4382,13 +4400,14 @@ impl Render for Editor {
                                 is_code,
                                 code_mode,
                                 line_count,
-                                is_rule,
+                                rule_color,
                             ) = {
                                 let editor = editor_entity.read(cx);
                                 let (size_f, _, _, mult) = editor.line_typography(line_ix, &t);
                                 let (text, runs, dl) = editor.display_for_line(line_ix, &t);
-                                let is_rule = !editor.is_code_mode()
-                                    && display::draws_rule(&dl, editor.view_spans());
+                                let rule_color = (!editor.is_code_mode()
+                                    && display::draws_rule(&dl, editor.view_spans()))
+                                .then(|| editor.rule_color(line_ix, &t));
                                 (
                                     editor.view_buffer().line_range(line_ix),
                                     text,
@@ -4402,7 +4421,7 @@ impl Render for Editor {
                                     ),
                                     editor.is_code_mode(),
                                     editor.view_buffer().line_count(),
-                                    is_rule,
+                                    rule_color,
                                 )
                             };
                             let mouse_editor = editor_entity.clone();
@@ -4483,15 +4502,14 @@ impl Render for Editor {
                                             .when(is_code, |d| d.bg(t.code_bg))
                                             .on_mouse_down(MouseButton::Left, on_down)
                                             .on_mouse_down(MouseButton::Right, on_right)
-                                            .child(if !is_rule {
-                                                line_el.into_any_element()
-                                            } else {
+                                            .child(if let Some(color) = rule_color {
                                                 // A hidden thematic break: the
                                                 // line keeps its height (and
                                                 // its hit-testing) and a divider
                                                 // is drawn across its middle,
-                                                // styled as the reading view's.
-                                                let (thick, color) = crate::view::rule_style(&t);
+                                                // styled as the reading view's
+                                                // (or in its diff colour).
+                                                let (thick, _) = crate::view::rule_style(&t);
                                                 div()
                                                     .relative()
                                                     .child(line_el)
@@ -4508,6 +4526,8 @@ impl Render for Editor {
                                                             .bg(color),
                                                     )
                                                     .into_any_element()
+                                            } else {
+                                                line_el.into_any_element()
                                             }),
                                     )
                                     .into_any_element()
@@ -7860,6 +7880,45 @@ mod tests {
         editor.update_in(cx, |ed, _, cx| ed.exit_diff(cx));
         cx.run_until_parked();
         cx.update(|_, app| assert!(!editor.read(app).diff_active()));
+    }
+
+    /// Diff mode hides every marker, so a changed `---` shows only its
+    /// divider -- and the diff wash is painted per character, on
+    /// characters that are no longer drawn. The divider itself has to
+    /// carry the change, or a section break added or removed is
+    /// invisible to the person reviewing it.
+    #[gpui::test]
+    fn a_changed_rule_carries_its_diff_colour_in_the_diff_view(cx: &mut TestAppContext) {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        let file = repo.path().join("note.md");
+        std::fs::write(&file, "a\n\n---\n\nb\n\nkeep\n\n___\n\nc\n").unwrap();
+        commit_all(repo.path());
+        std::fs::write(&file, "a\n\nb\n\nkeep\n\n___\n\nc\n\n***\n\nd\n").unwrap();
+
+        let (_bk, editor, cx) = open_editor_path(cx, &file);
+        let t = crate::theme::Theme::dark();
+        let (_, plain) = crate::view::rule_style(&t);
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let merged = ed.view_buffer().text();
+            let line_of = |needle: &str| merged.split('\n').position(|l| l == needle).unwrap();
+            assert_eq!(ed.rule_color(line_of("---"), &t), t.diff_deleted_fg, "a removed break");
+            assert_eq!(ed.rule_color(line_of("***"), &t), t.diff_added_fg, "an added break");
+            assert_eq!(ed.rule_color(line_of("___"), &t), plain, "an unchanged break");
+        });
+        editor.update_in(cx, |ed, _, cx| ed.exit_diff(cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let line = ed.core.buffer.text().split('\n').position(|l| l == "***").unwrap();
+            assert_eq!(ed.rule_color(line, &t), plain, "outside diff mode, the plain rule");
+        });
     }
 
     #[gpui::test]

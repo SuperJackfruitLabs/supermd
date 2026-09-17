@@ -1174,6 +1174,10 @@ attribute = "#d19a66"
                 // editor's divider over a hidden `---`, both on the page.
                 // The same ink outlines a table there.
                 ("a thematic break, and a table's outline", t.border, t.page_bg),
+                // `Editor::rule_color`: in the diff view a changed break's
+                // divider carries the change, since its hyphens are hidden.
+                ("an added thematic break in the diff view", t.diff_added_fg, t.page_bg),
+                ("a removed thematic break in the diff view", t.diff_deleted_fg, t.page_bg),
                 ("a hovered knowledge-panel row or tag, a banner button", t.hover_bg, t.panel_bg),
                 ("a hovered finder / palette / menu / popup row", t.hover_bg, t.floating_bg),
                 ("a selected finder / palette / picker / popup row", t.selected_bg, t.floating_bg),
