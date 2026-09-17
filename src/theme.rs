@@ -1155,6 +1155,10 @@ attribute = "#d19a66"
             for (what, ink, surface) in [
                 ("a hovered table row, and a hovered tab", t.hover_bg, t.page_bg),
                 ("a table header", t.panel_bg, t.page_bg),
+                // `view::rule_style`: the reading view's break and the
+                // editor's divider over a hidden `---`, both on the page.
+                // The same ink outlines a table there.
+                ("a thematic break, and a table's outline", t.border, t.page_bg),
                 ("a hovered knowledge-panel row or tag, a banner button", t.hover_bg, t.panel_bg),
                 ("a hovered finder / palette / menu / popup row", t.hover_bg, t.floating_bg),
                 ("a selected finder / palette / picker / popup row", t.selected_bg, t.floating_bg),

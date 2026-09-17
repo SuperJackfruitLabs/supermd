@@ -102,7 +102,14 @@ pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
             Event::TaskListMarker(done) => {
                 spans.push(StyleSpan { range, kind: StyleKind::TaskMarker(done) })
             }
-            Event::Rule => spans.push(StyleSpan { range, kind: StyleKind::Rule }),
+            Event::Rule => {
+                // The parser's range runs through the newline; left
+                // untrimmed, a caret at the start of the next line
+                // would count as touching the break and reveal it.
+                let mut r = range;
+                trim_trailing_newline(source, &mut r);
+                spans.push(StyleSpan { range: r, kind: StyleKind::Rule })
+            }
             _ => {}
         }
     }
@@ -489,7 +496,10 @@ mod tests {
     #[test]
     fn rule_span() {
         let src = "a\n\n---\n\nb\n";
-        assert_eq!(spans_of_kind(src, |k| *k == StyleKind::Rule), vec![3..7]);
+        // The break ends at its last hyphen, not after its newline: the
+        // span is the thing the caret reveals, and the next line's start
+        // is not touching it.
+        assert_eq!(spans_of_kind(src, |k| *k == StyleKind::Rule), vec![3..6]);
     }
 
     use crate::highlight::Languages;

@@ -248,7 +248,17 @@ fn collect_directives(
                     ));
                 }
             }
-            _ => {}
+            StyleKind::Rule => {
+                // The whole break is the marker. Hide it; the shell
+                // draws a divider in its place (`draws_rule`), and the
+                // reveal rule brings the source back on caret contact.
+                if start_on_line && end_on_line {
+                    out.push((span.range.clone(), Action::Hide(Bias::Right)));
+                }
+            }
+            // Listed rather than wildcarded: a new span kind must be
+            // decided here, not silently fall through to "shown as is".
+            StyleKind::FenceContent | StyleKind::FenceDelimiter | StyleKind::Syntax(_) => {}
         }
     }
 
@@ -404,6 +414,22 @@ pub fn display_line(
     }
 
     DisplayLine { text, segs }
+}
+
+/// Whether the shell should draw a divider across this line: some
+/// source on it was hidden *because it is a thematic break*. Read off
+/// the display result rather than re-deriving the reveal rule, so the
+/// divider and the hidden hyphens cannot disagree -- revealed source
+/// never gets a rule painted through it.
+pub fn draws_rule(dl: &DisplayLine, spans: &[StyleSpan]) -> bool {
+    dl.segs.iter().any(|seg| {
+        matches!(seg.kind, SegKind::Hidden(_))
+            && spans.iter().any(|s| {
+                s.kind == StyleKind::Rule
+                    && s.range.start <= seg.src.start
+                    && seg.src.end <= s.range.end
+            })
+    })
 }
 
 pub fn src_to_disp(dl: &DisplayLine, src: usize) -> usize {
@@ -888,6 +914,76 @@ mod tests {
         assert_eq!(disp_to_src(&sparse, 2), 2);
         let empty = DisplayLine { text: String::new(), segs: Vec::new() };
         assert_eq!(disp_to_src(&empty, 0), 0);
+    }
+
+    /// Display one source line the way the shell does: real spans from
+    /// the real span pass, the line found by its source offset.
+    fn shown(src: &str, line_ix: usize, sel: Range<usize>) -> (DisplayLine, Vec<StyleSpan>) {
+        let spans = crate::editor::spans::markdown_spans(src);
+        let start: usize = src.split('\n').take(line_ix).map(|l| l.len() + 1).sum();
+        let line = src.split('\n').nth(line_ix).unwrap();
+        (display_line(line, start, &spans, sel), spans)
+    }
+
+    /// A thematic break is a line, not three hyphens. The source comes
+    /// back the moment the caret touches it, like every other marker.
+    #[test]
+    fn a_thematic_break_hides_its_source_until_touched() {
+        let src = "before\n\n---\n\nafter\n";
+        let (away, spans) = shown(src, 2, 0..0);
+        assert_eq!(away.text, "", "the hyphens are drawn as a rule, not spelled out");
+        assert!(draws_rule(&away, &spans), "and the shell is told to draw one");
+
+        for caret in [8, 9, 11] {
+            let (touching, spans) = shown(src, 2, caret..caret);
+            assert_eq!(touching.text, "---", "caret at {caret} reveals the source");
+            assert!(!draws_rule(&touching, &spans), "no rule over revealed source");
+        }
+    }
+
+    /// The caret on the blank line *after* a rule is not touching it.
+    /// The parser's range for a break runs through its newline, and an
+    /// untrimmed span would count the next line's start as contact.
+    #[test]
+    fn a_caret_on_the_following_line_does_not_reveal_a_rule() {
+        let src = "before\n\n---\n\nafter\n";
+        let (dl, spans) = shown(src, 2, 12..12);
+        assert_eq!(dl.text, "");
+        assert!(draws_rule(&dl, &spans));
+    }
+
+    /// Every spelling CommonMark accepts is a rule, and each hides whole.
+    #[test]
+    fn every_thematic_break_spelling_draws() {
+        for spelling in ["***", "___", "- - -", "  ----------"] {
+            let src = format!("a\n\n{spelling}\n\nb\n");
+            let (dl, spans) = shown(&src, 2, 0..0);
+            // Up to three spaces of indent are not part of the break
+            // and stay; the hyphens, stars or underscores all go.
+            assert_eq!(dl.text.trim(), "", "{spelling:?} hides");
+            assert!(draws_rule(&dl, &spans), "{spelling:?} draws");
+        }
+    }
+
+    /// `---` directly under a paragraph line is a setext heading
+    /// underline, not a break. It must stay a heading's marker -- the
+    /// distinction the frontmatter task also depends on.
+    #[test]
+    fn a_setext_underline_is_not_a_rule() {
+        let src = "Title\n---\n\nbody\n";
+        let (dl, spans) = shown(src, 1, 100..100);
+        assert_eq!(dl.text, "---");
+        assert!(!draws_rule(&dl, &spans));
+    }
+
+    /// A line with no rule span never asks for a divider, even when
+    /// something else on it hid (a heading's hashes).
+    #[test]
+    fn only_a_hidden_rule_asks_for_a_divider() {
+        let src = "## Title\n";
+        let (dl, spans) = shown(src, 0, 100..100);
+        assert_eq!(dl.text, "Title");
+        assert!(!draws_rule(&dl, &spans));
     }
 
     #[test]

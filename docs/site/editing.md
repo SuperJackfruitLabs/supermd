@@ -9,6 +9,7 @@ Click inside a **bold phrase** and the `**` markers appear around it; click away
 - Headings show their `#` marks while your cursor is on the line.
 - Links display as their text; touch one and the `[text](url)` form opens for editing. Links between notes — `[[wiki links]]` included — get completion, backlinks, and a graph: see [Links, Tags & Graph](knowledge.md).
 - Blockquotes, lists, and inline code all reveal their markers on contact.
+- A horizontal rule (`---`, `***` or `___`) draws as a line; put your cursor on it and the characters come back.
 
 You always edit real Markdown — SuperMD never rewrites your file behind your back. What lands on disk is exactly the plain CommonMark you typed.
 

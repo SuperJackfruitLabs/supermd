@@ -534,8 +534,17 @@ fn table(
         .into_any_element()
 }
 
+/// How a thematic break is drawn: thickness in px and colour. One rule
+/// shared by the reading view (`rule`, below) and the editor, which
+/// draws the same divider over a hidden `---` line, so the two views
+/// cannot drift apart.
+pub fn rule_style(t: &Theme) -> (f32, Hsla) {
+    (1., t.border)
+}
+
 fn rule(t: &Theme) -> AnyElement {
-    div().my_2().h(px(1.)).w_full().bg(t.border).into_any_element()
+    let (thickness, color) = rule_style(t);
+    div().my_2().h(px(thickness)).w_full().bg(color).into_any_element()
 }
 
 /// `path` uniquely identifies a block within the document, including

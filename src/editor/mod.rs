@@ -4356,10 +4356,13 @@ impl Render for Editor {
                                 is_code,
                                 code_mode,
                                 line_count,
+                                is_rule,
                             ) = {
                                 let editor = editor_entity.read(cx);
                                 let (size_f, _, _, mult) = editor.line_typography(line_ix, &t);
                                 let (text, runs, dl) = editor.display_for_line(line_ix, &t);
+                                let is_rule = !editor.is_code_mode()
+                                    && display::draws_rule(&dl, editor.view_spans());
                                 (
                                     editor.view_buffer().line_range(line_ix),
                                     text,
@@ -4373,6 +4376,7 @@ impl Render for Editor {
                                     ),
                                     editor.is_code_mode(),
                                     editor.view_buffer().line_count(),
+                                    is_rule,
                                 )
                             };
                             let mouse_editor = editor_entity.clone();
@@ -4453,7 +4457,32 @@ impl Render for Editor {
                                             .when(is_code, |d| d.bg(t.code_bg))
                                             .on_mouse_down(MouseButton::Left, on_down)
                                             .on_mouse_down(MouseButton::Right, on_right)
-                                            .child(line_el),
+                                            .child(if !is_rule {
+                                                line_el.into_any_element()
+                                            } else {
+                                                // A hidden thematic break: the
+                                                // line keeps its height (and
+                                                // its hit-testing) and a divider
+                                                // is drawn across its middle,
+                                                // styled as the reading view's.
+                                                let (thick, color) = crate::view::rule_style(&t);
+                                                div()
+                                                    .relative()
+                                                    .child(line_el)
+                                                    .child(
+                                                        div()
+                                                            .debug_selector(move || {
+                                                                format!("rule-line-{line_ix}")
+                                                            })
+                                                            .absolute()
+                                                            .left_0()
+                                                            .right_0()
+                                                            .top(line_height_px / 2. - px(thick / 2.))
+                                                            .h(px(thick))
+                                                            .bg(color),
+                                                    )
+                                                    .into_any_element()
+                                            }),
                                     )
                                     .into_any_element()
                             }
@@ -7187,6 +7216,62 @@ mod tests {
         cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(click, MouseButton::Left, Modifiers::none());
         assert_eq!(buffer_text(&editor, cx), "- [x] milk\n- [ ] eggs\n");
+    }
+
+    /// `---` hidden and nothing drawn is a blank line, which is worse
+    /// than the faded hyphens it replaced. The divider is the other half
+    /// of hiding the source: present while the caret is away, centred
+    /// on the line and as thick as the reading view's rule, and gone the
+    /// moment the caret lands on the line and the hyphens come back.
+    #[gpui::test]
+    fn a_thematic_break_draws_a_divider_until_the_caret_lands(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "rule.md", "before\n\n---\n\nafter\n");
+        cx.dispatch_action(DocEnd);
+        cx.run_until_parked();
+
+        let rule = cx.debug_bounds("rule-line-2").expect("a divider is drawn on the break");
+        let (origin, line_height) = cx.update(|_, app| {
+            let entry = editor.read(app).layout_cache.get(&2).expect("rule line painted");
+            (entry.origin, entry.line_height)
+        });
+        let (thick, _) = crate::view::rule_style(&crate::theme::Theme::dark());
+        assert_eq!(rule.size.height, px(thick), "as thick as the reading view's rule");
+        // Layout rounds to whole pixels, so centred means within one.
+        let off = (rule.origin.y + rule.size.height / 2.) - (origin.y + line_height / 2.);
+        assert!(off.abs() <= px(1.), "centred on the line, off by {off:?}");
+        assert!(rule.size.width > px(100.), "spans the column, got {:?}", rule.size.width);
+        assert_eq!(cx.debug_bounds("rule-line-0"), None, "prose lines draw no divider");
+
+        // Caret onto the break: the source returns, and the line the
+        // shell paints no longer asks for a divider.
+        editor.update(cx, |ed, cx| {
+            ed.core.set_cursor(9);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let (shown, divider) = cx.update(|_, app| {
+            let ed = editor.read(app);
+            let entry = ed.layout_cache.get(&2).unwrap();
+            (entry.display.text.clone(), display::draws_rule(&entry.display, ed.view_spans()))
+        });
+        assert_eq!(shown, "---");
+        assert!(!divider, "revealed source has no rule over it");
+    }
+
+    /// The absence half through a real paint. gpui's debug-bounds map
+    /// is never cleared between frames, so a divider that disappears
+    /// cannot be observed going; a caret that starts on the break (the
+    /// editor opens with it at offset 0) means one was never drawn.
+    #[gpui::test]
+    fn a_thematic_break_under_the_caret_draws_no_divider(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "rule.md", "---\n\nafter\n");
+        cx.run_until_parked();
+        assert_eq!(head(&editor, cx), 0);
+        assert_eq!(cx.debug_bounds("rule-line-0"), None, "revealed source has no rule over it");
+        let shown = cx.update(|_, app| {
+            editor.read(app).layout_cache.get(&0).unwrap().display.text.clone()
+        });
+        assert_eq!(shown, "---");
     }
 
     // ── widget interactions ────────────────────────────────────────────
