@@ -2574,3 +2574,172 @@ Closes #57"
 ```
 
 ---
+
+### Task 25: Themes from base16, converted not copied
+
+**Files:**
+- Create: `assets/base16/*.yaml` (vendored scheme sources) and `assets/base16/LICENSE`
+- Create: `examples/import_base16.rs` (the generator, run like `build_docs`)
+- Create: `assets/themes/<scheme>.toml` (generated, committed)
+- Modify: `src/theme.rs` (`builtin_theme_sources`, `shipped_themes`), `docs/site/themes.md`
+- Test: inline in `examples/import_base16.rs` or a new `src/base16.rs` if the mapping belongs in the crate
+
+**Interfaces:**
+- Consumes: the theme file format (`ThemeFileColors`), `floating_bg` (Task 23), the contrast guards.
+- Produces: many more shipped themes; Task 26 consumes the larger set.
+
+`tinted-theming/schemes` (MIT) holds **340 base16 schemes** in one machine-readable
+format, including every family the user asked for and four SuperMD already ships by
+hand. One converter beats eighteen hand-written files, and the four hand-written
+themes become the converter's test fixtures.
+
+Base16 gives sixteen slots: `base00`–`base07` run background to foreground, and
+`base08`–`base0F` are red, orange, yellow, green, cyan, blue, magenta, brown. A
+`variant` field says `dark` or `light`.
+
+**Decided with the user:** convert a curated set at build time and commit the
+results — not all 340, and not a runtime importer (that is a follow-up once the
+mapping is settled). Ship faithful and record bounded exemptions where a palette
+fails our floors, exactly as Solarized does.
+
+- [ ] **Step 1: Vendor the sources**
+
+Copy the chosen schemes' YAML into `assets/base16/` with the upstream `LICENSE` and
+a note saying where they came from and at what commit. Vendoring keeps the build
+reproducible offline and the attribution honest.
+
+Curated set (verified present in the registry; adjust with the user if they prefer
+different ones):
+`catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`,
+`rose-pine`, `rose-pine-moon`, `rose-pine-dawn`,
+`tokyo-night-dark`, `tokyo-night-storm`, `tokyo-night-light`,
+`dracula`, `everforest`, `kanagawa`, `onedark`, `one-light`, `monokai`,
+`ayu-dark`, `ayu-light`, `github`, `zenburn`.
+
+- [ ] **Step 2: Write the failing test — the converter must reproduce a theme we already approved**
+
+The four hand-written themes (`nord`, `gruvbox-dark-hard`, `solarized-dark`,
+`solarized-light`) exist in the registry too. Convert `nord` and compare against the
+shipped `nord.toml`: the surfaces and ink must land within a small tolerance of the
+values a human chose. Where they cannot match, the difference must be stated in the
+report — that is the converter telling you what the mapping loses.
+
+Do **not** overwrite the hand-written four. They stay as they are; they are the
+fixtures.
+
+- [ ] **Step 3: The mapping**
+
+Write it once, in one place, as a pure function from the sixteen slots to our tokens.
+The obvious mapping, to be checked against the fixtures rather than trusted:
+
+| Ours | base16 |
+|---|---|
+| `page_bg` | `base00` |
+| `bg` (the desk) | `base01` for dark; a step down from `base00` for light |
+| `panel_bg` | `base01` |
+| `floating_bg` | never darker than `page_bg` — a step up for dark, `page_bg` for light |
+| `border` / `border_subtle` | `base02`, and `base02` at reduced alpha |
+| `fg` / `fg_strong` / `fg_muted` | `base05` / `base06` or `base07` / `base03` or `base04` |
+| `accent` | `base0D` |
+| `hover_bg` / `selected_bg` | `base01` / `base02`, kept visible on every surface |
+| syntax | `base08`–`base0F` by their published meanings |
+| `shadow` | derived, translucent, never opaque |
+| diff colours | `base0B` added, `base08` removed |
+
+`base03` is "comments" in base16 and is usually low contrast — it is the slot most
+likely to fail our muted floor. Choose `base04` where a scheme has a usable one.
+
+- [ ] **Step 4: Generate, then measure**
+
+Run the generator, commit the `.toml` files, and add every new theme to
+`builtin_theme_sources` and `shipped_themes`. The contrast guards now measure them
+all. **Never weaken a floor**: a theme that fails gets a bounded exception with its
+measured number and a one-line reason, and the report lists every exception added.
+If more than half the new themes need an exception for the same token, the mapping is
+wrong — say so rather than filing twenty exceptions.
+
+- [ ] **Step 5: Look at them**
+
+You cannot eyeball twenty themes in a document, a table, a diagram, the finder and a
+dialog. Do it properly for **four** — one from each family — and for any theme that
+needed an exception. Report per theme. Say plainly which ones you did not open.
+
+- [ ] **Step 6: Docs, mutation check, suites, build**
+
+Document in `docs/site/themes.md` where the schemes come from, their licence, and how
+to regenerate; regenerate `site/docs/`. Mutate the mapping (swap `base00` and
+`base01`) and confirm a guard fires. Both suites; read the build's warnings.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add assets examples src docs site
+git commit -m "feat: twenty themes, converted from base16 rather than hand-written
+
+tinted-theming/schemes publishes 340 schemes in one format, four of
+which we already shipped by hand. One tested mapping produces the rest,
+with the hand-written four as its fixtures.
+
+Faithful to each palette: where one fails our contrast floors it gets a
+bounded exception with its measured number, not a loosened floor."
+```
+
+---
+
+### Task 26: A picker that can hold thirty themes
+
+**Files:**
+- Modify: `src/workspace.rs` (`toggle_theme_picker`, `theme_picker_apply`, the picker render, `ThemePickerState`)
+- Test: inline in `src/workspace.rs`
+
+**Interfaces:**
+- Consumes: the theme list from `ThemeState`, the appearance control from Task 22.
+- Produces: nothing later tasks depend on.
+
+**Runs after Task 25**, which takes the picker from 8 entries to about 28.
+
+Today ⌘T lists every theme, arrow keys move, each move previews live, Enter commits,
+Escape restores the theme that was active when it opened. That works at eight and
+falls apart at twenty-eight.
+
+- [ ] **Step 1: Write the failing tests**
+
+Type-to-filter is the whole feature, so test the filter as a pure function: matching
+is case-insensitive and matches anywhere in the name ("moon" finds Rosé Pine Moon,
+"cat" finds all four Catppuccin); a filter that matches nothing leaves the list empty
+and commits nothing; clearing the filter restores the full list with the active theme
+still marked.
+
+Also test that filtering does not lose the cancel baseline: type, move, press Escape,
+and the theme that was active when the picker opened must come back — the same
+invariant Task 22 had to repair when the appearance control committed immediately.
+
+- [ ] **Step 2: Watch them fail**
+
+- [ ] **Step 3: Implement**
+
+Add a filter input, seeded empty, that narrows as you type. Keep the appearance
+control from Task 22 at the top. Group the list by appearance — dark and light — or
+mark each row, so a twenty-eight-item list is navigable; whichever you choose, the
+active theme must be visible without scrolling when the picker opens.
+
+Preview on move stays. Escape restores. Enter commits.
+
+- [ ] **Step 4: Mutation check, look at it, suites, build**
+
+Mutate the filter to be case-sensitive and confirm a test fails. Then open the picker
+with the full set, type a few letters, arrow through, Escape, and reopen — and report
+what you saw. Both suites; read the build's warnings.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src
+git commit -m "feat: the theme picker filters as you type
+
+Eight themes fit in a list. Twenty-eight do not: the picker now filters
+as you type and marks light from dark, while preview-on-move, Escape to
+restore and Enter to commit all work as before."
+```
+
+---
