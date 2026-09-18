@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: OneDark by Lalit Magant (http://github.com/tilal6991)
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/onedark.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "OneDark"
+appearance = "dark"
+
+[colors]
+bg = "#20232a"                # derived
+page_bg = "#282c34"           # base00
+panel_bg = "#1c1f25"          # derived
+floating_bg = "#2c3038"       # derived
+hover_bg = "#32363d"          # derived
+selected_bg = "#40434a"       # derived
+border = "#3e4451"            # base02
+code_bg = "#353b45"           # base01
+code_fg = "#abb2bf"           # base05
+fg = "#abb2bf"                # base05
+fg_strong = "#c8ccd4"         # base07
+fg_muted = "#8d939e"          # derived
+accent = "#61afef"            # base0D
+link = "#61afef"              # base0D
+find_match_bg = "#715116"     # derived
+find_active_bg = "#9e721f"    # derived
+shadow = "#14161a57"          # derived, translucent
+diff_added_bg = "#3c4740"     # derived
+diff_added_fg = "#98c379"     # base0B
+diff_deleted_bg = "#493840"   # derived
+diff_deleted_fg = "#e06c75"   # base08
+
+[syntax]
+keyword = "#c678dd"           # base0E
+function = "#61afef"          # base0D
+type = "#e5c07b"              # base0A
+string = "#98c379"            # base0B
+comment = "#656a75"           # derived
+constant = "#d19a66"          # base09
+property = "#e06c75"          # base08
+operator = "#abb2bf"          # base05
+tag = "#e06c75"               # base08
+attribute = "#e5c07b"         # base0A

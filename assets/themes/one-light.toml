@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: One Light by Daniel Pfeifer (http://github.com/purpleKarrot)
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/one-light.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "One Light"
+appearance = "light"
+
+[colors]
+bg = "#f1f1f1"                # derived
+page_bg = "#fafafa"           # base00
+panel_bg = "#ebebeb"          # derived
+floating_bg = "#fafafa"       # base00
+hover_bg = "#e2e2e2"          # derived
+selected_bg = "#dcdcdc"       # derived
+border = "#dedede"            # derived
+code_bg = "#efefef"           # derived
+code_fg = "#383a42"           # base05
+fg = "#383a42"                # base05
+fg_strong = "#090a0b"         # base07
+fg_muted = "#76787f"          # derived
+accent = "#4078f2"            # base0D
+link = "#4078f2"              # base0D
+find_match_bg = "#f3dcaa"     # derived
+find_active_bg = "#e7bb5a"    # derived
+shadow = "#372f2f2e"          # derived, translucent
+diff_added_bg = "#dbeadb"     # derived
+diff_added_fg = "#50a14f"     # base0B
+diff_deleted_bg = "#f1d0d9"   # derived
+diff_deleted_fg = "#ca1243"   # base08
+
+[syntax]
+keyword = "#a626a4"           # base0E
+function = "#4078f2"          # base0D
+type = "#c18401"              # base0A
+string = "#50a14f"            # base0B
+comment = "#a0a1a7"           # base03
+constant = "#d75f00"          # base09
+property = "#ca1243"          # base08
+operator = "#383a42"          # base05
+tag = "#ca1243"               # base08
+attribute = "#c18401"         # base0A

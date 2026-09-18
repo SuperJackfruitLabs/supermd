@@ -2,7 +2,11 @@
 
 **⌘ T** opens the theme picker. SuperMD follows your system's light/dark setting, with a theme for each: pick your light theme and your dark theme once, and the app switches with your OS.
 
-Eight themes ship built in: **Jackfruit Light** and **Jackfruit Dark** (the defaults), **Paper**, **Graphite**, **Nord**, **Gruvbox Dark**, and **Solarized** in both light and dark. Diagrams, code highlighting, and the whole interface follow the active theme.
+Twenty-eight themes ship built in — nine light, nineteen dark. Diagrams, code highlighting, and the whole interface follow the active theme.
+
+Eight are written by hand: **Jackfruit Light** and **Jackfruit Dark** (the defaults), **Paper**, **Graphite**, **Nord**, **Gruvbox Dark**, and **Solarized** in both light and dark.
+
+The other twenty are converted from [base16](#where-the-other-twenty-come-from) palettes: the four **Catppuccin** flavours, **Rosé Pine** with Moon and Dawn, **Tokyo Night** in Dark, Storm and Light, **Dracula**, **Everforest**, **Kanagawa**, **OneDark**, **One Light**, **Monokai**, **Ayu** light and dark, **Github** and **Zenburn**.
 
 ## Flux: themes that follow the sun
 
@@ -20,6 +24,24 @@ transition_minutes = 40 # fade length around sunrise and sunset
 ```
 
 With coordinates set, sunrise and sunset are computed **offline** with the NOAA solar equations — no location permission, no network, nothing leaves your machine. Without them, a fixed 7:00–19:00 day window applies (as it does under a polar sun). Both halves are independent: keep `auto_dark` and drop `warm_shift` for a hard theme schedule, or the reverse to stay on your system theme but lose the blue light at night.
+
+## Where the other twenty come from
+
+[`tinted-theming/schemes`](https://github.com/tinted-theming/schemes) publishes 340 colour schemes in one machine-readable format — sixteen slots, `base00`–`base07` running background to foreground and `base08`–`base0F` holding the accents, with a `variant` saying light or dark. Twenty of them ship with SuperMD, converted rather than copied: one tested mapping turns a palette into the tokens below, so every theme gets the same surface ladder, the same readable secondary text, and the same shadow behaviour instead of twenty separate opinions.
+
+The scheme files are vendored under `assets/base16/`, unmodified, with upstream's MIT `LICENSE` and a note recording the commit they were taken at — so the build is reproducible offline and the attribution is honest. Each theme file says at the top which scheme it came from, who wrote it, and, colour by colour, which base16 slot supplied it or whether the converter derived it.
+
+Regenerating, after changing the mapping or refreshing the vendored schemes:
+
+```sh
+cargo run --example import_base16
+```
+
+It rewrites `assets/themes/*.toml`, which are committed; a test fails if a committed file has drifted from its scheme. Nothing converts at runtime.
+
+Faithfulness has one limit, and it is measured rather than waved at: every theme must clear SuperMD's contrast floors — body text on all six surfaces it is painted on, secondary text likewise, and every background token against what it sits on. A palette that cannot is not quietly repaired and the floor is not lowered for it; it ships with a recorded exception carrying its measured number. Of the twenty, exactly one needed one: Ayu Light's own foreground on its own selection colour is 4.22:1 where 4.5:1 is the floor.
+
+The four hand-written themes have base16 equivalents too, and they are not replaced by them — they are what the converter is *tested against*. Where the mapping cannot reproduce a choice a human made, that difference is the mapping telling on itself.
 
 ## Custom themes
 

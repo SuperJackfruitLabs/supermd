@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: Tokyo Night Storm by Michaël Ball
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/tokyo-night-storm.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "Tokyo Night Storm"
+appearance = "dark"
+
+[colors]
+bg = "#1d2030"                # derived
+page_bg = "#24283b"           # base00
+panel_bg = "#1a1d2b"          # derived
+floating_bg = "#282c3f"       # derived
+hover_bg = "#2e3244"          # derived
+selected_bg = "#343a52"       # base02
+border = "#343a52"            # base02
+code_bg = "#323648"           # derived
+code_fg = "#a9b1d6"           # base05
+fg = "#a9b1d6"                # base05
+fg_strong = "#d5d6db"         # base07
+fg_muted = "#8188ab"          # derived
+accent = "#2ac3de"            # base0D
+link = "#2ac3de"              # base0D
+find_match_bg = "#116a79"     # derived
+find_active_bg = "#1893a8"    # derived
+shadow = "#12141e57"          # derived, translucent
+diff_added_bg = "#3a4643"     # derived
+diff_added_fg = "#9ece6a"     # base0B
+diff_deleted_bg = "#4a364a"   # derived
+diff_deleted_fg = "#f7768e"   # base0F
+
+[syntax]
+keyword = "#bb9af7"           # base0E
+function = "#2ac3de"          # base0D
+type = "#0db9d7"              # base0A
+string = "#9ece6a"            # base0B
+comment = "#5d6585"           # derived
+constant = "#a9b1d6"          # base05
+property = "#c0caf5"          # base08
+operator = "#a9b1d6"          # base05
+tag = "#c0caf5"               # base08
+attribute = "#0db9d7"         # base0A

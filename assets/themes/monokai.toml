@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: Monokai by Wimer Hazenberg (http://www.monokai.nl)
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/monokai.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "Monokai"
+appearance = "dark"
+
+[colors]
+bg = "#1e1e1a"                # derived
+page_bg = "#272822"           # base00
+panel_bg = "#191a16"          # derived
+floating_bg = "#2b2c26"       # derived
+hover_bg = "#31322c"          # derived
+selected_bg = "#3e3f39"       # derived
+border = "#42423d"            # derived
+code_bg = "#383830"           # base01
+code_fg = "#f8f8f2"           # base05
+fg = "#f8f8f2"                # base05
+fg_strong = "#f9f8f5"         # base07
+fg_muted = "#8f8c7c"          # derived
+accent = "#66d9ef"            # base0D
+link = "#66d9ef"              # base0D
+find_match_bg = "#67420f"     # derived
+find_active_bg = "#966015"    # derived
+shadow = "#14141157"          # derived, translucent
+diff_added_bg = "#3e4924"     # derived
+diff_added_fg = "#a6e22e"     # base0B
+diff_deleted_bg = "#4d2830"   # derived
+diff_deleted_fg = "#f92672"   # base08
+
+[syntax]
+keyword = "#ae81ff"           # base0E
+function = "#66d9ef"          # base0D
+type = "#f4bf75"              # base0A
+string = "#a6e22e"            # base0B
+comment = "#75715e"           # base03
+constant = "#fd971f"          # base09
+property = "#f92672"          # base08
+operator = "#f8f8f2"          # base05
+tag = "#f92672"               # base08
+attribute = "#f4bf75"         # base0A

@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: Catppuccin Mocha by https://github.com/catppuccin/catppuccin
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/catppuccin-mocha.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "Catppuccin Mocha"
+appearance = "dark"
+
+[colors]
+bg = "#171723"                # derived
+page_bg = "#1e1e2e"           # base00
+panel_bg = "#14141e"          # derived
+floating_bg = "#222232"       # derived
+hover_bg = "#282837"          # derived
+selected_bg = "#313244"       # base02
+border = "#313244"            # base02
+code_bg = "#2c2c3b"           # derived
+code_fg = "#cdd6f4"           # base05
+fg = "#cdd6f4"                # base05
+fg_strong = "#f5e0dc"         # base06
+fg_muted = "#7b8098"          # derived
+accent = "#89b4fa"            # base0D
+link = "#89b4fa"              # base0D
+find_match_bg = "#684d0f"     # derived
+find_active_bg = "#976f16"    # derived
+shadow = "#0f0f1757"          # derived, translucent
+diff_added_bg = "#364143"     # derived
+diff_added_fg = "#a6e3a1"     # base0B
+diff_deleted_bg = "#443244"   # derived
+diff_deleted_fg = "#f38ba8"   # base08
+
+[syntax]
+keyword = "#cba6f7"           # base0E
+function = "#89b4fa"          # base0D
+type = "#f9e2af"              # base0A
+string = "#a6e3a1"            # base0B
+comment = "#595c71"           # derived
+constant = "#fab387"          # base09
+property = "#f38ba8"          # base08
+operator = "#cdd6f4"          # base05
+tag = "#f38ba8"               # base08
+attribute = "#f9e2af"         # base0A

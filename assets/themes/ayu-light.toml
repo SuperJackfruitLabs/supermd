@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: Ayu Light by Tinted Theming (https://github.com/tinted-theming), Ayu Theme (https://github.com/ayu-theme)
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/ayu-light.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "Ayu Light"
+appearance = "light"
+
+[colors]
+bg = "#eff0f1"                # derived
+page_bg = "#f8f9fa"           # base00
+panel_bg = "#e9eaeb"          # derived
+floating_bg = "#f8f9fa"       # base00
+hover_bg = "#e0e1e2"          # derived
+selected_bg = "#d2d4d8"       # base02
+border = "#d2d4d8"            # base02
+code_bg = "#edeeee"           # derived
+code_fg = "#5c6166"           # base05
+fg = "#5c6166"                # base05
+fg_strong = "#404447"         # base07
+fg_muted = "#70767b"          # derived
+accent = "#399ee6"            # base0D
+link = "#399ee6"              # base0D
+find_match_bg = "#f3d5a9"     # derived
+find_active_bg = "#e7ae58"    # derived
+shadow = "#2233442e"          # derived, translucent
+diff_added_bg = "#dfefda"     # derived
+diff_added_fg = "#6cbf49"     # base0B
+diff_deleted_bg = "#f7e1e1"   # derived
+diff_deleted_fg = "#f07171"   # base08
+
+[syntax]
+keyword = "#a37acc"           # base0E
+function = "#399ee6"          # base0D
+type = "#f2ae49"              # base0A
+string = "#6cbf49"            # base0B
+comment = "#a0a6ac"           # base03
+constant = "#fa8d3e"          # base09
+property = "#f07171"          # base08
+operator = "#5c6166"          # base05
+tag = "#f07171"               # base08
+attribute = "#f2ae49"         # base0A

@@ -520,8 +520,13 @@ impl LoadedTheme {
     }
 }
 
-/// Builtin theme TOML sources, lights first.
-pub fn builtin_theme_sources() -> [&'static str; 8] {
+/// Builtin theme TOML sources. The eight hand-written ones come first,
+/// lights then darks, and the twenty converted from base16 follow --
+/// `examples/import_base16.rs` writes those, `src/base16.rs` holds the
+/// mapping, and `assets/base16/README.md` records where they came from.
+/// The picker sorts by appearance itself (`workspace.rs`), so this order
+/// only decides which theme each appearance falls back to.
+pub fn builtin_theme_sources() -> [&'static str; 28] {
     [
         include_str!("../assets/themes/jackfruit-light.toml"),
         include_str!("../assets/themes/paper.toml"),
@@ -531,6 +536,28 @@ pub fn builtin_theme_sources() -> [&'static str; 8] {
         include_str!("../assets/themes/solarized-dark.toml"),
         include_str!("../assets/themes/nord.toml"),
         include_str!("../assets/themes/gruvbox-dark.toml"),
+        // converted, light
+        include_str!("../assets/themes/ayu-light.toml"),
+        include_str!("../assets/themes/catppuccin-latte.toml"),
+        include_str!("../assets/themes/github.toml"),
+        include_str!("../assets/themes/one-light.toml"),
+        include_str!("../assets/themes/rose-pine-dawn.toml"),
+        include_str!("../assets/themes/tokyo-night-light.toml"),
+        // converted, dark
+        include_str!("../assets/themes/ayu-dark.toml"),
+        include_str!("../assets/themes/catppuccin-frappe.toml"),
+        include_str!("../assets/themes/catppuccin-macchiato.toml"),
+        include_str!("../assets/themes/catppuccin-mocha.toml"),
+        include_str!("../assets/themes/dracula.toml"),
+        include_str!("../assets/themes/everforest.toml"),
+        include_str!("../assets/themes/kanagawa.toml"),
+        include_str!("../assets/themes/monokai.toml"),
+        include_str!("../assets/themes/onedark.toml"),
+        include_str!("../assets/themes/rose-pine.toml"),
+        include_str!("../assets/themes/rose-pine-moon.toml"),
+        include_str!("../assets/themes/tokyo-night-dark.toml"),
+        include_str!("../assets/themes/tokyo-night-storm.toml"),
+        include_str!("../assets/themes/zenburn.toml"),
     ]
 }
 
@@ -578,6 +605,7 @@ mod theme_file_tests {
         assert_eq!(
             names,
             [
+                // hand-written
                 "Jackfruit Light",
                 "Paper",
                 "Solarized Light",
@@ -585,12 +613,44 @@ mod theme_file_tests {
                 "Graphite",
                 "Solarized Dark",
                 "Nord",
-                "Gruvbox Dark"
+                "Gruvbox Dark",
+                // converted from base16, light
+                "Ayu Light",
+                "Catppuccin Latte",
+                "Github",
+                "One Light",
+                "Rosé Pine Dawn",
+                "Tokyo Night Light",
+                // converted from base16, dark
+                "Ayu Dark",
+                "Catppuccin Frappe",
+                "Catppuccin Macchiato",
+                "Catppuccin Mocha",
+                "Dracula",
+                "Everforest",
+                "Kanagawa",
+                "Monokai",
+                "OneDark",
+                "Rosé Pine",
+                "Rosé Pine Moon",
+                "Tokyo Night Dark",
+                "Tokyo Night Storm",
+                "Zenburn",
             ]
         );
+        // The names come from the scheme files verbatim, so two themes
+        // could collide by accident; a picker with two identical rows
+        // would also make `resolve`'s by-name lookup ambiguous.
+        let mut unique: Vec<&str> = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "two themes share a name");
+        // Index 0 and index 3 are the light and dark fallbacks
+        // `resolve` lands on when a settings file names a theme that is
+        // not installed, so their appearance is load-bearing.
         assert!(!themes[0].theme.is_dark);
         assert!(themes[3].theme.is_dark);
-        assert_eq!(themes.iter().filter(|t| t.theme.is_dark).count(), 5);
+        assert_eq!(themes.iter().filter(|t| t.theme.is_dark).count(), 19);
     }
 
     /// Warm ground, warm ink. A cream background with neutral-grey or
@@ -830,10 +890,60 @@ attribute = "#d19a66"
             ("paper", include_str!("../assets/themes/paper.toml")),
             ("solarized-dark", include_str!("../assets/themes/solarized-dark.toml")),
             ("solarized-light", include_str!("../assets/themes/solarized-light.toml")),
+            // Converted from base16 (`src/base16.rs`). These are held to
+            // exactly the same floors as the hand-written eight: the
+            // converter is faithful to each palette and a theme that
+            // fails gets a bounded exception below with its measured
+            // number, never a loosened floor.
+            ("ayu-dark", include_str!("../assets/themes/ayu-dark.toml")),
+            ("ayu-light", include_str!("../assets/themes/ayu-light.toml")),
+            ("catppuccin-frappe", include_str!("../assets/themes/catppuccin-frappe.toml")),
+            ("catppuccin-latte", include_str!("../assets/themes/catppuccin-latte.toml")),
+            ("catppuccin-macchiato", include_str!("../assets/themes/catppuccin-macchiato.toml")),
+            ("catppuccin-mocha", include_str!("../assets/themes/catppuccin-mocha.toml")),
+            ("dracula", include_str!("../assets/themes/dracula.toml")),
+            ("everforest", include_str!("../assets/themes/everforest.toml")),
+            ("github", include_str!("../assets/themes/github.toml")),
+            ("kanagawa", include_str!("../assets/themes/kanagawa.toml")),
+            ("monokai", include_str!("../assets/themes/monokai.toml")),
+            ("one-light", include_str!("../assets/themes/one-light.toml")),
+            ("onedark", include_str!("../assets/themes/onedark.toml")),
+            ("rose-pine", include_str!("../assets/themes/rose-pine.toml")),
+            ("rose-pine-dawn", include_str!("../assets/themes/rose-pine-dawn.toml")),
+            ("rose-pine-moon", include_str!("../assets/themes/rose-pine-moon.toml")),
+            ("tokyo-night-dark", include_str!("../assets/themes/tokyo-night-dark.toml")),
+            ("tokyo-night-light", include_str!("../assets/themes/tokyo-night-light.toml")),
+            ("tokyo-night-storm", include_str!("../assets/themes/tokyo-night-storm.toml")),
+            ("zenburn", include_str!("../assets/themes/zenburn.toml")),
         ] {
             v.push((name.to_string(), LoadedTheme::from_toml(src).expect(name).theme));
         }
         v
+    }
+
+    /// `shipped_themes` is a hand-kept list and the guards below are only
+    /// as wide as it is; a theme file added to `assets/themes/` and left
+    /// out of it would ship unmeasured. Both the loader's list and this
+    /// one are checked against the directory itself.
+    #[test]
+    fn every_theme_file_on_disk_is_shipped_and_guarded() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/themes");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("assets/themes")
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
+            .map(|e| e.path().file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        on_disk.sort();
+        let mut guarded: Vec<String> =
+            shipped_themes().into_iter().map(|(n, _)| n).filter(|n| !n.starts_with("built-in")).collect();
+        guarded.sort();
+        assert_eq!(on_disk, guarded, "assets/themes/ and shipped_themes() disagree");
+        assert_eq!(
+            builtin_theme_sources().len(),
+            on_disk.len(),
+            "every theme file must also be a builtin source"
+        );
     }
 
     /// A theme that predates these tokens still loads, and gets a page
@@ -906,8 +1016,25 @@ attribute = "#d19a66"
     /// fails, including the direction where the assertion stops reading
     /// a surface. If either ever clears 4.5, delete it instead of
     /// widening it.
-    const KNOWN_BODY_GAPS: &[(&str, f32, f32)] =
-        &[("solarized-dark", 3.3, 4.5), ("solarized-light", 3.2, 4.5)];
+    /// `ayu-light` is the third entry and the only one the base16
+    /// conversion added -- one theme out of the twenty, which is what
+    /// says the mapping is right rather than the floor being wrong.
+    ///
+    /// It is the same shape of fact as Solarized's. Ayu publishes
+    /// `#5c6166` as its foreground (base05) and `#d2d4d8` as its
+    /// selection background (base02), and the two are 4.22:1 against
+    /// each other in the palette itself -- on the page it is 5.94:1, and
+    /// only the selected row falls short. Both colours are used exactly
+    /// as published; the converter invents neither. The alternatives
+    /// were to lighten Ayu's selection until its own text cleared, which
+    /// is tuning the surface to rescue the ink (rejected for Solarized
+    /// below, for the same reason), or to darken Ayu's foreground, which
+    /// makes a theme wearing Ayu's name. Measured 4.215:1.
+    const KNOWN_BODY_GAPS: &[(&str, f32, f32)] = &[
+        ("solarized-dark", 3.3, 4.5),
+        ("solarized-light", 3.2, 4.5),
+        ("ayu-light", 4.1, 4.5),
+    ];
 
     /// Every surface body text is actually painted on, reduced to the
     /// worst one -- the same reduction `worst_muted_contrast` does, for

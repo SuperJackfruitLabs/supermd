@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: Rosé Pine by Emilia Dunfelt <edun@dunfelt.se>
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/rose-pine.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "Rosé Pine"
+appearance = "dark"
+
+[colors]
+bg = "#111019"                # derived
+page_bg = "#191724"           # base00
+panel_bg = "#0e0d14"          # derived
+floating_bg = "#1d1b28"       # derived
+hover_bg = "#23212d"          # derived
+selected_bg = "#26233a"       # base02
+border = "#26233a"            # base02
+code_bg = "#272531"           # derived
+code_fg = "#e0def4"           # base05
+fg = "#e0def4"                # base05
+fg_strong = "#ffffff"         # derived
+fg_muted = "#74708c"          # derived
+accent = "#c4a7e7"            # base0D
+link = "#c4a7e7"              # base0D
+find_match_bg = "#4f1917"     # derived
+find_active_bg = "#792723"    # derived
+shadow = "#0d0c1257"          # derived, translucent
+diff_added_bg = "#1d2837"     # derived
+diff_added_fg = "#31748f"     # base0B
+diff_deleted_bg = "#3f2738"   # derived
+diff_deleted_fg = "#eb6f92"   # base08
+
+[syntax]
+keyword = "#f6c177"           # base09
+function = "#c4a7e7"          # base0D
+type = "#ebbcba"              # base0A
+string = "#31748f"            # base0B
+comment = "#6e6a86"           # base03
+constant = "#f6c177"          # base09
+property = "#eb6f92"          # base08
+operator = "#e0def4"          # base05
+tag = "#eb6f92"               # base08
+attribute = "#ebbcba"         # base0A
