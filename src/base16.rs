@@ -809,6 +809,34 @@ mod tests {
         }
     }
 
+    /// The page is the scheme's own `base00`, and that is the one thing
+    /// about this mapping no contrast guard can check: swap `base00` for
+    /// `base01` and the whole ladder simply rebuilds itself around the
+    /// new ground, self-consistent and a different theme. Measured when
+    /// this test was written -- the swap left every structural guard
+    /// green and was caught only by the floor of ayu-light's exception
+    /// band, at 4.09:1 against 4.1. So the identity is asserted
+    /// directly: a palette is recognised by its background, and a
+    /// "Dracula" whose page is not `#282a36` is not Dracula.
+    ///
+    /// The one exception is a ground with nothing underneath it, where
+    /// the scheme's colour becomes the desk instead -- none of the
+    /// twenty is that dark, so this also pins that the escape hatch
+    /// stays shut.
+    #[test]
+    fn the_page_is_the_schemes_own_background() {
+        for (slug, yaml, _) in CONVERTED {
+            let scheme = Scheme::parse(slug, yaml).expect("scheme parses");
+            let t = map(&scheme);
+            assert_eq!(
+                t.page_bg,
+                scheme.slot("base00"),
+                "{slug}: the page is not the scheme's own background"
+            );
+            assert_eq!(t.fg, scheme.slot("base05"), "{slug}: the body ink is not base05");
+        }
+    }
+
     /// Every converted theme's `fg_muted` is the dimmest step along
     /// `base03` -> `base05` that clears the floor, so it must stay
     /// visibly dimmer than the body ink -- otherwise the hint is a
