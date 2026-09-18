@@ -2473,3 +2473,104 @@ painted on it."
 ```
 
 ---
+
+### Task 24: The reading view renders images (#57)
+
+**Files:**
+- Modify: `src/markdown.rs` (a block-level image case; the inline placeholder stays)
+- Modify: `src/view.rs` (render the block)
+- Maybe modify: `src/editor/mod.rs` (extract path resolution so both paths share it)
+- Test: inline in `src/markdown.rs` and `src/view.rs`
+
+**Interfaces:**
+- Consumes: `Block` (reading path), the editor's image path resolution.
+- Produces: nothing later tasks depend on.
+
+**Runs in Batch B**, decided with the user after two screenshots showed the same
+document rendering an image in the editor and a placeholder in the reading view.
+
+`src/markdown.rs:595-602` turns every image — inline or standalone — into `🖼 ` plus
+its alt text, marked "Phase 0". The editor renders images properly:
+`BlockKind::Image` → `ImageProjector` → `render_image` (`src/editor/mod.rs:3798`),
+which resolves a local path against the document's directory, treats `http://` and
+`https://` as remote, and falls back to `![alt](dest) — file not found`.
+
+**An image on its own is a block; an image among words stays inline.** The
+placeholder is right for the inline case and wrong for the standalone one.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+    /// A standalone image is a block, not a run of text. The editor has
+    /// rendered these since 0.0.14; the reading view showed alt text.
+    #[test]
+    fn a_standalone_image_is_its_own_block() {
+        let doc = parse("Before\n\n![A city](city.png)\n\nAfter\n");
+        assert!(
+            doc.blocks.iter().any(|b| matches!(b, Block::Image { dest, alt }
+                if dest == "city.png" && alt == "A city")),
+            "standalone image did not become a block: {:?}", doc.blocks
+        );
+    }
+
+    /// An image among words keeps the inline placeholder -- a picture
+    /// cannot sit inside a line of prose.
+    #[test]
+    fn an_inline_image_keeps_its_placeholder() {
+        let doc = parse("Text with ![a pic](p.png) inside.\n");
+        assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Image { .. })));
+        let text = doc.plain_text();
+        assert!(text.contains("🖼"), "inline placeholder lost: {text}");
+    }
+```
+
+Verify `Block`'s real name and shape, and whether `plain_text()` exists, before
+relying on either.
+
+- [ ] **Step 2: Run them and watch them fail**
+
+- [ ] **Step 3: Add the block case**
+
+A `Start(Tag::Image)` that opens with no inline builder mid-paragraph — or whose
+paragraph holds nothing else — becomes `Block::Image { alt, dest }`. Everything else
+keeps the placeholder. Match how `blocks.rs` decides the same thing in the editor so
+the two views agree; if the rules differ, say why in the report.
+
+- [ ] **Step 4: Render it**
+
+In `src/view.rs`, render the block with `gpui::img(...)`, constrained to the page
+measure (not the window width — the document is a page since Task 4), with
+`elevation::radius` for its corners. Resolve the path exactly as the editor does:
+share `render_image`'s resolution rather than writing a second copy. **A missing file
+must look deliberate**, matching the editor's `— file not found` rather than showing
+nothing.
+
+- [ ] **Step 5: Look at it**
+
+Open a document with a standalone image, a missing image, an inline image and a
+remote image, in the editor and the reading view. They must agree. Check a very wide
+image is bounded by the page, and that the corner radius is not squared off by the
+image's own fill (gpui's `ContentMask` cannot round-clip).
+
+- [ ] **Step 6: Mutation check, suites, build**
+
+Make the block case also catch inline images and confirm
+`an_inline_image_keeps_its_placeholder` fails. Both suites; read the build's warnings.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src
+git commit -m "fix: the reading view renders images instead of naming them
+
+Every image became a placeholder, inline or not, while the editor drew
+the picture -- the two views disagreed about the same document.
+
+A standalone image is now a block and renders at the page measure,
+resolving its path the way the editor already did. An image among
+words keeps the placeholder: a picture cannot sit inside a line.
+
+Closes #57"
+```
+
+---
