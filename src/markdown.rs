@@ -6,8 +6,60 @@
 //! the block model is designed to survive that swap.
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+/// Where a Markdown image destination points, resolved against the
+/// document that wrote it.
+///
+/// The editor and the reading view both draw images, and both used to
+/// need this: the editor grew it inline in `render_image` and the
+/// reading view never grew it at all, so one drew a picture where the
+/// other wrote the picture's name (#57). One implementation, two
+/// callers -- a second copy is how the two views drift apart again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageSource {
+    /// An `http://` or `https://` URL. Nothing is checked: the
+    /// renderer's own loader fetches it.
+    Remote(String),
+    /// A file that is there.
+    Local(PathBuf),
+    /// A local destination with nothing behind it. Named rather than
+    /// left as an `exists()` call at each site, so both views agree
+    /// that a broken link is a thing you can see.
+    Missing(PathBuf),
+}
+
+/// Whether the markup at `range` is the whole line it sits on, leading
+/// and trailing whitespace aside.
+///
+/// This is the single rule that separates a picture from a word. The
+/// editor's projection (`editor::blocks`) and the reading view's block
+/// model both ask it, because a document that renders two ways is the
+/// bug (#57) -- and two copies of one rule is how it comes back.
+pub fn is_whole_line(source: &str, range: Range<usize>) -> bool {
+    let start = source[..range.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let end = source[range.start..]
+        .find('\n')
+        .map(|i| range.start + i)
+        .unwrap_or(source.len());
+    source[start..end].trim() == &source[range]
+}
+
+/// Resolve an image destination the way the editor always has: remote
+/// URLs pass through, everything else is relative to the directory of
+/// the document that wrote the link.
+pub fn resolve_image(dest: &str, doc: Option<&Path>) -> ImageSource {
+    if dest.starts_with("http://") || dest.starts_with("https://") {
+        return ImageSource::Remote(dest.to_string());
+    }
+    let path = doc
+        .and_then(|p| p.parent())
+        .map(|dir| dir.join(dest))
+        .unwrap_or_else(|| PathBuf::from(dest));
+    if path.exists() { ImageSource::Local(path) } else { ImageSource::Missing(path) }
+}
 
 /// Inline style flags for a span of text within a block.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -77,6 +129,11 @@ pub enum Block {
     FrontMatter(String),
     /// A block of raw HTML, as written. Shown literally, never rendered.
     Html(String),
+    /// An image whose markup is the whole line -- a picture in its own
+    /// right, not a word. An image among words is not this: it stays a
+    /// placeholder inside its paragraph, because a picture cannot sit
+    /// inside a line of prose. `editor::blocks` draws the same line.
+    Image { alt: String, dest: String },
 }
 
 #[derive(Debug, Default)]
@@ -108,6 +165,24 @@ impl InlineBuilder {
 
     fn begin_link(&mut self, dest: String) {
         self.open_link = Some((self.out.text.len(), dest));
+    }
+
+    /// Drop everything pushed since `mark`, spans and links included.
+    ///
+    /// An image's placeholder and alt text go in optimistically at
+    /// `Start(Image)`, because whether it is a picture or a word is
+    /// only settled at `End(Image)` -- a nested image can take the
+    /// decision away. This is the undo.
+    fn truncate(&mut self, mark: usize) {
+        self.out.text.truncate(mark);
+        self.out.spans.retain_mut(|(r, _)| {
+            r.end = r.end.min(mark);
+            r.start < r.end
+        });
+        self.out.links.retain_mut(|(r, _)| {
+            r.end = r.end.min(mark);
+            r.start < r.end
+        });
     }
 
     fn end_link(&mut self) {
@@ -449,7 +524,14 @@ pub fn parse(source: &str) -> Document {
         }
     }
 
-    for event in Parser::new_ext(source, options) {
+    // The image currently open, if any: its source range, the alt text
+    // gathered so far, its destination, and where the placeholder
+    // started in the inline builder. The slot is single and a nested
+    // image overwrites it, exactly as in `editor::blocks` -- that is
+    // what makes `![a ![b](c)](d)` a block in neither view.
+    let mut open_image: Option<(Range<usize>, String, String, Option<usize>)> = None;
+
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
         match event {
             // ── Leaf blocks with inline content ─────────────────────────
             Event::Start(Tag::Paragraph | Tag::Heading { .. }) => {
@@ -457,8 +539,13 @@ pub fn parse(source: &str) -> Document {
                 inline = Some(InlineBuilder::default());
             }
             Event::End(TagEnd::Paragraph) => {
+                // A paragraph whose only content was a block image has
+                // nothing left in it; an empty one would render as a
+                // blank gap under the picture.
                 if let Some(builder) = inline.take() {
-                    containers.last_mut().unwrap().push(Block::Paragraph(builder.finish()));
+                    if !builder.is_empty() {
+                        containers.last_mut().unwrap().push(Block::Paragraph(builder.finish()));
+                    }
                 }
             }
             Event::End(TagEnd::Heading(level)) => {
@@ -592,17 +679,47 @@ pub fn parse(source: &str) -> Document {
                     builder.end_link();
                 }
             }
-            Event::Start(Tag::Image { .. }) => {
-                // Phase 0: render images as a labeled placeholder of their alt text.
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                // An image among words is a placeholder of its alt
+                // text: a picture cannot sit inside a line of prose.
+                // Whether this one is that or a block of its own is
+                // settled at `End(Image)`, so the placeholder goes in
+                // now and comes back out there if it was a block.
                 styles.image += 1;
+                let mark = inline.as_ref().map(|b| b.out.text.len());
                 if let Some(builder) = inline.as_mut() {
                     builder.push("🖼 ", styles.current());
                 }
+                open_image = Some((range, String::new(), dest_url.to_string(), mark));
             }
-            Event::End(TagEnd::Image) => styles.image -= 1,
+            Event::End(TagEnd::Image) => {
+                styles.image -= 1;
+                if let Some((range, alt, dest, mark)) = open_image.take() {
+                    if is_whole_line(source, range) {
+                        if let (Some(builder), Some(mark)) = (inline.as_mut(), mark) {
+                            builder.truncate(mark);
+                        }
+                        let resume = inline.is_some();
+                        flush_inline(&mut inline, &mut containers);
+                        containers
+                            .last_mut()
+                            .expect("container stack is never empty")
+                            .push(Block::Image { alt, dest });
+                        if resume {
+                            inline = Some(InlineBuilder::default());
+                        }
+                    }
+                }
+            }
 
             // ── Inline content ──────────────────────────────────────────
             Event::Text(text) => {
+                // Alt text is gathered from `Text` alone, the way
+                // `editor::blocks` gathers it, so a block image reads
+                // the same in both views.
+                if let Some((_, alt, _, _)) = open_image.as_mut() {
+                    alt.push_str(&text);
+                }
                 if let Some((_, buffer)) = code.as_mut() {
                     buffer.push_str(&text);
                 } else if let Some(builder) = inline.as_mut() {
@@ -616,8 +733,14 @@ pub fn parse(source: &str) -> Document {
                 }
             }
             Event::SoftBreak => {
+                // A line break joins two runs of words. With nothing
+                // before it there is nothing to join -- which is what a
+                // paragraph looks like once a block image has been
+                // lifted out of its first line.
                 if let Some(builder) = inline.as_mut() {
-                    builder.push(" ", SpanStyle::default());
+                    if !builder.is_empty() {
+                        builder.push(" ", SpanStyle::default());
+                    }
                 }
             }
             Event::HardBreak => {
@@ -902,10 +1025,18 @@ mod tests {
         assert_eq!(inline.spans, vec![(0..1, code), (2..3, strike), (4..5, link)]);
     }
 
+    /// The placeholder is what an image among words looks like. It
+    /// used to be what *every* image looked like, standalone ones
+    /// included -- this test read `![alt text](img.png)` on its own
+    /// line, which is now the picture itself (see
+    /// `a_standalone_image_is_its_own_block`). The alt text stays
+    /// italic either way.
     #[test]
     fn image_renders_placeholder_with_italic_alt() {
-        let Block::Paragraph(inline) = parse_one("![alt text](img.png)") else { panic!("expected paragraph") };
-        assert_eq!(inline.text, "\u{1f5bc} alt text");
+        let Block::Paragraph(inline) = parse_one("see ![alt text](img.png)") else {
+            panic!("expected paragraph")
+        };
+        assert_eq!(inline.text, "see \u{1f5bc} alt text");
         assert!(inline.spans.iter().all(|(_, s)| s.italic));
         assert_eq!(inline.spans.last().unwrap().0.end, inline.text.len());
     }
@@ -1300,8 +1431,168 @@ mod tests {
                 Block::Rule => "rule",
                 Block::FrontMatter(_) => "frontmatter",
                 Block::Html(_) => "html",
+                Block::Image { .. } => "image",
             })
             .collect();
         assert_eq!(kinds, ["heading", "paragraph", "list", "quote", "code"]);
+    }
+
+    /// A standalone image is a block, not a run of text. The editor has
+    /// drawn the picture since images became a claimed block; the
+    /// reading view answered `🖼 ` and the alt text for the same
+    /// document (#57).
+    #[test]
+    fn a_standalone_image_is_its_own_block() {
+        let doc = parse("Before\n\n![A city](city.png)\n\nAfter\n");
+        assert!(
+            doc.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Image { dest, alt } if dest == "city.png" && alt == "A city")),
+            "standalone image did not become a block: {:?}",
+            doc.blocks
+        );
+    }
+
+    /// An image among words keeps the inline placeholder -- a picture
+    /// cannot sit inside a line of prose.
+    #[test]
+    fn an_inline_image_keeps_its_placeholder() {
+        let doc = parse("Text with ![a pic](p.png) inside.\n");
+        assert!(
+            !doc.blocks.iter().any(|b| matches!(b, Block::Image { .. })),
+            "inline image became a block: {:?}",
+            doc.blocks
+        );
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("{:?}", doc.blocks) };
+        assert!(inline.text.contains('🖼'), "inline placeholder lost: {}", inline.text);
+    }
+
+    /// The rule ignores the whitespace around the markup. An image
+    /// indented under the paragraph above it, or one a stray trailing
+    /// space follows, is still the only thing on its line -- and both
+    /// views ask this one question, so a change here moves them
+    /// together and the agreement test above cannot see it.
+    #[test]
+    fn the_whole_line_rule_ignores_surrounding_whitespace() {
+        assert!(is_whole_line("  ![a](b.png)  ", 2..13), "indented and trailed");
+        assert!(is_whole_line("![a](b.png)", 0..11), "bare");
+        assert!(!is_whole_line("see ![a](b.png)", 4..15), "among words");
+        let doc = parse("words\n\n  ![indented](i.png)\n");
+        assert!(
+            doc.blocks.iter().any(|b| matches!(b, Block::Image { .. })),
+            "an indented image is still alone on its line: {:?}",
+            doc.blocks
+        );
+    }
+
+    /// A picture lifted out of the middle of a paragraph leaves the
+    /// words on either side of it intact: no blank paragraph where it
+    /// used to be, and no stray indent on what followed it, which is
+    /// what the line break between them would otherwise become.
+    #[test]
+    fn words_around_a_lifted_picture_survive_it() {
+        let doc = parse("words\n![pic](p.png)\nmore\n");
+        let kinds: Vec<&str> = doc
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Block::Paragraph(_) => "paragraph",
+                Block::Image { .. } => "image",
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["paragraph", "image", "paragraph"], "{:?}", doc.blocks);
+        let Block::Paragraph(after) = &doc.blocks[2] else { unreachable!() };
+        assert_eq!(after.text, "more");
+        // A picture alone in its paragraph leaves nothing at all behind.
+        assert_eq!(parse("![only](o.png)\n").blocks.len(), 1);
+    }
+
+    /// Whether an image is a block is decided in `editor::blocks` for
+    /// the editor; the reading view has to reach the same verdict on
+    /// the same source or one view draws a picture where the other
+    /// writes its name. This is the same rule, not a second one.
+    #[test]
+    fn block_images_agree_with_the_editors_rule() {
+        fn reading(blocks: &[Block], out: &mut Vec<(String, String)>) {
+            for b in blocks {
+                match b {
+                    Block::Image { alt, dest } => out.push((alt.clone(), dest.clone())),
+                    Block::Quote(inner) => reading(inner, out),
+                    Block::List { items, .. } => {
+                        for item in items {
+                            reading(&item.blocks, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for src in [
+            "![alone](a.png)\n",
+            "see ![a](b.png) here\n",
+            "words\n![after](c.png)\n",
+            "![before](c.png)\nwords\n",
+            "![a ![b](c)](d)\n",
+            "- ![in a list](l.png)\n",
+            "> ![quoted](q.png)\n",
+            "  ![indented](i.png)\n",
+            "---\ntitle: t\n---\n\n![past frontmatter](f.png)\n",
+            "```\n![fenced](x.png)\n```\n",
+            "![one](1.png)\n![two](2.png)\n",
+            "![titled](t.png \"a title\")\n",
+            "# ![in a heading](h.png)\n",
+        ] {
+            let mut mine = Vec::new();
+            reading(&parse(src).blocks, &mut mine);
+            let editors: Vec<(String, String)> = crate::editor::blocks::blocks(src)
+                .into_iter()
+                .filter_map(|b| match b.kind {
+                    crate::editor::blocks::BlockKind::Image { alt, dest } => Some((alt, dest)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(mine, editors, "the two views disagreed on {src:?}");
+        }
+    }
+
+    #[test]
+    fn a_remote_image_resolves_without_touching_the_disk() {
+        assert_eq!(
+            resolve_image("https://example.com/a.png", Some(Path::new("/nowhere/doc.md"))),
+            ImageSource::Remote("https://example.com/a.png".to_string())
+        );
+        assert_eq!(
+            resolve_image("http://example.com/a.png", None),
+            ImageSource::Remote("http://example.com/a.png".to_string())
+        );
+    }
+
+    #[test]
+    fn a_local_image_resolves_against_the_documents_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = dir.path().join("assets");
+        std::fs::create_dir(&assets).unwrap();
+        std::fs::write(assets.join("pic.png"), b"not really a png").unwrap();
+        let doc = dir.path().join("notes").join("note.md");
+        std::fs::create_dir(dir.path().join("notes")).unwrap();
+        assert_eq!(
+            resolve_image("../assets/pic.png", Some(&doc)),
+            ImageSource::Local(dir.path().join("notes").join("../assets/pic.png"))
+        );
+    }
+
+    /// A broken link has to look deliberate. Rendering nothing reads as
+    /// a broken app; the editor says `— file not found` and the reading
+    /// view needs the same answer, so the missing case is named here
+    /// rather than left to each caller's `exists()` check.
+    #[test]
+    fn a_missing_local_image_resolves_to_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("note.md");
+        assert_eq!(
+            resolve_image("gone.png", Some(&doc)),
+            ImageSource::Missing(dir.path().join("gone.png"))
+        );
     }
 }

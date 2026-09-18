@@ -431,6 +431,16 @@ impl Editor {
         &self.path
     }
 
+    /// Where an image destination in this document points.
+    ///
+    /// Anchored to the document that wrote the link, never to the
+    /// process's working directory -- and the reading view asks the
+    /// same function with the same anchor, so one link cannot resolve
+    /// two ways (#57).
+    pub fn image_source(&self, dest: &str) -> crate::markdown::ImageSource {
+        crate::markdown::resolve_image(dest, Some(&self.path))
+    }
+
     pub fn title(&self) -> SharedString {
         self.path
             .file_name()
@@ -3804,15 +3814,9 @@ fn render_image(
     t: &Theme,
     cx: &mut App,
 ) -> gpui::AnyElement {
-    let is_remote = dest.starts_with("http://") || dest.starts_with("https://");
-    let local_path = (!is_remote).then(|| {
-        editor
-            .read(cx)
-            .path()
-            .parent()
-            .map(|dir| dir.join(dest))
-            .unwrap_or_else(|| PathBuf::from(dest))
-    });
+    // Shared with the reading view: one answer about where an image
+    // lives, so the same document cannot resolve two ways (#57).
+    let source = editor.read(cx).image_source(dest);
 
     let handle = editor.clone();
     let on_click = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
@@ -3825,34 +3829,33 @@ fn render_image(
         });
     };
 
-    let available = match &local_path {
-        Some(path) => path.exists(),
-        None => true, // remote: let gpui's loader handle it
+    let image = match source {
+        crate::markdown::ImageSource::Remote(url) => gpui::img(url),
+        crate::markdown::ImageSource::Local(path) => gpui::img(path),
+        crate::markdown::ImageSource::Missing(_) => {
+            return div()
+                .id(("img", item_ix))
+                .my_1()
+                .cursor_pointer()
+                .on_click(on_click)
+                .font_family(t.mono_family.clone())
+                .text_size(px(t.code_size))
+                .text_color(Hsla { a: 0.8, ..t.accent })
+                .child(SharedString::from(format!("![{alt}]({dest}) — file not found")))
+                .into_any_element();
+        }
     };
-    if !available {
-        return div()
-            .id(("img", item_ix))
-            .my_1()
-            .cursor_pointer()
-            .on_click(on_click)
-            .font_family(t.mono_family.clone())
-            .text_size(px(t.code_size))
-            .text_color(Hsla { a: 0.8, ..t.accent })
-            .child(SharedString::from(format!("![{alt}]({dest}) — file not found")))
-            .into_any_element();
-    }
-
-    let image = match local_path {
-        Some(path) => gpui::img(path),
-        None => gpui::img(dest.to_string()),
-    };
+    // The same corner as the reading view draws, on the element that
+    // actually paints: gpui's `ContentMask` carries no radii, so a
+    // rounded parent cannot clip a square child.
+    let radius = crate::elevation::radius(crate::elevation::Surface::Page);
     div()
         .id(("img", item_ix))
         .my_1()
         .w_full()
         .cursor_pointer()
         .on_click(on_click)
-        .child(image.w_full().max_h(px(420.)).rounded_md())
+        .child(image.w_full().max_h(px(420.)).rounded(radius))
         .into_any_element()
 }
 
@@ -5591,6 +5594,34 @@ mod tests {
         attach_workspace_handles(&editor, cx);
         cx.run_until_parked();
         (backups, editor, cx)
+    }
+
+    /// An image's destination is anchored to the document that wrote
+    /// it, and a destination with nothing behind it says so rather
+    /// than quietly drawing nothing. The reading view asks the same
+    /// function with the same anchor (#57).
+    #[gpui::test]
+    fn an_images_path_is_anchored_to_its_own_document(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("assets")).unwrap();
+        std::fs::write(dir.path().join("assets").join("pic.png"), b"x").unwrap();
+        let note = dir.path().join("note.md");
+        std::fs::write(&note, "![p](assets/pic.png)\n\n![q](assets/gone.png)\n").unwrap();
+        let (_backups, editor, cx) = open_editor_path(cx, &note);
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).image_source("assets/pic.png"),
+                crate::markdown::ImageSource::Local(dir.path().join("assets").join("pic.png"))
+            );
+            assert!(matches!(
+                editor.read(app).image_source("assets/gone.png"),
+                crate::markdown::ImageSource::Missing(_)
+            ));
+            assert_eq!(
+                editor.read(app).image_source("https://example.com/r.png"),
+                crate::markdown::ImageSource::Remote("https://example.com/r.png".to_string())
+            );
+        });
     }
 
     /// Author git fixtures with the system CLI (same approach as

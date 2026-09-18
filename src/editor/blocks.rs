@@ -26,16 +26,6 @@ pub struct BlockInfo {
     pub kind: BlockKind,
 }
 
-/// The line (byte range, newline excluded) containing byte `offset`.
-fn line_containing(source: &str, offset: usize) -> Range<usize> {
-    let start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let end = source[offset..]
-        .find('\n')
-        .map(|i| offset + i)
-        .unwrap_or(source.len());
-    start..end
-}
-
 pub fn blocks(source: &str) -> Vec<BlockInfo> {
     if source.len() > crate::editor::spans::MAX_STYLED_BYTES {
         return Vec::new();
@@ -61,9 +51,10 @@ pub fn blocks(source: &str) -> Vec<BlockInfo> {
             }
             Event::End(TagEnd::Image) => {
                 if let Some((range, alt, dest)) = image.take() {
-                    // Block image only when the markup is the whole line.
-                    let line = line_containing(source, range.start);
-                    if source[line].trim() == &source[range.clone()] {
+                    // Block image only when the markup is the whole
+                    // line. The rule lives in `markdown` so the reading
+                    // view asks the same question, not a similar one.
+                    if crate::markdown::is_whole_line(source, range.clone()) {
                         out.push(BlockInfo { range, kind: BlockKind::Image { alt, dest } });
                     }
                 }

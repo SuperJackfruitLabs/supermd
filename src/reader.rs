@@ -426,6 +426,7 @@ impl Render for Reader {
                                 reader.update(cx, |reader, cx| reader.toggle_task(task, cx));
                             }) as view::ToggleTask
                         });
+                    let base = reader.read(cx).path.clone();
                     view::list_item(
                         &document,
                         ix,
@@ -435,6 +436,7 @@ impl Render for Reader {
                             follow: Some(&follow),
                             describe: Some(&describe),
                             toggle: toggle.as_ref(),
+                            base: base.as_deref(),
                         },
                     )
                 })

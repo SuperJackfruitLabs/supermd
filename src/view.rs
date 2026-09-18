@@ -567,6 +567,45 @@ fn rule(t: &Theme) -> AnyElement {
     div().my_2().h(px(thickness)).w_full().bg(color).into_any_element()
 }
 
+/// A whole-line image, drawn as the picture it is.
+///
+/// The reading view used to answer `🖼 ` and the alt text here while
+/// the editor drew the image: the same document, two answers (#57).
+/// The destination resolves through `markdown::resolve_image`, the one
+/// the editor calls, so a path that works in one view works in both.
+///
+/// The width is the page measure -- `list_item` hands every block a
+/// column, and the picture belongs inside it, not inside the window.
+/// The corner radius sits on the `img` itself: gpui's `ContentMask` is
+/// bounds with no radii, so a child's fill paints straight through a
+/// parent's corner arcs, and only the element that actually paints can
+/// round itself.
+fn image_block(alt: &str, dest: &str, t: &Theme, base: Option<&std::path::Path>) -> AnyElement {
+    let radius = crate::elevation::radius(crate::elevation::Surface::Page);
+    let source = crate::markdown::resolve_image(dest, base);
+    let image = match source {
+        crate::markdown::ImageSource::Remote(url) => gpui::img(url),
+        crate::markdown::ImageSource::Local(path) => gpui::img(path),
+        // A broken link has to look deliberate. Drawing nothing reads
+        // as a broken app rather than a broken link, so this says the
+        // same thing the editor says, in the same words.
+        crate::markdown::ImageSource::Missing(_) => {
+            return div()
+                .my_2()
+                .font_family(t.mono_family.clone())
+                .text_size(px(t.code_size))
+                .text_color(Hsla { a: 0.8, ..t.accent })
+                .child(SharedString::from(format!("![{alt}]({dest}) — file not found")))
+                .into_any_element();
+        }
+    };
+    div()
+        .my_2()
+        .w_full()
+        .child(image.w_full().max_h(px(420.)).rounded(radius))
+        .into_any_element()
+}
+
 /// How a literal block looks -- source shown as written, on the code
 /// surface with a hairline outline. Two kinds use it:
 ///
@@ -632,6 +671,11 @@ pub struct Links<'a> {
     pub follow: Option<&'a Follow>,
     pub describe: Option<&'a Describe>,
     pub toggle: Option<&'a ToggleTask>,
+    /// The file this document was read from, so a relative image
+    /// destination resolves against its directory -- the same anchor
+    /// the editor uses. None when the document has no file behind it
+    /// (a plugin's output), and then only remote images can render.
+    pub base: Option<&'a std::path::Path>,
 }
 
 /// `path` uniquely identifies a block within the document, including
@@ -657,6 +701,7 @@ fn block(b: &Block, t: &Theme, cx: &mut gpui::App, path: &str, links: Links) -> 
         Block::Rule => rule(t),
         Block::FrontMatter(text) => literal_block(text, frontmatter_style(t), "frontmatter"),
         Block::Html(text) => literal_block(text, html_style(t), "html-block"),
+        Block::Image { alt, dest } => image_block(alt, dest, t, links.base),
     }
 }
 
@@ -1104,6 +1149,50 @@ no language
             }
             // Out-of-range index degrades to an empty element instead of panicking.
             let _ = list_item(&doc, doc.blocks.len(), &t, cx, Links::default());
+        });
+    }
+
+    /// Every branch of `image_block` builds: a picture that is there, a
+    /// remote one, and a destination with nothing behind it.
+    ///
+    /// What cannot be asserted here is what the pixels do. gpui exposes
+    /// no paint introspection -- `debug_selector` and `debug_bounds`
+    /// give laid-out bounds and nothing about fills, radii or the
+    /// loaded image -- so that the picture is bounded by the page
+    /// measure and its corners are actually rounded was checked on
+    /// screen, not here.
+    #[gpui::test]
+    fn an_image_block_renders_present_remote_and_missing(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(Theme::dark())));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("there.png"), b"not really a png").unwrap();
+        let base = dir.path().join("note.md");
+        let doc = markdown::parse(
+            "![there](there.png)\n\n![gone](gone.png)\n\n![remote](https://example.com/r.png)\n",
+        );
+        assert_eq!(
+            doc.blocks.len(),
+            3,
+            "expected three image blocks, got {:?}",
+            doc.blocks
+        );
+        let t = Theme::dark();
+        cx.update(|cx| {
+            for ix in 0..doc.blocks.len() {
+                let _ = list_item(
+                    &doc,
+                    ix,
+                    &t,
+                    cx,
+                    Links { base: Some(&base), ..Default::default() },
+                );
+            }
+            // No file behind the document at all: a relative
+            // destination has nothing to resolve against and falls to
+            // the same visible "not found", never a blank block.
+            let _ = list_item(&doc, 0, &t, cx, Links::default());
         });
     }
 
