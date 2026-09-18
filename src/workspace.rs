@@ -594,10 +594,41 @@ pub(crate) fn seti_tint_muted(t: &Theme, active: bool) -> gpui::Hsla {
 }
 
 struct ThemePickerState {
-    /// Theme indices in display order (lights, then darks).
+    /// Theme indices in display order (lights, then darks), narrowed by
+    /// `filter`.
     order: Vec<usize>,
+    /// Selection as a position in `order`, never in the full theme list:
+    /// filtering rewrites `order`, and an index into the full list would
+    /// then preview and commit a different theme than the highlighted row.
     pos: usize,
+    /// What the user has typed. Empty shows every theme.
+    filter: String,
     saved_theme: std::sync::Arc<Theme>,
+    scroll: gpui::UniformListScrollHandle,
+}
+
+/// The rows the theme picker shows for a filter: lights first, then
+/// darks, keeping only names that contain `filter` anywhere,
+/// case-insensitively ("moon" finds Rosé Pine Moon, "cat" every
+/// Catppuccin). The returned values are indices into `themes`, so the
+/// row a user lands on names the theme that gets previewed and
+/// committed however narrow the list is.
+pub(crate) fn theme_picker_rows(themes: &[(String, bool)], filter: &str) -> Vec<usize> {
+    let needle = filter.trim().to_lowercase();
+    let hit = |ix: usize| needle.is_empty() || themes[ix].0.to_lowercase().contains(&needle);
+    let mut rows: Vec<usize> = (0..themes.len()).filter(|&i| !themes[i].1 && hit(i)).collect();
+    rows.extend((0..themes.len()).filter(|&i| themes[i].1 && hit(i)));
+    rows
+}
+
+/// `(name, is_dark)` for every loaded theme, in load order -- the input
+/// `theme_picker_rows` filters.
+fn theme_names(cx: &App) -> Vec<(String, bool)> {
+    cx.global::<crate::theme::ThemeState>()
+        .themes
+        .iter()
+        .map(|t| (t.name.clone(), t.theme.is_dark))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -3169,27 +3200,62 @@ impl Workspace {
             self.theme_picker_cancel(&ThemePickerCancel, window, cx);
             return;
         }
+        let order = theme_picker_rows(&theme_names(cx), "");
         let state = cx.global::<crate::theme::ThemeState>();
-        let mut order: Vec<usize> = (0..state.themes.len())
-            .filter(|&i| !state.themes[i].theme.is_dark)
-            .collect();
-        order.extend((0..state.themes.len()).filter(|&i| state.themes[i].theme.is_dark));
         let current = theme(cx);
         let pos = order
             .iter()
             .position(|&i| std::sync::Arc::ptr_eq(&state.themes[i].theme, &current))
             .unwrap_or(0);
-        self.theme_picker = Some(ThemePickerState { order, pos, saved_theme: current });
+        // Twenty-eight rows do not fit: scroll the active theme into
+        // view so the picker opens showing where you already are.
+        let scroll = gpui::UniformListScrollHandle::default();
+        scroll.scroll_to_item(pos, gpui::ScrollStrategy::Center);
+        self.theme_picker = Some(ThemePickerState {
+            order,
+            pos,
+            filter: String::new(),
+            saved_theme: current,
+            scroll,
+        });
         window.focus(&self.theme_picker_focus);
         cx.notify();
+    }
+
+    /// Narrow the list to what the user has typed. Selection follows the
+    /// *theme*, not the row number: a selected theme that survives the
+    /// filter stays selected, otherwise the first match is selected and
+    /// previewed. `saved_theme` is deliberately untouched, so Escape
+    /// still restores the theme that was active when the picker opened.
+    fn theme_picker_set_filter(&mut self, filter: String, cx: &mut Context<Self>) {
+        let names = theme_names(cx);
+        let Some(picker) = &mut self.theme_picker else {
+            return;
+        };
+        let selected_theme = picker.order.get(picker.pos).copied();
+        let order = theme_picker_rows(&names, &filter);
+        let kept = selected_theme.and_then(|ix| order.iter().position(|&i| i == ix));
+        picker.filter = filter;
+        picker.order = order;
+        picker.pos = kept.unwrap_or(0);
+        picker.scroll.scroll_to_item(picker.pos, gpui::ScrollStrategy::Center);
+        if kept.is_some() {
+            cx.notify();
+        } else {
+            // Nothing matching means nothing to preview; `apply` no-ops.
+            self.theme_picker_apply(0, cx);
+        }
     }
 
     fn theme_picker_apply(&mut self, pos: usize, cx: &mut Context<Self>) {
         let Some(picker) = &mut self.theme_picker else {
             return;
         };
+        let Some(&ix) = picker.order.get(pos) else {
+            return;
+        };
         picker.pos = pos;
-        let ix = picker.order[picker.pos];
+        picker.scroll.scroll_to_item(pos, gpui::ScrollStrategy::Center);
         let theme = cx.global::<crate::theme::ThemeState>().themes[ix].theme.clone();
         cx.set_global(crate::theme::ActiveTheme(theme));
         cx.notify();
@@ -3215,10 +3281,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(picker) = self.theme_picker.take() else {
+        let Some(picker) = self.theme_picker.as_ref() else {
             return;
         };
-        let ix = picker.order[picker.pos];
+        // A filter that matches nothing commits nothing, and leaves the
+        // picker open so the filter can be fixed.
+        let Some(&ix) = picker.order.get(picker.pos) else {
+            return;
+        };
+        self.theme_picker = None;
         {
             let picked = &cx.global::<crate::theme::ThemeState>().themes[ix];
             let (name, is_dark) = (picked.name.clone(), picked.theme.is_dark);
@@ -3286,69 +3357,89 @@ impl Workspace {
         })
         .collect();
 
-        let mut rows: Vec<AnyElement> = Vec::new();
-        let mut last_dark: Option<bool> = None;
-        for (pos, &ix) in picker.order.iter().enumerate() {
-            let loaded = &state.themes[ix];
-            let is_dark = loaded.theme.is_dark;
-            if last_dark != Some(is_dark) {
-                last_dark = Some(is_dark);
-                rows.push(
-                    div()
-                        .px_2()
-                        .pt_2()
-                        .pb_1()
-                        .text_size(px(10.))
-                        .text_color(t.fg_muted)
-                        .child(if is_dark { "DARK" } else { "LIGHT" })
-                        .into_any_element(),
-                );
-            }
-            let chosen = if is_dark {
-                state.settings.dark_theme == loaded.name
-            } else {
-                state.settings.light_theme == loaded.name
-            };
-            let selected = pos == picker.pos;
-            rows.push(
-                div()
-                    .id(("theme-row", pos))
-                    .w_full()
-                    .px_2()
-                    .py(px(4.))
-                    .rounded_md()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(t.selected_bg))
-                    .when(!selected, |d| d.hover(|s| s.bg(t.hover_bg)))
-                    .child(
+        // One row per theme, each marked Light or Dark: at twenty-eight
+        // themes a grouped list scrolls past the fold, and the rows have
+        // to be uniform for the list to scroll the selection into view.
+        let row_count = picker.order.len();
+        let rows = uniform_list(
+            "theme-picker-rows",
+            row_count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                let t = theme(cx);
+                let state = cx.global::<crate::theme::ThemeState>();
+                let Some(picker) = this.theme_picker.as_ref() else {
+                    return Vec::new();
+                };
+                range
+                    .map(|pos| {
+                        let Some(&ix) = picker.order.get(pos) else {
+                            return div().id(("theme-row", pos)).into_any_element();
+                        };
+                        let loaded = &state.themes[ix];
+                        let is_dark = loaded.theme.is_dark;
+                        let chosen = if is_dark {
+                            state.settings.dark_theme == loaded.name
+                        } else {
+                            state.settings.light_theme == loaded.name
+                        };
+                        let selected = pos == picker.pos;
                         div()
-                            .size(px(14.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(t.border)
-                            .bg(loaded.theme.bg),
-                    )
-                    .child(div().size(px(14.)).rounded_full().bg(loaded.theme.accent))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(t.ui_size))
-                            .text_color(t.fg)
-                            .child(SharedString::from(loaded.name.clone())),
-                    )
-                    .when(chosen, |d| {
-                        d.child(div().text_size(px(11.)).text_color(t.accent).child("✓"))
+                            .id(("theme-row", pos))
+                            .w_full()
+                            .h(px(26.))
+                            .px_2()
+                            .rounded_md()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .cursor_pointer()
+                            .when(selected, |d| d.bg(t.selected_bg))
+                            .when(!selected, |d| d.hover(|s| s.bg(t.hover_bg)))
+                            .child(
+                                div()
+                                    .size(px(14.))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(t.border)
+                                    .bg(loaded.theme.bg),
+                            )
+                            .child(div().size(px(14.)).rounded_full().bg(loaded.theme.accent))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(t.ui_size))
+                                    .text_color(t.fg)
+                                    .child(SharedString::from(loaded.name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(t.fg_muted)
+                                    .child(if is_dark { "Dark" } else { "Light" }),
+                            )
+                            .when(chosen, |d| {
+                                d.child(div().text_size(px(11.)).text_color(t.accent).child("✓"))
+                            })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                this.theme_picker_apply(pos, cx);
+                            }))
+                            .into_any_element()
                     })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                        this.theme_picker_apply(pos, cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(picker.scroll.clone())
+        .h(px((row_count.min(12) as f32) * 26.));
+
+        let filter_line: SharedString = if picker.filter.is_empty() {
+            "Type to filter themes…".into()
+        } else if row_count == 0 {
+            format!("{}  — no themes match", picker.filter).into()
+        } else {
+            picker.filter.clone().into()
+        };
+        let filter_is_empty = picker.filter.is_empty();
 
         Some(
             div()
@@ -3372,10 +3463,38 @@ impl Workspace {
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
+                        // Typing narrows the list. The picker's own
+                        // bindings (arrows, enter, escape) carry no
+                        // printable key, so nothing here shadows them.
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                            let Some(picker) = this.theme_picker.as_ref() else {
+                                return;
+                            };
+                            let m = &event.keystroke.modifiers;
+                            if m.platform || m.control || m.function {
+                                return;
+                            }
+                            let mut filter = picker.filter.clone();
+                            if event.keystroke.key == "backspace" {
+                                if filter.pop().is_none() {
+                                    return;
+                                }
+                            } else {
+                                let text = event
+                                    .keystroke
+                                    .key_char
+                                    .as_deref()
+                                    .unwrap_or(event.keystroke.key.as_str());
+                                if text.chars().count() != 1 {
+                                    return;
+                                }
+                                filter.push_str(text);
+                            }
+                            this.theme_picker_set_filter(filter, cx);
+                            cx.stop_propagation();
+                        }))
                         .w(px(340.))
-                        .max_h(px(480.))
                         .id("theme-picker-panel")
-                        .overflow_y_scroll()
                         .border_1()
                         .border_color(t.border)
                         .elevated(crate::elevation::Overlay::ThemePicker, &t)
@@ -3399,11 +3518,35 @@ impl Workspace {
                             div()
                                 .px_2()
                                 .py_1()
-                                .text_size(px(13.))
-                                .text_color(t.fg_strong)
-                                .child("Theme    ↑↓ preview · ⏎ apply · esc cancel"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(13.))
+                                        .when(filter_is_empty, |d| d.text_color(t.fg_muted))
+                                        .when(!filter_is_empty, |d| d.text_color(t.fg_strong))
+                                        .child(filter_line),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(t.fg_muted)
+                                        .child("↑↓ preview · ⏎ apply · esc cancel"),
+                                ),
                         )
-                        .children(rows),
+                        // Inset from the rounded bottom edge: gpui clips
+                        // to a square, so a selected last row would paint
+                        // over the panel's corner arc.
+                        .child(
+                            div()
+                                .pb(crate::elevation::corner_inset(
+                                    crate::elevation::Overlay::ThemePicker,
+                                ))
+                                .child(rows),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -8876,6 +9019,122 @@ pub(crate) mod tests {
             ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
         });
         cx.update(|_, app| assert!(ws.read(app).theme_picker.is_none()));
+    }
+
+    /// The filter is case-insensitive and matches anywhere in the name:
+    /// the only thing that keeps a twenty-eight theme list navigable.
+    #[test]
+    fn theme_picker_filter_matches_anywhere_case_insensitively() {
+        let themes: Vec<(String, bool)> = vec![
+            ("Rosé Pine Moon".into(), true),
+            ("Catppuccin Latte".into(), false),
+            ("Catppuccin Mocha".into(), true),
+            ("Ayu Light".into(), false),
+        ];
+        let names = |filter: &str| -> Vec<String> {
+            theme_picker_rows(&themes, filter)
+                .into_iter()
+                .map(|i| themes[i].0.clone())
+                .collect()
+        };
+        // No filter: everything, lights before darks.
+        assert_eq!(
+            names(""),
+            ["Catppuccin Latte", "Ayu Light", "Rosé Pine Moon", "Catppuccin Mocha"]
+        );
+        // Anywhere in the name, in either case.
+        assert_eq!(names("moon"), ["Rosé Pine Moon"]);
+        assert_eq!(names("MOON"), ["Rosé Pine Moon"]);
+        assert_eq!(names("Cat"), ["Catppuccin Latte", "Catppuccin Mocha"]);
+        assert_eq!(names("light"), ["Ayu Light"]);
+        // Nothing matching leaves the list empty -- and so nothing to commit.
+        assert!(names("zzz").is_empty());
+    }
+
+    /// Filtering must lose neither anchor: the selection follows the
+    /// *theme*, not the row number, so clearing the filter keeps the
+    /// same theme highlighted; and `saved_theme` still holds what was
+    /// active when the picker opened, so Escape restores it.
+    #[gpui::test]
+    fn theme_picker_filtering_keeps_selection_and_cancel_baseline(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let initial = cx.update(|_, app| theme(app));
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        // "ayu" leaves exactly the two Ayu themes, light row first.
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter("ayu".into(), cx));
+        let shown = cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker open");
+            let state = app.global::<crate::theme::ThemeState>();
+            picker.order.iter().map(|&i| state.themes[i].name.clone()).collect::<Vec<_>>()
+        });
+        assert_eq!(shown, ["Ayu Light", "Ayu Dark"], "the list shows only matches");
+
+        // Arrows still preview, and what they preview is the row the
+        // cursor is on -- not the theme sitting at that index in the
+        // unfiltered list.
+        let assert_preview_matches_row = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| {
+                let w = ws.read(app);
+                let picker = w.theme_picker.as_ref().expect("picker open");
+                let state = app.global::<crate::theme::ThemeState>();
+                let selected = &state.themes[picker.order[picker.pos]];
+                assert!(
+                    Arc::ptr_eq(&theme(app), &selected.theme),
+                    "the highlighted row is the theme being previewed"
+                );
+                selected.name.clone()
+            })
+        };
+        assert_eq!(assert_preview_matches_row(cx), "Ayu Light");
+        ws.update_in(cx, |ws, window, cx| ws.theme_picker_down(&ThemePickerDown, window, cx));
+        assert_eq!(assert_preview_matches_row(cx), "Ayu Dark");
+        ws.update_in(cx, |ws, window, cx| ws.theme_picker_up(&ThemePickerUp, window, cx));
+        let picked = assert_preview_matches_row(cx);
+        assert_eq!(picked, "Ayu Light");
+
+        // Clearing restores the full list with the same theme selected.
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter(String::new(), cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker open");
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(picker.order.len(), state.themes.len(), "every theme is back");
+            assert_eq!(
+                state.themes[picker.order[picker.pos]].name, picked,
+                "selection followed the theme, not the row number"
+            );
+        });
+
+        // A filter matching nothing commits nothing.
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter("zzz".into(), cx));
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(ws.read(app).theme_picker.is_some(), "nothing to commit, picker stays open");
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(state.settings.dark_theme, crate::settings::Settings::default().dark_theme);
+            assert_eq!(
+                state.settings.light_theme,
+                crate::settings::Settings::default().light_theme
+            );
+        });
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_cancel(&ThemePickerCancel, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(
+                Arc::ptr_eq(&theme(app), &initial),
+                "escape after filtering restores the theme the picker opened on"
+            );
+        });
     }
 
     /// The appearance control in the theme picker persists and applies
