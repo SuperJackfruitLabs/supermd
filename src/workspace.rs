@@ -3243,12 +3243,17 @@ impl Workspace {
         picker.filter = filter;
         picker.order = order;
         picker.pos = kept.unwrap_or(0);
-        picker.scroll.scroll_to_item(picker.pos, gpui::ScrollStrategy::Center);
-        if kept.is_some() {
-            cx.notify();
-        } else {
-            // Nothing matching means nothing to preview; `apply` no-ops.
-            self.theme_picker_apply(0, cx);
+        // Every keystroke repaints, this one included: a filter that
+        // matches nothing previews nothing and commits nothing, so the
+        // frame is the whole of what it does -- without it the emptied
+        // list and its "no themes match" line never reach the screen.
+        cx.notify();
+        match kept {
+            // Same theme, new row: scroll to where it moved to.
+            Some(pos) => picker.scroll.scroll_to_item(pos, gpui::ScrollStrategy::Center),
+            // It did not survive: preview the first match, which
+            // scrolls to it -- and no-ops when nothing matched at all.
+            None => self.theme_picker_apply(0, cx),
         }
     }
 
@@ -9186,6 +9191,47 @@ pub(crate) mod tests {
                 "escape after filtering restores the theme the picker opened on"
             );
         });
+    }
+
+    /// Narrowing the list to nothing has to reach the screen. The
+    /// no-match path previews nothing and commits nothing, so asking
+    /// for a frame is the only thing it does -- and it did not do it:
+    /// the emptied rows and the "no themes match" line stayed one
+    /// frame behind, invisible until some unrelated event repainted.
+    #[gpui::test]
+    fn filtering_to_no_matches_asks_for_a_repaint(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let repaints = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let _watch = cx.update(|_, app| {
+            let seen = repaints.clone();
+            app.observe(&ws, move |_, _| seen.set(seen.get() + 1))
+        });
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        cx.run_until_parked();
+
+        let before = repaints.get();
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter("zzz".into(), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker open");
+            assert!(picker.order.is_empty(), "\"zzz\" matches no theme");
+        });
+        assert!(
+            repaints.get() > before,
+            "an emptied list still needs a frame to draw, and none was asked for"
+        );
+
+        // A filter that does match repaints too, and did before.
+        let before = repaints.get();
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter("ayu".into(), cx));
+        cx.run_until_parked();
+        assert!(repaints.get() > before, "a narrowed list needs a frame as well");
     }
 
     /// The appearance control in the theme picker persists and applies
