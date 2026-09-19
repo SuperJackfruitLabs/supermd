@@ -148,6 +148,9 @@ struct InlineBuilder {
     /// Byte offset where the currently-open link began, and where it
     /// points. Nested links are not a thing in CommonMark.
     open_link: Option<(usize, String)>,
+    /// Byte offset where the separator for the most recent line break
+    /// began, while it is still the last thing pushed. See `mark`.
+    last_break: Option<usize>,
 }
 
 impl InlineBuilder {
@@ -157,6 +160,33 @@ impl InlineBuilder {
         if !style.is_plain() {
             self.out.spans.push((start..self.out.text.len(), style));
         }
+        self.last_break = None;
+    }
+
+    /// Pushes the separator a line break becomes -- a space for a soft
+    /// one, a newline for a hard one.
+    ///
+    /// A line break joins two runs of words. With nothing before it
+    /// there is nothing to join, which is what a paragraph looks like
+    /// once a block image has been lifted out of its first line, so
+    /// the separator is dropped. Otherwise it is remembered: it exists
+    /// only for the content that follows it, and `mark` hands that
+    /// content the right place to be undone from.
+    fn push_break(&mut self, s: &str) {
+        if self.is_empty() {
+            return;
+        }
+        let start = self.out.text.len();
+        self.out.text.push_str(s);
+        self.last_break = Some(start);
+    }
+
+    /// Where the content pushed next begins, for `truncate`: behind a
+    /// trailing line-break separator, because that separator is part
+    /// of joining what follows on -- lift the picture out and the
+    /// space or newline before it has nothing left to join.
+    fn mark(&self) -> usize {
+        self.last_break.unwrap_or(self.out.text.len())
     }
 
     fn is_empty(&self) -> bool {
@@ -175,6 +205,7 @@ impl InlineBuilder {
     /// decision away. This is the undo.
     fn truncate(&mut self, mark: usize) {
         self.out.text.truncate(mark);
+        self.last_break = None;
         self.out.spans.retain_mut(|(r, _)| {
             r.end = r.end.min(mark);
             r.start < r.end
@@ -686,7 +717,7 @@ pub fn parse(source: &str) -> Document {
                 // settled at `End(Image)`, so the placeholder goes in
                 // now and comes back out there if it was a block.
                 styles.image += 1;
-                let mark = inline.as_ref().map(|b| b.out.text.len());
+                let mark = inline.as_ref().map(|b| b.mark());
                 if let Some(builder) = inline.as_mut() {
                     builder.push("🖼 ", styles.current());
                 }
@@ -733,19 +764,13 @@ pub fn parse(source: &str) -> Document {
                 }
             }
             Event::SoftBreak => {
-                // A line break joins two runs of words. With nothing
-                // before it there is nothing to join -- which is what a
-                // paragraph looks like once a block image has been
-                // lifted out of its first line.
                 if let Some(builder) = inline.as_mut() {
-                    if !builder.is_empty() {
-                        builder.push(" ", SpanStyle::default());
-                    }
+                    builder.push_break(" ");
                 }
             }
             Event::HardBreak => {
                 if let Some(builder) = inline.as_mut() {
-                    builder.push("\n", SpanStyle::default());
+                    builder.push_break("\n");
                 }
             }
 
@@ -1502,7 +1527,21 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, ["paragraph", "image", "paragraph"], "{:?}", doc.blocks);
+        let Block::Paragraph(before) = &doc.blocks[0] else { unreachable!() };
+        // The space the line break pushed to join "words" to the
+        // picture belonged to the picture: it goes when it does.
+        assert_eq!(before.text, "words");
         let Block::Paragraph(after) = &doc.blocks[2] else { unreachable!() };
+        assert_eq!(after.text, "more");
+        // A hard break is the same story with a newline for a
+        // separator, on both sides of the picture.
+        let doc = parse("words  \n![pic](p.png)  \nmore\n");
+        let [Block::Paragraph(before), Block::Image { .. }, Block::Paragraph(after)] =
+            &doc.blocks[..]
+        else {
+            panic!("hard breaks around a picture: {:?}", doc.blocks)
+        };
+        assert_eq!(before.text, "words");
         assert_eq!(after.text, "more");
         // A picture alone in its paragraph leaves nothing at all behind.
         assert_eq!(parse("![only](o.png)\n").blocks.len(), 1);
