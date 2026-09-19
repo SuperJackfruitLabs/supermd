@@ -2479,13 +2479,49 @@ impl Editor {
         // states it too and this one must not quietly depend on that.
         window.focus(&self.focus_handle);
 
-        // An empty menu is worse than none: a code file or the diff
-        // view takes none of these commands, so no overlay opens.
+        self.raise_context_menu(caret, event.position, cx);
+    }
+
+    /// Ask the workspace to raise the context menu at `position`, with
+    /// the facts read at `caret` -- *after* the caret has moved, so a
+    /// command's own precondition and its menu row agree.
+    ///
+    /// An empty menu is worse than none: a code file or the diff view
+    /// takes none of these commands, so no overlay opens.
+    fn raise_context_menu(
+        &mut self,
+        caret: usize,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         let ctx = self.menu_context(caret);
         if !crate::menus::items_for(crate::menus::Surface::Editor, ctx).is_empty() {
-            cx.emit(EditorEvent::ContextMenu { position: event.position, ctx });
+            cx.emit(EditorEvent::ContextMenu { position, ctx });
         }
         cx.notify();
+    }
+
+    /// A right-click on a table drawn as a widget. The context menu
+    /// hangs off line elements and a widget is not one, so this is the
+    /// widget's own way in: drop the caret on the row's source line --
+    /// exactly where the left-click handler puts it -- and raise the
+    /// same menu, which then reads `in_table` as true.
+    fn right_click_table_row(
+        &mut self,
+        line: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.diff.is_some() {
+            return; // read-only, same as every other right press
+        }
+        let start = self.core.buffer.line_range(line).start;
+        self.core.set_cursor(start);
+        self.core.break_undo_group();
+        self.preferred_x = None;
+        window.focus(&self.focus_handle);
+        self.raise_context_menu(start, position, cx);
     }
 
     fn on_root_mouse_move(
@@ -3778,6 +3814,7 @@ fn render_table(
         // would double the line.
         let is_first_body_row = row_ix == 1;
         let handle = editor.clone();
+        let menu_handle = editor.clone();
         let mut row = div()
             .id(("trow", item_ix * 1024 + row_ix))
             .flex()
@@ -3806,7 +3843,17 @@ fn render_table(
                     window.focus(&editor.focus_handle);
                     cx.notify();
                 });
-            });
+            })
+            // The row/column commands are what people right-click a
+            // table for, and the line-element menu cannot see a widget.
+            .on_mouse_down(
+                MouseButton::Right,
+                move |event: &MouseDownEvent, window, cx| {
+                    menu_handle.update(cx, |editor, cx| {
+                        editor.right_click_table_row(line, event.position, window, cx);
+                    });
+                },
+            );
         for c in 0..ncols {
             let cell = cells.get(c).cloned().unwrap_or_default();
             let mut cell_el = div()
@@ -6037,6 +6084,35 @@ mod tests {
         ] {
             assert!(ids.contains(&expected), "{expected} missing from {ids:?}");
         }
+    }
+
+    /// Right-clicking a rendered table offers the table commands. The
+    /// menu lives on line elements, and a widget is not one, so this
+    /// gesture used to do nothing at all.
+    #[gpui::test]
+    fn right_clicking_a_widget_table_opens_the_table_menu(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "t.md", "para\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nafter\n");
+        let raised = menu_sink(cx, &editor);
+        // Caret in the paragraph, so the table renders as a widget.
+        caret_and_draw(&editor, cx, 0);
+        assert_eq!(widget_count(&editor, cx), 1, "the table is a widget, not lines");
+
+        let p = point(px(40.), px(80.));
+        editor.update_in(cx, |ed, window, cx| ed.right_click_table_row(2, p, window, cx));
+
+        let (pos, ctx) = *raised.borrow().last().expect("the menu opened");
+        assert_eq!(pos, p, "the menu opens where the press landed");
+        assert!(ctx.in_table, "the menu knows it is in a table: {ctx:?}");
+        assert!(menu_ids(ctx).contains(&"table_delete_row"), "{:?}", menu_ids(ctx));
+        let line = cx.update(|_, app| {
+            let ed = editor.read(app);
+            ed.core.buffer.line_of_byte(ed.core.selection.head)
+        });
+        assert!(
+            (2..=4).contains(&line),
+            "the caret moved into the table so the commands can act: {line}"
+        );
     }
 
     /// A right-click inside an existing selection keeps it. Collapsing
