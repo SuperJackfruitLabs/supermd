@@ -842,6 +842,8 @@ fn make_editor(
             this.context_menu = Some((*position, crate::menus::Surface::Editor, *ctx));
             cx.notify();
         }
+        // A command that declined; the strip is the workspace's.
+        EditorEvent::CommandError(message) => this.show_command_error(message.clone(), cx),
     })
     .detach();
     editor

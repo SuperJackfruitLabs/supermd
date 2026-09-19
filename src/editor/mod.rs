@@ -241,6 +241,10 @@ pub enum EditorEvent {
     /// raise it), so the editor reports where the press was and what it
     /// knew at the caret; `menus::items_for` turns that into rows.
     ContextMenu { position: gpui::Point<Pixels>, ctx: crate::menus::EditorContext },
+    /// A command declined and has to say why. A refusal nobody can see
+    /// is indistinguishable from a broken command, and the workspace
+    /// owns the one transient message strip (`show_command_error`).
+    CommandError(String),
 }
 
 /// The `[[` completion popup: doc offset of the opener, the filtered
@@ -1604,12 +1608,24 @@ impl Editor {
         self.after_edit(cx);
     }
 
+    /// Report a command that declined. The editor has no message
+    /// surface of its own; the workspace owns the transient strip and
+    /// turns this into `show_command_error`.
+    fn refuse(&mut self, why: &str, cx: &mut Context<Self>) {
+        cx.emit(EditorEvent::CommandError(why.to_string()));
+    }
+
+    /// "Put the caret in a table first" -- the four table commands all
+    /// share this precondition, and all four used to fail it in silence.
+    const NOT_IN_A_TABLE: &'static str = "Put the cursor in a table first";
+
     fn table_insert_row(&mut self, _: &TableInsertRow, _: &mut Window, cx: &mut Context<Self>) {
         if !self.can_format() {
             cx.propagate();
             return;
         }
         let Some((br, block, pos)) = self.table_cursor() else {
+            self.refuse(Self::NOT_IN_A_TABLE, cx);
             return;
         };
         // Not `pos.row + 1`: a row asked for from the header lands
@@ -1625,12 +1641,21 @@ impl Editor {
             return;
         }
         let Some((br, block, pos)) = self.table_cursor() else {
+            self.refuse(Self::NOT_IN_A_TABLE, cx);
             return;
         };
         let Some(new_block) = table_ops::delete_row(&block, pos.row) else {
+            self.refuse(
+                "The header and the dashed line under it are the table's structure, not rows",
+                cx,
+            );
             return;
         };
-        let row = table_edit::rows(&new_block).len().saturating_sub(1).min(pos.row);
+        // Row 1 is the delimiter; a caret there turns the next
+        // keystroke into `| z--- | --- |`. Clamp to a body row, and
+        // fall back to the header when the body is now empty.
+        let rows = table_edit::rows(&new_block).len();
+        let row = if rows > 2 { pos.row.clamp(2, rows - 1) } else { 0 };
         self.apply_table_edit(br, &new_block, table_edit::CellPos { row, cell: pos.cell }, cx);
     }
 
@@ -1645,6 +1670,7 @@ impl Editor {
             return;
         }
         let Some((br, block, pos)) = self.table_cursor() else {
+            self.refuse(Self::NOT_IN_A_TABLE, cx);
             return;
         };
         let new_block = table_ops::insert_column(&block, pos.cell);
@@ -1662,9 +1688,11 @@ impl Editor {
             return;
         }
         let Some((br, block, pos)) = self.table_cursor() else {
+            self.refuse(Self::NOT_IN_A_TABLE, cx);
             return;
         };
         let Some(new_block) = table_ops::delete_column(&block, pos.cell) else {
+            self.refuse("A table needs at least one column", cx);
             return;
         };
         let cell = pos.cell.min(table_edit::rows(&new_block)[pos.row].cells.len().saturating_sub(1));
@@ -5923,6 +5951,26 @@ mod tests {
         opened
     }
 
+    /// Every refusal an editor reported through
+    /// `EditorEvent::CommandError` — the workspace turns each into
+    /// `show_command_error`.
+    fn command_error_sink(
+        cx: &mut VisualTestContext,
+        editor: &Entity<Editor>,
+    ) -> Rc<RefCell<Vec<String>>> {
+        let said: Rc<RefCell<Vec<String>>> = Rc::default();
+        let sink = said.clone();
+        cx.update(|_, app| {
+            app.subscribe(editor, move |_, event: &EditorEvent, _| {
+                if let EditorEvent::CommandError(msg) = event {
+                    sink.borrow_mut().push(msg.clone());
+                }
+            })
+            .detach();
+        });
+        said
+    }
+
     // ── right-click context menu ───────────────────────────────────────
 
     /// Every `EditorEvent::ContextMenu` an editor raised.
@@ -6942,6 +6990,71 @@ mod tests {
             }
             assert!(table_edit::rows(&table)[1].is_separator, "{table:?}");
         }
+    }
+
+    /// After deleting a row the caret must land somewhere you can
+    /// type. The delimiter is not such a place: one keystroke there
+    /// turns the table into a paragraph of pipes.
+    #[gpui::test]
+    fn delete_row_never_parks_the_caret_in_the_delimiter(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "t.md", doc);
+        editor.update_in(cx, |ed, _, _| ed.core.set_cursor(doc.find('1').unwrap()));
+        cx.dispatch_action(TableDeleteRow);
+        cx.simulate_input("z");
+        let text = buffer_text(&editor, cx);
+        assert!(!text.contains("z---"), "the caret was in the delimiter: {text:?}");
+        assert_eq!(
+            crate::editor::blocks::blocks(&text)
+                .iter()
+                .filter(|b| matches!(b.kind, crate::editor::blocks::BlockKind::Table))
+                .count(),
+            1,
+            "still one table: {text:?}"
+        );
+    }
+
+    /// A command that declines tells the user why. Silence is
+    /// indistinguishable from a broken command.
+    #[gpui::test]
+    fn deleting_the_header_row_says_why_it_refused(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "t.md", doc);
+        let refusals = command_error_sink(cx, &editor);
+        editor.update_in(cx, |ed, _, _| ed.core.set_cursor(2));
+        cx.dispatch_action(TableDeleteRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "unchanged");
+        assert!(!refusals.borrow().is_empty(), "the refusal reached the user");
+    }
+
+    /// The same for the other three refusals: a table shortcut pressed
+    /// outside a table, and the last column of a one-column table.
+    #[gpui::test]
+    fn the_other_table_refusals_reach_the_user_too(cx: &mut TestAppContext) {
+        let doc = "a paragraph\n\n| a |\n| --- |\n| 1 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "one.md", doc);
+        let refusals = command_error_sink(cx, &editor);
+
+        // Caret in the paragraph: all four commands decline out loud.
+        editor.update_in(cx, |ed, _, _| ed.core.set_cursor(3));
+        cx.dispatch_action(TableInsertRow);
+        cx.dispatch_action(TableDeleteRow);
+        cx.dispatch_action(TableInsertColumn);
+        cx.dispatch_action(TableDeleteColumn);
+        assert_eq!(buffer_text(&editor, cx), doc, "and change nothing");
+        assert_eq!(
+            *refusals.borrow(),
+            vec![Editor::NOT_IN_A_TABLE.to_string(); 4],
+            "every one of them said so"
+        );
+
+        // And the last column of a one-column table.
+        editor.update_in(cx, |ed, _, _| ed.core.set_cursor(doc.find('1').unwrap()));
+        cx.dispatch_action(TableDeleteColumn);
+        assert_eq!(buffer_text(&editor, cx), doc, "still a table");
+        let said = refusals.borrow();
+        assert_eq!(said.len(), 5, "{said:?}");
+        assert!(said[4].contains("column"), "{said:?}");
     }
 
     #[gpui::test]
