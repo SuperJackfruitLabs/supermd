@@ -1183,21 +1183,24 @@ impl Workspace {
     }
 
     fn on_fs_events(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        // Ignore churn from ignored paths (target/, node_modules/, …) so
-        // builds in an open workspace don't hammer the UI. This is only
-        // a whole-batch shortcut for the common case of an irrelevant
-        // batch; it must never stand in for the per-path check below,
-        // or one visible path in a batch would wave through every
-        // ignored path riding alongside it.
+        // Ignore churn from build output (target/, node_modules/, .git)
+        // so builds in an open workspace don't hammer the UI. This asks
+        // *only* that, not "is it gitignored": a gitignored note is a
+        // note, the sidebar draws it dimmed, and an edit to one has to
+        // refresh the tree like any other. And this is only a
+        // whole-batch shortcut for an irrelevant batch; it must never
+        // stand in for the per-path index check below, or one visible
+        // path in a batch would wave through every ignored path riding
+        // alongside it.
         let root = self.tree.as_ref().map(|tree| tree.root.clone());
-        // One matcher for the batch: it caches the ignore files of each
-        // directory it walks through, and a batch is a snapshot anyway.
-        let mut ignores = root.as_ref().map(|root| crate::files::index_matcher(root));
-        if let Some(ignores) = ignores.as_mut() {
-            if !paths.iter().any(|p| ignores.allows(p)) {
+        if let Some(root) = root.as_ref() {
+            if paths.iter().all(|p| crate::files::is_build_noise(root, p)) {
                 return;
             }
         }
+        // One matcher for the batch: it caches the ignore files of each
+        // directory it walks through, and a batch is a snapshot anyway.
+        let mut ignores = root.as_ref().map(|root| crate::files::index_matcher(root));
         if let Some(tree) = &mut self.tree {
             tree.refresh();
         }
@@ -7769,6 +7772,52 @@ pub(crate) mod tests {
                 !back.iter().any(|(p, _)| p.ends_with("HIDDEN.md")),
                 "a path under .git must not enter the index just because \
                  the batch also touched a visible file: {back:?}"
+            );
+        });
+    }
+
+    /// A gitignored note is still a note. The batch gate asked the
+    /// *index* question, so a whole batch carrying only gitignored
+    /// paths was dropped and the sidebar stayed stale -- writing one
+    /// from a terminal showed nothing until something else happened.
+    /// Index admission is a separate question and stays as it was.
+    #[gpui::test]
+    fn the_watcher_wakes_for_a_gitignored_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "drafts/\n").unwrap();
+        std::fs::create_dir(root.path().join("drafts")).unwrap();
+        std::fs::write(root.path().join("drafts/one.md"), "# one\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        // Draw the listing once, so a stale cache would be visible.
+        let drafts = root.path().join("drafts");
+        ws.update_in(cx, |ws, _, _| {
+            let tree = ws.tree.as_mut().expect("a folder workspace");
+            tree.toggle(&drafts);
+            tree.visible();
+        });
+
+        let two = drafts.join("two.md");
+        std::fs::write(&two, "# two\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[two.clone()], cx));
+        cx.run_until_parked();
+
+        let names: Vec<String> = ws.update_in(cx, |ws, _, _| {
+            ws.tree
+                .as_mut()
+                .expect("a folder workspace")
+                .visible()
+                .into_iter()
+                .map(|(_, e)| e.name)
+                .collect()
+        });
+        assert!(names.contains(&"two.md".to_string()), "the sidebar refreshed: {names:?}");
+        // And the index still declines it: that is IndexMatcher's call.
+        cx.update(|_, app| {
+            let index = ws.read(app).knowledge.lock().unwrap();
+            assert!(
+                !index.note_names().iter().any(|(_, p)| p == &two),
+                "a gitignored note stays out of the knowledge index"
             );
         });
     }

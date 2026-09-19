@@ -60,12 +60,47 @@ fn index_walk_builder(root: &Path) -> ignore::WalkBuilder {
     b
 }
 
+/// Is this path build output or VCS internals -- the churn the watcher
+/// exists to ignore? This is deliberately NOT "is it gitignored": a
+/// gitignored note is a note, and the sidebar shows it dimmed, so an
+/// edit to one still has to refresh the tree.
+///
+/// `should_descend` already names these directories (`IGNORED_DIRS`,
+/// and the protected folders at the root); asking it about each
+/// component on the way down is the same rule, not a second list.
+pub fn is_build_noise(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        // Outside the workspace: not ours to call noise.
+        return false;
+    };
+    let mut acc = root.to_path_buf();
+    let count = rel.components().count();
+    for (ix, comp) in rel.components().enumerate() {
+        acc.push(comp);
+        // Every component but the last is a directory by construction;
+        // the last may be gone already, so ask the disk.
+        let is_dir = ix + 1 < count || acc.is_dir();
+        if !should_descend(root, &acc, is_dir) {
+            return true;
+        }
+    }
+    false
+}
+
 /// The walker the sidebar uses. Shows gitignored files — a file tree
 /// should show what is on disk — but still skips hidden files and the
 /// build directories that would bury everything else.
+///
+/// `ignore(false)` and `parents(false)` are part of that promise:
+/// `git_ignore(false)` alone still let a `.ignore`/`.rgignore` file (or
+/// one above the root) delete rows outright, which is the opposite of
+/// showing them dimmed. `FsEntry::ignored` still comes from
+/// `IndexMatcher`, so those rows arrive dimmed rather than absent.
 fn tree_walk_builder(root: &Path) -> ignore::WalkBuilder {
     let mut b = ignore::WalkBuilder::new(root);
     b.hidden(true)
+        .ignore(false)
+        .parents(false)
         .git_ignore(false)
         .git_global(false)
         .git_exclude(false)
@@ -387,6 +422,42 @@ mod tests {
         assert!(should_descend(root, Path::new("/w/src"), true));
         // A *file* named Music is not a protected folder.
         assert!(should_descend(root, &root.join("Music"), false));
+    }
+
+    /// The sidebar shows what the index excludes, dimmed. A .ignore
+    /// file made rows vanish instead, which is the one affordance
+    /// telling the user a file is outside the index.
+    #[test]
+    fn ignore_files_are_dimmed_in_the_sidebar_not_omitted() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".ignore"), "drafts/\n").unwrap();
+        std::fs::create_dir(root.path().join("drafts")).unwrap();
+        std::fs::write(root.path().join("drafts/x.md"), "# x\n").unwrap();
+        let mut tree = FileTree::new(root.path().to_path_buf());
+        let rows = tree.visible();
+        let names: Vec<&str> = rows.iter().map(|(_, e)| e.name.as_str()).collect();
+        assert!(names.contains(&"drafts"), "present: {names:?}");
+        let entry = rows.iter().find(|(_, e)| e.name == "drafts").expect("the row is there");
+        assert!(entry.1.ignored, "and dimmed");
+    }
+
+    /// Build noise silences the watcher; a gitignored note does not.
+    /// The old gate conflated them, so writing to a gitignored file
+    /// from a terminal left the sidebar stale until something else
+    /// happened.
+    #[test]
+    fn only_build_noise_silences_the_watcher() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "drafts/\n").unwrap();
+        assert!(
+            !is_build_noise(root.path(), &root.path().join("drafts/secret.md")),
+            "a gitignored note still refreshes the sidebar"
+        );
+        assert!(
+            is_build_noise(root.path(), &root.path().join("target/debug/x.o")),
+            "build output does not"
+        );
+        assert!(is_build_noise(root.path(), &root.path().join(".git/index")));
     }
 
     #[test]
