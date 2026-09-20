@@ -800,9 +800,13 @@ mod tests {
     fn every_committed_theme_is_its_scheme_regenerated() {
         for (slug, yaml, committed) in CONVERTED {
             let scheme = Scheme::parse(slug, yaml).expect("scheme parses");
+            // Git checks these files out with CRLF on Windows, so compare
+            // the content rather than the line endings -- the generator
+            // always emits LF, which is what gets committed. Same fix as
+            // `shortcut_docs_match_the_table` in commands.rs.
             assert_eq!(
                 render_toml(&scheme),
-                *committed,
+                committed.replace("\r\n", "\n"),
                 "{slug}.toml is stale: run `cargo run --example import_base16`"
             );
         }
