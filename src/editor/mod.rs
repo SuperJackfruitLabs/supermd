@@ -3793,13 +3793,13 @@ fn render_table(
         }
     }
     let ncols = rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(1);
-    let borders = crate::view::table_borders(t);
+    let style = crate::view::table_style(t);
 
     let mut container = div()
         .my_1()
         .rounded_lg()
         .border_1()
-        .border_color(borders.outer)
+        .border_color(style.outer)
         .font_family(t.body_family.clone())
         .flex()
         .flex_col()
@@ -3822,15 +3822,15 @@ fn render_table(
             .w_full()
             .cursor_pointer()
             .when(is_header, |d| {
-                d.bg(t.panel_bg)
+                d.bg(style.header_bg)
                     .rounded_t_lg()
                     .border_b_1()
-                    .border_color(borders.header)
+                    .border_color(style.header)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(t.fg_strong)
             })
             .when(!is_header && !is_first_body_row, |d| {
-                d.border_t_1().border_color(borders.row)
+                d.border_t_1().border_color(style.row)
             })
             .when(!is_header, |d| {
                 d.text_color(t.fg).hover(|s| s.bg(t.hover_bg))

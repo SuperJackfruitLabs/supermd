@@ -1369,7 +1369,7 @@ attribute = "#d19a66"
     }
 
     /// `border_subtle`'s first real consumer is the table row rule that
-    /// replaces the old full-strength grid line (`view::table_borders`,
+    /// replaces the old full-strength grid line (`view::table_style`,
     /// painted on `page_bg` in both the reading view and the editor's
     /// table widget). It is translucent by design -- 55% of `border`'s
     /// alpha, same hue -- so it needs its own check rather than joining

@@ -468,15 +468,27 @@ fn list(
     div().flex().flex_col().gap_1().children(rows).into_any_element()
 }
 
-/// Which borders a table draws. Outer and header keep weight, rows get
-/// a hairline, and interior verticals are gone -- they are what made a
+/// How a table is drawn. Outer and header rules keep weight, rows get a
+/// hairline, and interior verticals are gone -- they are what made a
 /// table read as a spreadsheet rather than part of the document. One
 /// pure rule shared by the reading view (`table`, below) and the
 /// editor's table widget (`editor::render_table`) so the two cannot
 /// drift apart.
-pub struct TableBorders {
+///
+/// It was `TableBorders` and carried the rules only, which is exactly
+/// how far the two renderers stayed together: they drew the same lines
+/// around a header painted `panel_bg` in the editor and `code_bg` in the
+/// reading view. In a theme where those differ on purpose, the same
+/// construct had two surfaces depending on which view you were in, and
+/// nothing failed because the contrast harness happened to measure both
+/// pairs. The header's fill is part of how a table is drawn, so it lives
+/// in here with the rules -- `panel_bg`, which is what `theme.rs`'s
+/// background matrix and the theme docs both already called the table
+/// header.
+pub struct TableStyle {
     pub outer: Hsla,
     pub header: Hsla,
+    pub header_bg: Hsla,
     pub row: Hsla,
     // Always `None` -- there is no interior vertical rule to paint, so
     // neither renderer reads this outside the test that pins it. Kept
@@ -486,8 +498,14 @@ pub struct TableBorders {
     pub column: Option<Hsla>,
 }
 
-pub fn table_borders(t: &Theme) -> TableBorders {
-    TableBorders { outer: t.border, header: t.border, row: t.border_subtle, column: None }
+pub fn table_style(t: &Theme) -> TableStyle {
+    TableStyle {
+        outer: t.border,
+        header: t.border,
+        header_bg: t.panel_bg,
+        row: t.border_subtle,
+        column: None,
+    }
 }
 
 fn table(
@@ -500,7 +518,7 @@ fn table(
     let Links { follow, describe, .. } = links;
     let cell_base = BaseStyle { weight: FontWeight::NORMAL, color: t.fg };
     let head_base = BaseStyle { weight: FontWeight::SEMIBOLD, color: t.fg_strong };
-    let borders = table_borders(t);
+    let style = table_style(t);
 
     // Cells get the same link handling as prose. They were rendered
     // with `inline_text`, so a link in a table was coloured and
@@ -533,22 +551,22 @@ fn table(
     div()
         .rounded_lg()
         .border_1()
-        .border_color(borders.outer)
+        .border_color(style.outer)
         .flex()
         .flex_col()
         .child(
             render_row(head, head_base, t, "h")
-                .bg(t.code_bg)
+                .bg(style.header_bg)
                 .rounded_t_lg()
                 .border_b_1()
-                .border_color(borders.header),
+                .border_color(style.header),
         )
         .children(
             rows.iter()
                 .enumerate()
                 .map(|(i, row)| {
                     render_row(row, cell_base, t, &i.to_string())
-                        .when(i > 0, |d| d.border_t_1().border_color(borders.row))
+                        .when(i > 0, |d| d.border_t_1().border_color(style.row))
                 }),
         )
         .into_any_element()
@@ -1329,17 +1347,56 @@ no language
         );
     }
 
-    // ── table_borders ────────────────────────────────────────────────
+    // ── table_style ──────────────────────────────────────────────────
 
     /// A table is a document element, not a spreadsheet. Vertical
     /// rules between every cell are what made it read as one.
+    ///
+    /// The header's fill is in here with the rules because leaving it
+    /// out is what let the two renderers drift: they drew identical
+    /// borders around a `panel_bg` header in the editor and a `code_bg`
+    /// one in the reading view.
     #[test]
-    fn table_borders_are_outer_and_horizontal_only() {
+    fn table_style_is_outer_and_horizontal_rules_on_a_panel_header() {
         let t = Theme::light();
-        let b = table_borders(&t);
+        let b = table_style(&t);
         assert_eq!(b.outer, t.border, "the outer boundary keeps weight");
         assert_eq!(b.header, t.border, "so does the rule under the header");
+        assert_eq!(b.header_bg, t.panel_bg, "the header row is the panel surface");
         assert_eq!(b.row, t.border_subtle, "rows separate with a hairline");
         assert!(b.column.is_none(), "no interior vertical rules");
+    }
+
+    /// Both renderers read the header's fill from `table_style`, and
+    /// neither names a theme token itself. That is the whole point of
+    /// the struct, and a `.bg(t.something)` inside either function is
+    /// the drift it replaced -- drift that is invisible on screen in any
+    /// theme where the two surfaces happen to be close, which is why it
+    /// survived a review. Scanned per function rather than per file:
+    /// both files paint `code_bg` and `panel_bg` legitimately elsewhere.
+    #[test]
+    fn neither_table_renderer_names_its_own_header_surface() {
+        for (file, src, from, to) in [
+            ("view.rs", include_str!("view.rs"), "fn table(", "pub fn rule_style("),
+            ("editor/mod.rs", include_str!("editor/mod.rs"), "fn render_table(", "fn render_image("),
+        ] {
+            let start = src.find(from).unwrap_or_else(|| panic!("{file}: {from} moved"));
+            let end = src[start..]
+                .find(to)
+                .unwrap_or_else(|| panic!("{file}: {to} moved"));
+            let body = &src[start..start + end];
+            assert!(body.contains("header_bg"), "{file}: {from} does not read header_bg");
+            for line in body.lines() {
+                // The two surfaces the drift was between. A row's own
+                // hover fill stays a call-site choice: it is a row
+                // state, not the table's construction, and both
+                // renderers already agree on it.
+                assert!(
+                    !line.contains(".bg(t.panel_bg)") && !line.contains(".bg(t.code_bg)"),
+                    "{file}: {from} picks its own header surface -- `table_style` owns it ({})",
+                    line.trim()
+                );
+            }
+        }
     }
 }
