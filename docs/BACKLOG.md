@@ -43,6 +43,22 @@ _Last groomed: 2026-08-31, after the Mac App Store pass._
 | Computed tables | Spreadsheet-style formulas in markdown tables |
 | Third-party registry | Catalog is org-pinned by design; a community registry plus a plugin starter-repo extraction of `plugins/template/` |
 
+### The emoji plugin reads a table alignment row as a shortcode
+
+Opening `examples/vault/Guide/Tables.md` logs `supermd: inline render
+failed (emoji): unknown shortcode :-----:` and raises a red error strip
+over the status bar. The delimiter row of an aligned table (`:---:`,
+`:-----:`) is valid CommonMark, and the emoji plugin's inline pass reads
+the colons as shortcode delimiters.
+
+So the shipped example vault greets a first-time user with an error on
+one of the six guide pages. Found by right-clicking a table in the
+running app while verifying #35.
+
+Two candidate fixes: have the emoji plugin refuse a shortcode that is
+all hyphens, or suppress inline replacement inside a table delimiter row
+the way `spans.rs` already suppresses it inside frontmatter and code.
+
 ## Themes / flux
 
 | Item | Notes |
@@ -83,6 +99,24 @@ The general fix — surface-typed colour handles, so painting ink on a
 surface is one typed operation rather than two independent `.bg()` and
 `.text_color()` calls — stays the fallback, and is only worth its cost
 if a violation ever shows up somewhere that is *not* a selectable row.
+
+### The theme picker previews without flux, and commits with it
+
+`theme_picker_apply` previews by setting `ActiveTheme` directly, while
+`theme_picker_confirm` goes through `ThemeState::resolve()`, which
+applies flux's kelvin warming. With flux on at night, the theme you
+arrow onto and the theme you get on Enter differ by the warm shift — the
+preview is the cold theme, the result is the warmed one.
+
+Invisible with flux off, which is the default, and invisible in daylight
+even with it on. It surfaced while narrowing a different picker defect
+(confirming a theme used to pin the appearance outright, which disabled
+flux's night switch) and was deliberately left outside that fix's scope.
+
+The fix is to preview through the same `resolve()` path the commit uses
+rather than reaching for `ActiveTheme` directly — the same "one
+function, two callers" shape 0.0.17 applied to `is_whole_line`,
+`resolve_image` and the table style.
 
 ## Editor performance
 
