@@ -84,6 +84,32 @@ surface is one typed operation rather than two independent `.bg()` and
 `.text_color()` calls — stays the fallback, and is only worth its cost
 if a violation ever shows up somewhere that is *not* a selectable row.
 
+## Editor performance
+
+### `fence_window` still scans the document prefix, and that is the cheaper trade
+
+`fence_window` (`src/editor/lists.rs`) bounds the fence scan that
+Enter-continuation and renumber run before they touch an ordered list.
+It finds the first line in the whole document that *could* be a fence
+delimiter and starts the window there, so a note whose first fence sits
+above the list re-parses from that fence on every Enter — close to the
+whole-document cost #45 set out to remove. The ticket's stated case,
+prose then a list, is fixed, and the window never regresses past pre-fix
+behaviour; this is the remaining tail.
+
+Parked, not deferred for want of time: tightening it means reimplementing
+fence parity outside `blocks.rs`, which owns fences in this codebase. The
+win is narrower than the cost of two places deciding what a fence is —
+the one piece of logic the architecture says must live in one place.
+Worth revisiting only if fence parity ever becomes shareable, at which
+point this falls out of that work rather than justifying it.
+
+Worth recording that the windowing is strictly better than what it
+replaced in one respect nobody was aiming at: on a document past
+`MAX_STYLED_BYTES` (>1 MB) `blocks()` bails, so renumber used to rewrite
+numbers *inside* fences up there. The window keeps fence detection alive
+above that ceiling.
+
 ## Distribution & platform
 
 | Item | Notes |
