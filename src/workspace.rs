@@ -906,6 +906,17 @@ impl Workspace {
         let current = editor.read(cx).text();
         if current == before {
             editor.update(cx, |editor, cx| editor.replace_and_save(range, replacement, cx));
+        } else {
+            // The reader flipped the glyph and emitted before asking,
+            // so dropping the write silently made the box flip and flip
+            // straight back as the reset below caught it up -- the
+            // failure `show_command_error` was built for, one line away
+            // from the only place that could see it. A refusal nobody
+            // can see is indistinguishable from a broken command.
+            self.show_command_error(
+                "The document changed; the checkbox was not toggled".to_string(),
+                cx,
+            );
         }
         // Either way the preview ends on the buffer's text: a stale one
         // catches up, and a save hook that rewrote the document on this
@@ -9793,6 +9804,54 @@ pub(crate) mod tests {
         cx.dispatch_action(crate::editor::Undo);
         cx.update(|_, app| {
             assert_eq!(editor.read(app).text(), "- [ ] one\r\n- [x] two\r\n", "one undo step")
+        });
+    }
+
+    /// A checkbox click the editor cannot apply says so.
+    ///
+    /// `Reader::toggle_task` flips the glyph and *then* emits, so the
+    /// box moves before anyone has agreed to it. When the buffer behind
+    /// the preview has moved on, `apply_reader_edit` writes nothing and
+    /// resets the reader from the buffer -- which put the glyph back.
+    /// Flip, unflip, no explanation: the exact shape Task 14 built
+    /// `show_command_error` for, in the one place that could see it.
+    #[gpui::test]
+    fn a_refused_checkbox_click_says_why(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        // Move the buffer on behind the preview's back: the reader still
+        // holds the text it was built from, so its `before` no longer
+        // matches and the write is refused.
+        let editor = active_editor(&ws, cx);
+        editor.update_in(cx, |ed, _, cx| ed.replace_and_save(0..0, "intro\n\n", cx));
+        cx.run_until_parked();
+
+        let reader = active_preview(&ws, cx);
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let msg = ws.read(app).command_error.clone().expect("the refusal reached the user");
+            assert!(msg.contains("checkbox"), "says what refused: {msg}");
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "intro\n\n- [ ] one\n",
+            "and nothing was written"
+        );
+        cx.update(|_, app| {
+            assert_eq!(
+                reader.read(app).source(),
+                "intro\n\n- [ ] one\n",
+                "the preview catches up, so the next click can succeed"
+            );
         });
     }
 
