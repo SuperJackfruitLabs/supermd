@@ -18,7 +18,8 @@ linking a pull request and had to be rewritten by hand afterwards.
   floats.
 - Appearance setting — Light, Dark or System — at the top of the ⌘T
   picker. An explicit choice outranks flux, so Light stays light at
-  midnight rather than flipping.
+  midnight rather than flipping, and confirming a theme moves the
+  setting to the appearance you just previewed.
 - Twenty more themes, converted from base16 rather than hand-written,
   each with a page of its own; the theme picker filters as you type.
 
@@ -29,7 +30,8 @@ linking a pull request and had to be rewritten by hand afterwards.
 - Overlays share one shadow vocabulary, and tables lose their interior
   vertical rules.
 - Every theme token is measured against the surface it is actually
-  painted on, so muted and body ink stay legible on all five.
+  painted on: body ink on the six it is written on, muted ink on those
+  six plus the code fence, and diff ink on its own wash.
 
 ### Fixed
 

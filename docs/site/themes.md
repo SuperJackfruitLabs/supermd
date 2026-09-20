@@ -1,12 +1,24 @@
 # Themes
 
-**⌘ T** opens the theme picker. SuperMD follows your system's light/dark setting, with a theme for each: pick your light theme and your dark theme once, and the app switches with your OS.
+**⌘ T** opens the theme picker. It holds two things: a **Light / Dark / System** control at the top, and every installed theme below it, each row marked Light or Dark.
+
+SuperMD keeps one light theme and one dark theme, and the control at the top decides which of the two is in force. On **System** — the default — it follows your OS, so the app switches when your Mac or PC does. **Light** and **Dark** pin it, and a pinned choice outranks both the system setting and [flux](#flux-themes-that-follow-the-sun)'s night switch: set Light and the app stays light at midnight.
+
+Choosing an appearance applies at once, and survives closing the dialog with Escape. Picking a *theme* previews as you move through the list, and Enter keeps it — including the appearance it belongs to. Confirming a light theme while Dark was pinned moves the control to Light, because the preview you just watched was the light one; Escape puts the theme back.
+
+The choice is written to `~/.supermd/settings.toml`, and you can set it there directly:
+
+```toml
+appearance = "system"   # or "light" / "dark"
+light_theme = "Jackfruit Light"
+dark_theme = "Jackfruit Dark"
+```
 
 Twenty-eight themes ship built in — nine light, nineteen dark. Diagrams, code highlighting, and the whole interface follow the active theme.
 
 Eight are written by hand: **Jackfruit Light** and **Jackfruit Dark** (the defaults), **Paper**, **Graphite**, **Nord**, **Gruvbox Dark**, and **Solarized** in both light and dark.
 
-The other twenty are converted from [base16](#where-the-other-twenty-come-from) palettes: the four **Catppuccin** flavours, **Rosé Pine** with Moon and Dawn, **Tokyo Night** in Dark, Storm and Light, **Dracula**, **Everforest**, **Kanagawa**, **OneDark**, **One Light**, **Monokai**, **Ayu** light and dark, **Github** and **Zenburn**.
+The other twenty are converted from [base16](#where-the-other-twenty-come-from) palettes: the four **Catppuccin** flavours, **Rosé Pine** with Moon and Dawn, **Tokyo Night** in Dark, Storm and Light, **Dracula**, **Everforest**, **Kanagawa**, **OneDark**, **One Light**, **Monokai**, **Ayu Light** and **Ayu Dark**, **Github** and **Zenburn**.
 
 ## Flux: themes that follow the sun
 
@@ -39,7 +51,7 @@ cargo run --example import_base16
 
 It rewrites `assets/themes/*.toml`, which are committed; a test fails if a committed file has drifted from its scheme. Nothing converts at runtime.
 
-Faithfulness has one limit, and it is measured rather than waved at: every theme must clear SuperMD's contrast floors — body text on all six surfaces it is painted on, secondary text likewise, and every background token against what it sits on. A palette that cannot is not quietly repaired and the floor is not lowered for it; it ships with a recorded exception carrying its measured number. Of the twenty, exactly one needed one: Ayu Light's own foreground on its own selection colour is 4.22:1 where 4.5:1 is the floor.
+Faithfulness has one limit, and it is measured rather than waved at: every theme must clear SuperMD's contrast floors — body text on all six surfaces it is painted on, secondary text on those six plus the code fence, diff ink on its own wash, and every background token against what it sits on. A palette that cannot is not quietly repaired and the floor is not lowered for it; it ships with a recorded exception carrying its measured number. Of the twenty, exactly one needed one: Ayu Light's own foreground on its own selection colour is 4.22:1 where 4.5:1 is the floor.
 
 The four hand-written themes have base16 equivalents too, and they are not replaced by them — they are what the converter is *tested against*. Where the mapping cannot reproduce a choice a human made, that difference is the mapping telling on itself.
 
@@ -87,7 +99,7 @@ comment = "#616e88"
 constant = "#b48ead"
 ```
 
-Optionally, `diff_added_bg`, `diff_added_fg`, `diff_deleted_bg`, and `diff_deleted_fg` under `[colors]` tune the git diff view; sensible defaults are used otherwise.
+Optionally, `diff_added_bg`, `diff_added_fg`, `diff_deleted_bg`, and `diff_deleted_fg` under `[colors]` tune the git diff view; sensible defaults are used otherwise. Set them as a pair: the `_fg` is written *on* its own `_bg` — in Show Changes, in the strip that reports a refused command, and on a diagram that failed to draw — so a saturated accent on a pale wash of itself is the one mistake to avoid here.
 
 ### The page and the desk
 
@@ -104,7 +116,7 @@ Two things are worth checking by eye once you set `page_bg` yourself, because bo
 
 In a dark theme that means a step lighter than `page_bg`. Left out, it is derived halfway between `page_bg` and `hover_bg`, which keeps it a visible step up while a hovered or selected row painted on it still stands out. If you set it yourself, keep it below `hover_bg` for the same reason. In a light theme the page is usually at or near white, with no brighter step to take, so the derived `floating_bg` is `page_bg` itself and the shadow does the separating. It should be opaque: an overlay is drawn over whatever is beneath it.
 
-And one that catches nearly every theme by surprise: **`fg_muted` is painted on all six backgrounds** — the desk, the page, `panel_bg`, `floating_bg`, `hover_bg` and `selected_bg`. The sidebar's chevrons and folder icons are muted on whatever the row is painted with, and the finder's directory hints, the palette's plugin names, the search results' line numbers and the `[[` completion popup's path hints are all muted text on a *selected* row. `selected_bg` is the far end of that ramp, so it is the one that decides: a `fg_muted` picked to look right on the page will usually be a step too faint there.
+And one that catches nearly every theme by surprise: **`fg_muted` is painted on seven backgrounds** — the six body text uses (the desk, the page, `panel_bg`, `floating_bg`, `hover_bg` and `selected_bg`) and the code fence on top of them, where it draws a comment. The sidebar's chevrons and folder icons are muted on whatever the row is painted with, and the finder's directory hints, the palette's plugin names, the search results' line numbers and the `[[` completion popup's path hints are all muted text on a *selected* row. `selected_bg` is the far end of that ramp, so it is the one that decides: a `fg_muted` picked to look right on the page will usually be a step too faint there.
 
 ### Colors with alpha
 
