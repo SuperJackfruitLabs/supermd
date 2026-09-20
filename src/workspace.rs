@@ -757,6 +757,9 @@ struct SidebarEdit {
     error: Option<SharedString>,
 }
 
+/// Width of the peek panel beside the graph.
+const PEEK_W: f32 = 360.0;
+
 /// The full-workspace graph: laid-out nodes plus view transform.
 struct GraphViewState {
     sim: crate::graph::Simulation,
@@ -817,6 +820,9 @@ struct GraphViewState {
     filter: crate::graph::Filter,
     /// True while the query box is taking keystrokes.
     searching: bool,
+    /// The node the panel is describing. Clicking a dot used to open
+    /// its note and destroy the view; it opens this instead.
+    peek: Option<usize>,
 }
 
 impl GraphViewState {
@@ -5025,6 +5031,7 @@ impl Workspace {
             spread: crate::graph::Spread::Normal,
             filter: crate::graph::Filter::default(),
             searching: false,
+            peek: None,
         });
         if let Some(graph) = self.graph.as_mut() {
             graph.rebuild_group_keys();
@@ -5066,13 +5073,12 @@ impl Workspace {
     /// Frame the whole graph in the window. There was no way back from
     /// a pan before this short of closing and reopening the view.
     fn graph_fit(&mut self, _: &GraphFit, window: &mut Window, cx: &mut Context<Self>) {
-        let viewport = window.viewport_size();
+        // The board, not the window: with the panel open the right
+        // 360px is not board, and fitting the vault into the window
+        // would tuck part of it behind the panel.
+        let board = (self.graph_board_width(window), f32::from(window.viewport_size().height));
         let Some(graph) = self.graph.as_mut() else { return };
-        let (zoom, pan_x, pan_y) = crate::graph::fit_to(
-            graph.sim.nodes.as_slice(),
-            (f32::from(viewport.width), f32::from(viewport.height)),
-            80.0,
-        );
+        let (zoom, pan_x, pan_y) = crate::graph::fit_to(graph.sim.nodes.as_slice(), board, 80.0);
         graph.zoom = zoom;
         graph.pan = (pan_x, pan_y);
         cx.notify();
@@ -5206,8 +5212,15 @@ impl Workspace {
     }
 
     fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
-        // A live filter is what Escape clears first.
+        // The panel is the most recent thing opened, so it is what
+        // Escape closes first -- escaping a peek must not also throw
+        // away the view you were exploring. A live filter is next, and
+        // the graph itself only once nothing is open over it.
         if let Some(graph) = self.graph.as_mut() {
+            if graph.peek.take().is_some() {
+                cx.notify();
+                return;
+            }
             if graph.searching || !graph.filter.is_empty() {
                 graph.searching = false;
                 graph.filter = crate::graph::Filter::default();
@@ -5261,6 +5274,76 @@ impl Workspace {
             return;
         }
         self.open_path(&node.path, window, cx);
+    }
+
+    /// Open the panel on a node without leaving the graph. The click
+    /// that used to open a tab and destroy the view now does this.
+    fn graph_peek(&mut self, ix: usize, window: &Window, cx: &mut Context<Self>) {
+        if self.graph.as_ref().is_none_or(|g| ix >= g.nodes().len()) {
+            return;
+        }
+        if let Some(graph) = self.graph.as_mut() {
+            graph.peek = Some(ix);
+        }
+        // The board has just narrowed by the panel's width, which may
+        // have put the node behind it -- including the one just clicked.
+        self.graph_reveal(ix, window);
+        cx.notify();
+    }
+
+    /// Board width, less the panel when it is open. A dot behind the
+    /// panel is a dot you cannot click, so the board stops where the
+    /// panel starts and the render, the fit and the label culling all
+    /// ask this rather than the window.
+    fn graph_board_width(&self, window: &Window) -> f32 {
+        let full = f32::from(window.viewport_size().width);
+        match self.graph.as_ref().and_then(|g| g.peek) {
+            Some(_) => full - PEEK_W,
+            None => full,
+        }
+    }
+
+    /// Pan until node `ix` sits inside the board, if it does not
+    /// already. The zoom is left alone: walking a backlink must not
+    /// re-frame the whole vault under you.
+    fn graph_reveal(&mut self, ix: usize, window: &Window) {
+        /// How far inside the board edge a node has to be to count as
+        /// visible -- a dot half under the panel is not revealed.
+        const MARGIN: f32 = 48.0;
+        let board_w = self.graph_board_width(window);
+        let board_h = f32::from(window.viewport_size().height);
+        let Some(graph) = self.graph.as_mut() else { return };
+        let Some(node) = graph.nodes().get(ix) else { return };
+        let (nx, ny) = (node.x, node.y);
+        let base = 900.0 * graph.zoom;
+        let (x, y) = (graph.pan.0 + nx * base + 60.0, graph.pan.1 + ny * base + 60.0);
+        let inside = x > MARGIN && x < board_w - MARGIN && y > MARGIN && y < board_h - MARGIN;
+        if inside {
+            return;
+        }
+        graph.pan = (board_w / 2.0 - nx * base - 60.0, board_h / 2.0 - ny * base - 60.0);
+    }
+
+    /// The notes linking to a node, as (node index, name), for the
+    /// panel's backlink rows. An index rather than a path: a row peeks
+    /// that node rather than opening a file.
+    fn graph_peek_backlinks(&self, ix: usize) -> Vec<(usize, String)> {
+        let Some(graph) = self.graph.as_ref() else { return Vec::new() };
+        let Some(node) = graph.nodes().get(ix) else { return Vec::new() };
+        let at = |path: &Path| {
+            let stem = path.file_stem()?.to_string_lossy().into_owned();
+            Some((graph.nodes().iter().position(|n| n.path == *path)?, stem))
+        };
+        // A ghost is not in the index, so it has no backlinks there --
+        // but the note that named it is exactly the one link it has.
+        if node.ghost {
+            return node.ghost_source.as_deref().and_then(at).into_iter().collect();
+        }
+        let sources = self.knowledge.lock().unwrap().backlinks(&node.path);
+        let mut rows: Vec<(usize, String)> =
+            sources.iter().filter_map(|(path, _)| at(path)).collect();
+        rows.sort_by(|a, b| a.1.cmp(&b.1));
+        rows
     }
 
     /// Title, excerpt and counts for a node's card. Pure enough to
@@ -5366,8 +5449,11 @@ impl Workspace {
         let open_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
         // Labels are culled against this: a name for a dot that is not
         // on screen is an element shaped for nothing.
-        let viewport = window.viewport_size();
-        let (view_w, view_h) = (f32::from(viewport.width), f32::from(viewport.height));
+        // The board, not the window: with the panel open the right
+        // 360px belongs to it, and a label or a card out there is drawn
+        // underneath something opaque.
+        let view_w = self.graph_board_width(window);
+        let view_h = f32::from(window.viewport_size().height);
         let state = self.graph.as_ref()?;
         let t = theme(cx);
         // World transform: unit square → an 900px board, panned/zoomed.
@@ -5528,8 +5614,17 @@ impl Workspace {
         // Edges first, then dots: a canvas paints in call order, and a
         // dot hidden under its own edges is the mistake this order
         // avoids.
-        let mut board =
-            div().absolute().inset_0().child(edges_canvas).child(nodes_canvas);
+        let mut board = div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(view_w))
+            // Its own clip, so nothing it holds -- a canvas, a label --
+            // reaches past the board into the panel.
+            .overflow_hidden()
+            .child(edges_canvas)
+            .child(nodes_canvas);
 
         // Names stay elements rather than canvas text, so they keep the
         // theme's font stack and the same opacity rule as before. What
@@ -5689,6 +5784,99 @@ impl Workspace {
                 .children(rest.into_iter().map(|line| {
                     div().text_size(px(11.)).text_color(t.fg_muted).child(line)
                 }))
+        });
+
+        // The panel. It occludes: the board's pointer handlers sit on
+        // the overlay, which still spans the whole window, so without
+        // this a click meant for the Open button would also land on
+        // whatever dot happens to be behind the panel.
+        let peeked = self.graph.as_ref().and_then(|g| g.peek);
+        let peek = peeked.map(|ix| {
+            let text = self.graph_card_text(ix);
+            let rows = self.graph_peek_backlinks(ix);
+            let mut lines = text.lines();
+            let title = lines.next().unwrap_or_default().to_string();
+            let rest: Vec<SharedString> =
+                lines.map(|l| SharedString::from(l.to_string())).collect();
+            let ghost = self
+                .graph
+                .as_ref()
+                .and_then(|g| g.nodes().get(ix))
+                .is_some_and(|n| n.ghost);
+            let mut panel = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(PEEK_W))
+                .occlude()
+                .bg(t.panel_bg)
+                .border_l_1()
+                .border_color(t.border)
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .overflow_hidden()
+                .text_size(px(t.ui_size))
+                .child(
+                    div()
+                        .text_size(px(t.ui_size + 3.))
+                        .text_color(t.fg_strong)
+                        .child(SharedString::from(title)),
+                )
+                .children(rest.into_iter().map(|line| {
+                    div().text_color(t.fg_muted).child(line)
+                }))
+                .child(
+                    div()
+                        .id("graph-peek-open")
+                        .mt_1()
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .bg(t.selected_bg)
+                        .text_color(t.fg)
+                        .text_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.hover_bg))
+                        // A ghost has no file yet; opening one creates
+                        // it, exactly as following the link would.
+                        .child(if ghost { "Create note" } else { "Open" })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_graph_node(ix, window, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .text_size(px(t.ui_size - 1.))
+                        .text_color(t.fg_muted)
+                        .child(if rows.is_empty() {
+                            SharedString::from("Nothing links here yet")
+                        } else {
+                            SharedString::from(format!("{} linking here", rows.len()))
+                        }),
+                );
+            // A row walks the peek rather than opening a tab: following
+            // the vault around is the whole point of the panel.
+            for (row, (at, name)) in rows.into_iter().enumerate() {
+                panel = panel.child(
+                    div()
+                        .id(("graph-peek-backlink", row))
+                        .px_2()
+                        .py(px(4.))
+                        .rounded_md()
+                        .text_color(t.link)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.hover_bg))
+                        .child(SharedString::from(name))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.graph_peek(at, window, cx);
+                        })),
+                );
+            }
+            panel
         });
 
         Some(
@@ -5879,7 +6067,7 @@ impl Workspace {
                         // is decided here, from the node the press
                         // actually grabbed.
                         if let Some(ix) = released.filter(|_| !moved) {
-                            this.open_graph_node(ix, window, cx);
+                            this.graph_peek(ix, window, cx);
                         }
                     }),
                 )
@@ -5912,6 +6100,7 @@ impl Workspace {
                                 .child("drag to pan · scroll to zoom · esc to close"),
                         ),
                 )
+                .children(peek)
                 .children(card)
                 .into_any_element(),
         )
@@ -8525,10 +8714,10 @@ pub(crate) mod tests {
 
     /// One element covers the whole board now, so gpui's own click
     /// machinery cannot tell a press that grabbed a dot from a pan that
-    /// happens to end over one. What a release opens is the dot the
+    /// happens to end over one. What a release peeks is the dot the
     /// press grabbed -- and only when the pointer never moved.
     #[gpui::test]
-    fn a_press_and_release_on_a_dot_opens_its_note(cx: &mut TestAppContext) {
+    fn a_press_and_release_on_a_dot_peeks_it(cx: &mut TestAppContext) {
         let _home = temp_home();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("a.md"), "# a\n\n[[b]]\n").unwrap();
@@ -8551,11 +8740,13 @@ pub(crate) mod tests {
         cx.run_until_parked();
         cx.update(|_, app| {
             let w = ws.read(app);
-            assert!(w.graph.is_none(), "the graph closes behind the note it opened");
+            let g = w.graph.as_ref().expect("the graph survives a click");
+            let ix = g.peek.expect("the panel is on the dot that was pressed");
             assert!(
-                w.tabs.iter().any(|t| t.path(app).is_some_and(|p| p.ends_with("a.md"))),
-                "and the note is the one under the pointer"
+                g.nodes()[ix].path.ends_with("a.md"),
+                "and it is the one under the pointer"
             );
+            assert!(w.tabs.is_empty(), "nothing was opened");
         });
     }
 
@@ -8765,6 +8956,124 @@ pub(crate) mod tests {
         ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[path], cx));
         ws.update_in(cx, |ws, _, _| {
             assert!(ws.graph.as_ref().unwrap().preview_cache.is_empty(), "stale after a save");
+        });
+    }
+
+    /// Clicking a node used to replace the whole window. Now it opens
+    /// a panel beside a graph that is still there.
+    #[gpui::test]
+    fn clicking_a_node_peeks_instead_of_leaving(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nBody.\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.is_some(), "the graph survives a click");
+            assert_eq!(ws.graph.as_ref().unwrap().peek, Some(0));
+            assert_eq!(ws.tabs.len(), 0, "and nothing was opened yet");
+        });
+    }
+
+    /// Esc closes the panel first and the graph second, so escaping a
+    /// peek does not also throw away the view you were exploring.
+    #[gpui::test]
+    fn escape_closes_the_panel_before_the_graph(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_graph_view(window, cx);
+            ws.graph_peek(0, window, cx);
+        });
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.graph_dismiss(&GraphDismiss, window, cx));
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.is_some(), "graph stays");
+            assert_eq!(ws.graph.as_ref().unwrap().peek, None, "panel closed");
+        });
+        ws.update_in(cx, |ws, window, cx| ws.graph_dismiss(&GraphDismiss, window, cx));
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph.is_none(), "now the graph"));
+    }
+
+    /// The board narrows so the panel covers no node: a dot hidden
+    /// behind the panel is a dot you cannot click.
+    #[gpui::test]
+    fn the_board_narrows_for_the_panel(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let wide = ws.update_in(cx, |ws, window, _| ws.graph_board_width(window));
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(0, window, cx));
+        let narrow = ws.update_in(cx, |ws, window, _| ws.graph_board_width(window));
+        assert!(narrow < wide, "{narrow} < {wide}");
+        assert!((wide - narrow - PEEK_W).abs() < 1.0, "exactly the panel's width");
+    }
+
+    /// The panel opens over the right-hand side of the board, so a dot
+    /// there -- including the one just clicked -- would end up behind
+    /// it. Peeking brings the node back into what is left of the board.
+    #[gpui::test]
+    fn peeking_a_node_behind_the_panel_brings_it_back(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        // Park the only node where the panel is about to be.
+        let board = ws.update_in(cx, |ws, window, _| ws.graph_board_width(window));
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_mut().unwrap();
+            let base = 900.0 * g.zoom;
+            g.pan.0 = board - 20.0 - g.nodes()[0].x * base - 60.0;
+        });
+        let before = ws.update_in(cx, |ws, _, _| dot_at(ws.graph.as_ref().unwrap(), 0).x);
+        assert!(f32::from(before) > board - PEEK_W, "it starts under the panel");
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(0, window, cx));
+        let after = ws.update_in(cx, |ws, window, _| {
+            (dot_at(ws.graph.as_ref().unwrap(), 0).x, ws.graph_board_width(window))
+        });
+        assert!(
+            f32::from(after.0) < after.1,
+            "and ends inside the narrowed board: {:?} < {}",
+            after.0,
+            after.1
+        );
+    }
+
+    /// Walking a backlink moves the peek without leaving the graph --
+    /// the point of the panel is that you can follow the vault around
+    /// without a tab opening under you.
+    #[gpui::test]
+    fn walking_a_backlink_moves_the_peek(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("hub.md"), "# Hub\n").unwrap();
+        std::fs::write(root.path().join("spoke.md"), "# Spoke\n\n[[hub]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let (hub, spoke) = ws.update_in(cx, |ws, _, _| {
+            let nodes = ws.graph.as_ref().unwrap().nodes();
+            let ix = |name: &str| nodes.iter().position(|n| n.path.ends_with(name)).expect(name);
+            (ix("hub.md"), ix("spoke.md"))
+        });
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(hub, window, cx));
+        let rows = ws.update_in(cx, |ws, _, _| ws.graph_peek_backlinks(hub));
+        assert_eq!(rows, vec![(spoke, "spoke".to_string())], "one note links here");
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(rows[0].0, window, cx));
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.is_some(), "still on the board");
+            assert_eq!(ws.graph.as_ref().unwrap().peek, Some(spoke), "the peek walked");
+            assert_eq!(ws.tabs.len(), 0, "and no tab opened");
         });
     }
 
