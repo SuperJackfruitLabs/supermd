@@ -783,12 +783,24 @@ struct GraphViewState {
     hover: crate::graph::Hover,
     /// What the pointer is doing to `hovered`, as of the last event.
     hover_state: crate::graph::Hovering,
+    /// Title and excerpt per note, for the hover card. Read off disk
+    /// when the dwell earns a card and kept, so re-resting on a dot
+    /// costs nothing; cleared wholesale on any fs event, because an
+    /// excerpt is a copy of a file that may have just changed.
+    preview_cache: std::collections::HashMap<PathBuf, (String, String)>,
     /// How many node labels the last render produced. The graph used to
     /// build one per node whether or not it was visible; this is what
     /// holds that shut. Test-only, because nothing in the app reads it
     /// and a write-only field is a warning.
     #[cfg(test)]
     label_count: usize,
+    /// Whether the last render painted arrowheads. Test-only for the
+    /// same reason as `label_count`: below half zoom an arrowhead is
+    /// sub-pixel and costs one or two tessellated paths per edge, and
+    /// without this the render-time gate had no detector -- deleting it
+    /// left the suite green.
+    #[cfg(test)]
+    arrowheads_drawn: bool,
     /// Ticks the layout while it still has motion in it.
     ticker: Option<gpui::Task<()>>,
     /// What node colour means right now.
@@ -1296,6 +1308,14 @@ impl Workspace {
         let mut hardlinks = root.as_ref().map(|root| crate::knowledge::HardlinkGuard::new(root));
         if let Some(tree) = &mut self.tree {
             tree.refresh();
+        }
+        // Every hover-card excerpt is a copy of a file on disk, and one
+        // of them may be the file that just changed. Dropped wholesale
+        // rather than per path: the cache holds at most the handful of
+        // dots someone has rested on, and rebuilding an entry is one
+        // small read behind a 400ms dwell.
+        if let Some(graph) = self.graph.as_mut() {
+            graph.preview_cache.clear();
         }
         self.refresh_git_status();
         // Keep the knowledge index warm: saves re-index, deletions drop.
@@ -4994,8 +5014,11 @@ impl Workspace {
             picker: None,
             hover: Default::default(),
             hover_state: crate::graph::Hovering::Idle,
+            preview_cache: Default::default(),
             #[cfg(test)]
             label_count: 0,
+            #[cfg(test)]
+            arrowheads_drawn: false,
             ticker: None,
             color_by: crate::graph::ColorBy::Folder,
             group_keys: Vec::new(),
@@ -5240,6 +5263,79 @@ impl Workspace {
         self.open_path(&node.path, window, cx);
     }
 
+    /// Title, excerpt and counts for a node's card. Pure enough to
+    /// test: the element around it is layout.
+    ///
+    /// The excerpt is read synchronously, the way the editor's link
+    /// preview reads one. The dwell gate is what makes that acceptable
+    /// -- a sweep across a cluster earns no card and reads nothing --
+    /// and the cache keeps a second rest on the same dot free.
+    fn graph_card_text(&mut self, ix: usize) -> String {
+        let Some(node) = self.graph.as_ref().and_then(|g| g.nodes().get(ix)).cloned() else {
+            return String::new();
+        };
+        let name = node
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if node.ghost {
+            // A ghost is a name, not a note: there is no file to read.
+            return format!("{name}\nThis note does not exist yet");
+        }
+        let cached = self.graph.as_ref().and_then(|g| g.preview_cache.get(&node.path).cloned());
+        let (title, body) = match cached {
+            Some(hit) => hit,
+            None => {
+                // Deleted between indexing and hovering. Said on the
+                // card rather than in the error strip: hovering is not
+                // a command anyone issued.
+                let Ok(text) = std::fs::read_to_string(&node.path) else {
+                    return format!("{name}\nThis note could not be read");
+                };
+                let pair = (
+                    crate::preview::title_of(&text, &node.path),
+                    crate::preview::excerpt(&text, 3),
+                );
+                if let Some(g) = self.graph.as_mut() {
+                    g.preview_cache.insert(node.path.clone(), pair.clone());
+                }
+                pair
+            }
+        };
+        let (out, inn) = self.graph_link_counts(ix);
+        let mut card = title;
+        // An empty note would otherwise spend a line saying nothing.
+        if !body.is_empty() {
+            card.push('\n');
+            card.push_str(&body);
+        }
+        card.push_str(&format!("\n{out} out \u{00b7} {inn} in"));
+        card
+    }
+
+    /// Links out of and into a node.
+    ///
+    /// A reciprocated pair is ONE edge with `both` set -- that is how
+    /// `graph::build` stores it, so it draws one line with two
+    /// arrowheads. Counting only `from`/`to` would therefore report a
+    /// mutual link as one-directional at each end.
+    fn graph_link_counts(&self, ix: usize) -> (usize, usize) {
+        let Some(graph) = self.graph.as_ref() else { return (0, 0) };
+        let mut out = 0;
+        let mut inn = 0;
+        for e in graph.edges() {
+            if e.from == ix {
+                out += 1;
+                inn += usize::from(e.both);
+            } else if e.to == ix {
+                inn += 1;
+                out += usize::from(e.both);
+            }
+        }
+        (out, inn)
+    }
+
     /// How many node labels the last render produced. The graph used to
     /// build one per node whether or not it was visible; this is what
     /// holds that shut.
@@ -5256,6 +5352,15 @@ impl Workspace {
         /// it, so a name whose dot sits just above the top edge is
         /// still drawn.
         const LABEL_ROW: f32 = 20.0;
+        /// Width of the hover card.
+        const CARD_W: f32 = 260.0;
+        /// Roughly how tall a card gets. Used only to keep it on
+        /// screen: the card sizes itself to its text, and a card whose
+        /// bottom is past the window edge is a card you cannot read.
+        const CARD_H: f32 = 86.0;
+        /// How far the card sits from the dot it describes, so the dot
+        /// stays visible beside it.
+        const CARD_GAP: f32 = 12.0;
         // Which note is open, so its node can be marked. Read before
         // borrowing the graph state.
         let open_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
@@ -5295,7 +5400,7 @@ impl Workspace {
         // let the arrowhead stop short of the node it points at.
         let node_r =
             |n: &crate::graph::GraphNode| crate::graph::node_radius(n.degree, state.zoom);
-        let edge_px: Vec<((f32, f32), (f32, f32), bool, bool, f32, f32)> = state
+        let edge_px: Vec<((f32, f32), (f32, f32), bool, f32, f32, bool, bool)> = state
             .edges()
             .iter()
             .map(|e| {
@@ -5305,17 +5410,35 @@ impl Workspace {
                     .is_none_or(|l| l.contains(&e.from) && l.contains(&e.to))
                     && state.filter.matches_at(e.from, a)
                     && state.filter.matches_at(e.to, b);
-                (at(a), at(b), on, e.both, node_r(a), node_r(b))
+                // Below half zoom an arrowhead is sub-pixel, and it is
+                // one or two tessellated paths per edge at exactly the
+                // zoom where the whole vault is on screen and nothing
+                // can be culled. So the decision is made here, in the
+                // data the painter consumes, rather than inside the
+                // paint closure: `arrowheads_drawn` reads it back, and a
+                // gate the painter decided for itself would have no
+                // detector.
+                (
+                    at(a),
+                    at(b),
+                    on,
+                    node_r(a),
+                    node_r(b),
+                    lod.arrowheads,
+                    lod.arrowheads && e.both,
+                )
             })
             .collect();
-        // Copied out so the canvas closure owns it rather than `lod`.
-        let arrowheads = lod.arrowheads;
+        // What the painter was handed, which is the only honest answer to
+        // "were arrowheads drawn".
+        #[cfg(test)]
+        let arrowheads = edge_px.iter().any(|&(.., to, from)| to || from);
         let edge_color = Hsla { a: 0.35, ..t.fg_muted };
         let dim_edge = Hsla { a: 0.08, ..t.fg_muted };
         let edges_canvas = gpui::canvas(
             move |bounds, _, _| bounds,
             move |bounds, _, window, _| {
-                for (a, b, on, both, ra, rb) in &edge_px {
+                for (a, b, on, ra, rb, head_to, head_from) in &edge_px {
                     let pa = point(bounds.origin.x + px(a.0), bounds.origin.y + px(a.1));
                     let pb = point(bounds.origin.x + px(b.0), bounds.origin.y + px(b.1));
                     // Edges outside the hovered neighbourhood fade back
@@ -5325,20 +5448,13 @@ impl Workspace {
                     window.paint_path(crate::graph::line_path(pa, pb, 1.5), color);
                     // Which way the link points. A pair that links both
                     // ways gets an arrowhead at each end rather than two
-                    // lines drawn over each other.
-                    //
-                    // Below half zoom an arrowhead is sub-pixel, and it
-                    // is one or two tessellated paths per edge at
-                    // exactly the zoom where the whole vault is on
-                    // screen and nothing can be culled.
-                    if arrowheads {
+                    // lines drawn over each other. Whether either is
+                    // worth drawing at this zoom was decided above.
+                    if *head_to {
                         window.paint_path(crate::graph::arrow_path(pa, pb, rb + 2.0, 7.0), color);
-                        if *both {
-                            window.paint_path(
-                                crate::graph::arrow_path(pb, pa, ra + 2.0, 7.0),
-                                color,
-                            );
-                        }
+                    }
+                    if *head_from {
+                        window.paint_path(crate::graph::arrow_path(pb, pa, ra + 2.0, 7.0), color);
                     }
                 }
             },
@@ -5510,6 +5626,18 @@ impl Workspace {
         // the board wears the pointer's while one is under it.
         let on_a_dot = state.hovered.is_some();
 
+        // The node the dwell has earned a card for, and where its dot
+        // sits. Only the position is read here: the text reads the note
+        // off disk and caches it, which needs the state mutably, so it
+        // waits until after the hand-back below.
+        let carded = match state.hover_state {
+            crate::graph::Hovering::Carded(ix) => state.nodes().get(ix).map(|n| {
+                let (x, y) = at(n);
+                (ix, x, y + crate::graph::node_radius(n.degree, state.zoom))
+            }),
+            crate::graph::Hovering::Idle | crate::graph::Hovering::Lit(_) => None,
+        };
+
         // Last use of `state`, so the graph can be borrowed mutably to
         // hand back what this render decided. The pointer has to be
         // matched against the dots this frame painted, not the ones
@@ -5519,8 +5647,49 @@ impl Workspace {
             #[cfg(test)]
             {
                 g.label_count = label_count;
+                g.arrowheads_drawn = arrowheads;
             }
         }
+
+        // It takes no pointer events -- no `occlude`, no listeners: the
+        // card describes the dot under the pointer, and swallowing the
+        // click that dot is waiting for would be the worst thing it
+        // could do.
+        let card = carded.map(|(ix, x, y)| {
+            let text = self.graph_card_text(ix);
+            let mut lines = text.lines();
+            let title = lines.next().unwrap_or_default().to_string();
+            let rest: Vec<SharedString> =
+                lines.map(|l| SharedString::from(l.to_string())).collect();
+            // Flipped rather than clipped: a card that runs off the
+            // right edge says nothing at all.
+            let left = if x + CARD_GAP + CARD_W > view_w {
+                x - CARD_GAP - CARD_W
+            } else {
+                x + CARD_GAP
+            };
+            div()
+                .absolute()
+                .left(px(left.max(8.0)))
+                .top(px((y + CARD_GAP / 2.0).min((view_h - CARD_H).max(8.0))))
+                .w(px(CARD_W))
+                .p_2()
+                .border_1()
+                .border_color(t.border)
+                .elevated(crate::elevation::Overlay::GraphCard, &t)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(t.ui_size))
+                        .text_color(t.fg_strong)
+                        .child(SharedString::from(title)),
+                )
+                .children(rest.into_iter().map(|line| {
+                    div().text_size(px(11.)).text_color(t.fg_muted).child(line)
+                }))
+        });
 
         Some(
             div()
@@ -5743,6 +5912,7 @@ impl Workspace {
                                 .child("drag to pan · scroll to zoom · esc to close"),
                         ),
                 )
+                .children(card)
                 .into_any_element(),
         )
     }
@@ -8444,6 +8614,10 @@ pub(crate) mod tests {
     /// Below half zoom an arrowhead is sub-pixel, and it costs one or
     /// two tessellated paths per edge -- at exactly the zoom where
     /// nothing can be culled because the whole vault is on screen.
+    ///
+    /// Asserted against what the render decided, not against `lod`: a
+    /// test that only called `lod(0.3)` stayed green with the render's
+    /// own gate deleted, which is no detector at all.
     #[gpui::test]
     fn arrowheads_are_skipped_at_whole_vault_zoom(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -8458,7 +8632,140 @@ pub(crate) mod tests {
             }
         });
         cx.run_until_parked();
-        assert!(!crate::graph::lod(0.3).arrowheads, "and the renderer asks lod()");
+        assert!(
+            !ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().arrowheads_drawn),
+            "the whole vault on screen draws none"
+        );
+        // And a readable zoom does draw them, so the assertion above is
+        // about the gate rather than about a flag nothing ever sets.
+        ws.update_in(cx, |ws, _, cx| {
+            ws.graph.as_mut().unwrap().zoom = 1.0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().arrowheads_drawn),
+            "zoomed in, the direction of a link is worth drawing"
+        );
+    }
+
+    /// The card is what makes a dot legible without opening it. A
+    /// ghost -- a link to a note that does not exist yet -- has no file
+    /// to read, and must say so rather than showing an empty card.
+    #[gpui::test]
+    fn the_card_describes_a_note_and_admits_a_ghost(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nFirst line.\n\n[[missing]]\n")
+            .unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let (real, ghost) = ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            let real = g.nodes().iter().position(|n| !n.ghost).unwrap();
+            let ghost = g.nodes().iter().position(|n| n.ghost).unwrap();
+            (real, ghost)
+        });
+        let card = ws.update_in(cx, |ws, _, _| ws.graph_card_text(real));
+        assert!(card.contains("Alpha"), "the title: {card}");
+        assert!(card.contains("First line"), "the excerpt: {card}");
+        assert!(card.contains("1 out"), "the links it makes: {card}");
+        assert!(card.contains("0 in"), "and the ones it receives: {card}");
+        let card = ws.update_in(cx, |ws, _, _| ws.graph_card_text(ghost));
+        assert!(card.contains("does not exist"), "a ghost says so: {card}");
+    }
+
+    /// A file deleted between indexing and hovering must not raise an
+    /// error strip -- hovering is not a command the user issued.
+    #[gpui::test]
+    fn a_card_for_a_vanished_file_says_so_quietly(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        std::fs::remove_file(root.path().join("a.md")).unwrap();
+        let card = ws.update_in(cx, |ws, _, _| ws.graph_card_text(0));
+        assert!(card.contains("could not be read"), "{card}");
+        ws.update_in(cx, |ws, _, _| assert!(ws.command_error.is_none(), "no error strip"));
+    }
+
+    /// A pair that links both ways is stored as ONE edge with `both`
+    /// set, so counting `from == ix` and `to == ix` alone reports a
+    /// mutual link as one-directional at each end.
+    #[gpui::test]
+    fn a_mutual_link_counts_at_both_ends(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n\n[[a]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.edges().len(), 1, "one edge, reciprocated");
+            assert!(g.edges()[0].both);
+            for ix in 0..g.nodes().len() {
+                assert_eq!(ws.graph_link_counts(ix), (1, 1), "node {ix} links both ways");
+            }
+        });
+    }
+
+    /// The card only exists once the pointer has rested: the file read
+    /// behind it is synchronous, and a sweep across a cluster must not
+    /// turn into one read per dot.
+    #[gpui::test]
+    fn the_card_is_an_element_only_once_the_dwell_has_elapsed(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nBody.\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        // Pointed at, not yet rested: nothing has been read.
+        ws.update_in(cx, |ws, _, cx| {
+            let g = ws.graph.as_mut().unwrap();
+            g.hovered = Some(0);
+            g.hover_state = crate::graph::Hovering::Lit(0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            assert!(
+                ws.graph.as_ref().unwrap().preview_cache.is_empty(),
+                "a sweep reads nothing"
+            );
+        });
+        ws.update_in(cx, |ws, _, cx| {
+            ws.graph.as_mut().unwrap().hover_state = crate::graph::Hovering::Carded(0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            assert_eq!(
+                ws.graph.as_ref().unwrap().preview_cache.len(),
+                1,
+                "resting reads the note once"
+            );
+        });
+        // The pointer leaves, so nothing re-reads behind this.
+        ws.update_in(cx, |ws, _, cx| {
+            let g = ws.graph.as_mut().unwrap();
+            g.hovered = None;
+            g.hover_state = crate::graph::Hovering::Idle;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // An edit anywhere invalidates the excerpt: it was read off disk
+        // and is now a stale copy.
+        let path = root.path().join("a.md");
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[path], cx));
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.as_ref().unwrap().preview_cache.is_empty(), "stale after a save");
+        });
     }
 
     /// `FsEntry.ignored` is computed and tested; this is the only test

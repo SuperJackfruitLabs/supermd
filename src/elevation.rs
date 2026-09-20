@@ -78,6 +78,9 @@ pub enum Overlay {
     LinkCompletion,
     /// The editor's link hover popover.
     LinkHover,
+    /// The graph's hover card: what a dot is, once the pointer has
+    /// rested on it.
+    GraphCard,
     /// The reading view's link preview tooltip.
     PreviewTooltip,
     /// The sidebar's right-click menu.
@@ -104,13 +107,14 @@ pub enum Overlay {
 
 impl Overlay {
     #[cfg(test)]
-    pub const ALL: [Overlay; 16] = [
+    pub const ALL: [Overlay; 17] = [
         Overlay::Finder,
         Overlay::Palette,
         Overlay::Search,
         Overlay::FormatToolbar,
         Overlay::LinkCompletion,
         Overlay::LinkHover,
+        Overlay::GraphCard,
         Overlay::PreviewTooltip,
         Overlay::ContextMenu,
         Overlay::AppMenu,
@@ -133,6 +137,7 @@ impl Overlay {
             | Overlay::FormatToolbar
             | Overlay::LinkCompletion
             | Overlay::LinkHover
+            | Overlay::GraphCard
             | Overlay::PreviewTooltip
             | Overlay::ContextMenu
             | Overlay::AppMenu
@@ -377,6 +382,7 @@ mod tests {
             FormatToolbar,
             LinkCompletion,
             LinkHover,
+            GraphCard,
             PreviewTooltip,
             ContextMenu,
             AppMenu,
