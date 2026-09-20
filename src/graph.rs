@@ -5,6 +5,7 @@
 use crate::knowledge::Index;
 use gpui::Hsla;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct GraphNode {
@@ -988,6 +989,56 @@ impl Picker {
     }
 }
 
+/// How long the pointer must rest on a node before its card appears.
+/// Long enough that sweeping across a cluster fires nothing, short
+/// enough that stopping feels answered.
+pub const CARD_DWELL: Duration = Duration::from_millis(400);
+
+/// What the pointer is currently doing to a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hovering {
+    /// Nothing under the pointer.
+    Idle,
+    /// Pointed at: this node and its neighbours show their names.
+    Lit(usize),
+    /// Rested on: the card is up as well.
+    Carded(usize),
+}
+
+/// The dwell timer behind the hover card. Time is injected rather than
+/// read, so the delay is testable without a window and without
+/// sleeping -- the arrangement `autosave.rs` uses for its policy.
+#[derive(Debug, Default)]
+pub struct Hover {
+    /// The node under the pointer and when it arrived there.
+    since: Option<(usize, Instant)>,
+}
+
+impl Hover {
+    pub fn at(&mut self, node: Option<usize>, now: Instant) -> Hovering {
+        let Some(ix) = node else {
+            self.since = None;
+            return Hovering::Idle;
+        };
+        match self.since {
+            // Still on the same node: the card is owed once the dwell
+            // has elapsed.
+            Some((prev, since)) if prev == ix => {
+                if now.duration_since(since) >= CARD_DWELL {
+                    Hovering::Carded(ix)
+                } else {
+                    Hovering::Lit(ix)
+                }
+            }
+            // A different node, or the first one: start its own clock.
+            _ => {
+                self.since = Some((ix, now));
+                Hovering::Lit(ix)
+            }
+        }
+    }
+}
+
 /// The bounding box of a layout, as (min_x, min_y, max_x, max_y).
 /// Empty layouts give the unit square, so callers need no special case.
 pub fn bounds(nodes: &[GraphNode]) -> (f32, f32, f32, f32) {
@@ -1678,6 +1729,47 @@ mod tests {
         let p = Picker::build(dots);
         assert_eq!(p.pick(0.0, r * 0.9), Some(0), "just inside the painted edge");
         assert_eq!(p.pick(0.0, r * 1.1), None, "just outside it");
+    }
+
+    /// Names appear the instant you point at something; the card waits
+    /// until you have actually stopped. Sweeping the pointer across a
+    /// dense cluster should not fire a dozen cards and a dozen file
+    /// reads behind them.
+    #[test]
+    fn the_card_waits_for_a_dwell_but_the_name_does_not() {
+        let t0 = Instant::now();
+        let mut h = Hover::default();
+        assert_eq!(h.at(Some(4), t0), Hovering::Lit(4), "lit immediately");
+        assert_eq!(h.at(Some(4), t0 + Duration::from_millis(399)), Hovering::Lit(4));
+        assert_eq!(h.at(Some(4), t0 + CARD_DWELL), Hovering::Carded(4), "settled");
+    }
+
+    /// Moving to another node restarts the wait: the card belongs to
+    /// the node you are on, and inheriting the previous node's elapsed
+    /// time would flash a card the moment the pointer crossed one.
+    #[test]
+    fn moving_to_another_node_restarts_the_dwell() {
+        let t0 = Instant::now();
+        let mut h = Hover::default();
+        h.at(Some(1), t0);
+        assert_eq!(h.at(Some(2), t0 + Duration::from_millis(390)), Hovering::Lit(2));
+        assert_eq!(h.at(Some(2), t0 + Duration::from_millis(390) + CARD_DWELL), Hovering::Carded(2));
+    }
+
+    /// Leaving the board clears everything, and the next hover starts
+    /// its own clock rather than resuming the old one.
+    #[test]
+    fn leaving_resets_the_clock() {
+        let t0 = Instant::now();
+        let mut h = Hover::default();
+        h.at(Some(1), t0);
+        assert_eq!(h.at(None, t0 + Duration::from_millis(100)), Hovering::Idle);
+        assert_eq!(h.at(Some(1), t0 + Duration::from_millis(200)), Hovering::Lit(1));
+        assert_eq!(
+            h.at(Some(1), t0 + Duration::from_millis(200) + CARD_DWELL),
+            Hovering::Carded(1),
+            "the clock restarted on re-entry"
+        );
     }
 
     #[test]
