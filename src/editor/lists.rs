@@ -67,22 +67,47 @@ pub fn list_item(line: &str) -> Option<ListItem> {
     Some(ListItem { indent, marker_len, content_empty, next_marker, indent_step })
 }
 
-/// Byte ranges of the *bodies* of the fenced code blocks in `text` --
-/// the lines between the delimiters, delimiters excluded. Numbers in
+/// How much of `text` the fence scan for `block` has to read. Enter in
+/// a list runs `renumber_block` on a keystroke, and parsing 200 KB of
+/// prose to learn that the three lines being renumbered are not code
+/// costs the whole document for an answer about three lines.
+///
+/// Scoped, not blinkered: a fenced block begins at a delimiter line, and
+/// every delimiter line contains ``` or ~~~, so text before the first of
+/// those in the document cannot put `block` inside a fence body -- and a
+/// blank line inside a fence body means `block` really can begin below
+/// an opening delimiter. So the window starts at the first line that
+/// could be a delimiter (usually there is none, and it starts at
+/// `block`) and ends with `block`'s last line, where a fence left open
+/// already reads as running to the window's end.
+fn fence_window(text: &str, block: &std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let prefix = &text[..block.start];
+    let first = [prefix.find("```"), prefix.find("~~~")].into_iter().flatten().min();
+    let start = first.map_or(block.start, |at| match prefix[..at].rfind('\n') {
+        Some(newline) => newline + 1,
+        None => 0,
+    });
+    let end = text[block.end..].find('\n').map_or(text.len(), |at| block.end + at + 1);
+    start..end
+}
+
+/// Byte ranges of the *bodies* of the fenced code blocks around `block`
+/// -- the lines between the delimiters, delimiters excluded. Numbers in
 /// there are the user's literal text, not a list: renumbering one
 /// would silently rewrite a file the user never edited.
 ///
 /// The delimiter lines themselves stay ordinary non-list lines, so a
 /// fence still ends an ordered run at its own indent or shallower
 /// exactly as any other paragraph line does.
-fn fence_bodies(text: &str) -> Vec<std::ops::Range<usize>> {
-    super::blocks::blocks(text)
+fn fence_bodies(text: &str, block: &std::ops::Range<usize>) -> Vec<std::ops::Range<usize>> {
+    let window = fence_window(text, block);
+    super::blocks::blocks(&text[window.clone()])
         .into_iter()
         .filter_map(|b| match b.kind {
             super::blocks::BlockKind::Fence { open_line, close_line } => {
                 // An unclosed fence runs to the end of its block.
                 let end = close_line.map_or(b.range.end + 1, |c| c.start);
-                Some(open_line.end..end)
+                Some(window.start + open_line.end..window.start + end)
             }
             _ => None,
         })
@@ -111,7 +136,7 @@ pub fn renumber(text: &str, block: std::ops::Range<usize>) -> Option<String> {
 /// costs one small undo entry instead of two copies of the document.
 pub fn renumber_block(text: &str, block: std::ops::Range<usize>) -> Option<String> {
     let mut out = String::with_capacity(block.end - block.start);
-    let fences = fence_bodies(text);
+    let fences = fence_bodies(text, &block);
 
     // Stack of (indent, current number) for the ordered runs in play.
     // A shallower or equal indent pops deeper entries (their scope
@@ -311,6 +336,36 @@ mod tests {
         let text = "1. Steps:\n   ```text\n   1. alpha\n   1. beta\n   ```\n2. Done\n";
         let out = renumber(text, 0..text.len()).expect("an ordered list");
         assert_eq!(out, text, "the fence body is verbatim and the outer list already counts right");
+    }
+
+    /// Enter inside a list must not cost a parse of the whole file.
+    #[test]
+    fn renumber_only_parses_the_block_it_touches() {
+        let long = format!("{}\n1. one\n1. two\n", "filler paragraph.\n\n".repeat(400));
+        let block = long.len() - "1. one\n1. two\n".len()..long.len();
+        let out = renumber_block(&long, block.clone()).expect("renumbers");
+        assert!(out.contains("2. two"));
+        assert_eq!(
+            fence_window(&long, &block).start,
+            block.start,
+            "and the fence scan starts at the block, not at byte 0",
+        );
+    }
+
+    /// The scan is scoped, not blinkered: a blank line inside a fence
+    /// body means the run the caller hands over can begin *below* the
+    /// opening delimiter, and reading those numbers as a list would
+    /// rewrite a code block the user never edited.
+    #[test]
+    fn renumber_sees_a_fence_opened_above_the_block() {
+        let text = "```text\n\n1. alpha\n1. beta\n```\n";
+        let block = text.find("1. alpha").expect("the numbered line")..text.len();
+        assert_eq!(
+            fence_window(text, &block).start,
+            0,
+            "the window reaches back to the opening delimiter",
+        );
+        assert_eq!(renumber_block(text, block), None, "that is code, not a list");
     }
 
     /// The outer list still renumbers across a fence it contains.

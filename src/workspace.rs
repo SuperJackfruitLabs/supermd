@@ -1184,10 +1184,13 @@ impl Workspace {
 
     fn on_fs_events(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         // Ignore churn from build output (target/, node_modules/, .git)
-        // so builds in an open workspace don't hammer the UI. This asks
-        // *only* that, not "is it gitignored": a gitignored note is a
-        // note, the sidebar draws it dimmed, and an edit to one has to
-        // refresh the tree like any other. And this is only a
+        // and from hidden scratch files (.DS_Store, .note.md.swp) so
+        // builds and a Finder visit in an open workspace don't hammer
+        // the UI. This asks *only* that, not "is it gitignored": a
+        // gitignored note is a note, the sidebar draws it dimmed, and an
+        // edit to one has to refresh the tree like any other; so does an
+        // edit to a `.gitignore`, hidden though it is, since its
+        // contents are what decide the dimming. And this is only a
         // whole-batch shortcut for an irrelevant batch; it must never
         // stand in for the per-path index check below, or one visible
         // path in a batch would wave through every ignored path riding
@@ -1201,6 +1204,11 @@ impl Workspace {
         // One matcher for the batch: it caches the ignore files of each
         // directory it walks through, and a batch is a snapshot anyway.
         let mut ignores = root.as_ref().map(|root| crate::files::index_matcher(root));
+        // And one hardlink guard for the batch, for the same reason: the
+        // walk its rule needs covers the whole workspace, and a vault
+        // inside a `cp -al` backup tree has nlink > 1 on every file, so
+        // asking per path turned one save into one rescan per note.
+        let mut hardlinks = root.as_ref().map(|root| crate::knowledge::HardlinkGuard::new(root));
         if let Some(tree) = &mut self.tree {
             tree.refresh();
         }
@@ -1241,10 +1249,7 @@ impl Workspace {
                 // outside file's bytes under an in-root path. `scan`
                 // drops those after its walk; a hardlink made while the
                 // workspace is open only ever reaches the index here.
-                if root
-                    .as_ref()
-                    .is_some_and(|root| crate::knowledge::escapes_via_hardlink(root, path))
-                {
+                if hardlinks.as_mut().is_some_and(|hardlinks| hardlinks.escapes(path)) {
                     index.remove_file(path);
                     continue;
                 }
@@ -7825,6 +7830,64 @@ pub(crate) mod tests {
                 "a gitignored note stays out of the knowledge index"
             );
         });
+    }
+
+    /// Both halves of the hidden-file rule. Finder writes a `.DS_Store`
+    /// on every folder visit and no editor writes one on purpose:
+    /// nothing hidden is drawn in the sidebar or admitted to the index,
+    /// so refreshing for one repaints exactly what is already there. A
+    /// `.gitignore` is hidden too and must still wake the watcher --
+    /// its contents are what decide which rows are dimmed.
+    #[gpui::test]
+    fn a_ds_store_is_noise_but_a_gitignore_edit_wakes_the_watcher(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "\n").unwrap();
+        std::fs::write(root.path().join("one.md"), "# one\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let listing = |ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext| {
+            ws.update_in(cx, |ws, _, _| {
+                ws.tree
+                    .as_mut()
+                    .expect("a folder workspace")
+                    .visible()
+                    .into_iter()
+                    .map(|(_, e)| (e.name, e.ignored))
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Draw the listing once, so a stale cache shows up below.
+        assert!(listing(&ws, cx).iter().any(|(n, _)| n == "one.md"));
+
+        // A note appears on disk, and the only event the watcher hears
+        // is a Finder scratch write. The batch is noise: no refresh.
+        std::fs::write(root.path().join("two.md"), "# two\n").unwrap();
+        let ds_store = root.path().join(".DS_Store");
+        std::fs::write(&ds_store, "junk").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[ds_store], cx));
+        cx.run_until_parked();
+        let names = listing(&ws, cx);
+        assert!(
+            !names.iter().any(|(n, _)| n == "two.md"),
+            "a .DS_Store write refreshes nothing: {names:?}"
+        );
+
+        // An ignore-file edit is not noise: it changes which rows are
+        // dimmed, so the tree has to be walked again.
+        let gitignore = root.path().join(".gitignore");
+        std::fs::write(&gitignore, "one.md\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[gitignore], cx));
+        cx.run_until_parked();
+        let names = listing(&ws, cx);
+        assert!(
+            names.iter().any(|(n, _)| n == "two.md"),
+            "the .gitignore edit woke the watcher: {names:?}"
+        );
+        assert_eq!(
+            names.iter().find(|(n, _)| n == "one.md").map(|(_, ignored)| *ignored),
+            Some(true),
+            "and the row it newly excludes is dimmed: {names:?}"
+        );
     }
 
     #[gpui::test]

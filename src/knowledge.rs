@@ -394,35 +394,72 @@ fn hardlinked_outside_the_workspace(_files: &[PathBuf]) -> std::collections::Has
     std::collections::HashSet::new()
 }
 
-/// The same rule, asked about one path instead of a whole walk: does
-/// `path` name an inode with a link outside `root`?
-///
-/// `Index::scan` can only answer this after its walk, so the watcher --
-/// which sees files created *after* the scan, hardlinks included -- had
-/// no way to apply it and admitted them. Cheap in the ordinary case
-/// (one link, no walk); a file with several links costs one workspace
-/// walk, which a notes vault essentially never pays.
-pub fn escapes_via_hardlink(root: &Path, path: &Path) -> bool {
+/// Every file the index walk finds under `root`: the paths the link
+/// count above is compared against, and the ones `scan` reads.
+fn workspace_files(root: &Path) -> Vec<PathBuf> {
+    crate::files::workspace_walk(root)
+        .flatten()
+        .filter(|item| item.file_type().is_some_and(|t| t.is_file()))
+        .map(|item| item.path().to_path_buf())
+        .collect()
+}
+
+/// Does this path share its inode with another name? A single stat, and
+/// always false where the platform reports no link count -- the same
+/// place `hardlinked_outside_the_workspace` gives up.
+fn shares_its_inode(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let Ok(meta) = std::fs::metadata(path) else {
-            return false;
-        };
-        if meta.nlink() <= 1 {
-            return false;
-        }
-        let files: Vec<PathBuf> = crate::files::workspace_walk(root)
-            .flatten()
-            .filter(|item| item.file_type().is_some_and(|t| t.is_file()))
-            .map(|item| item.path().to_path_buf())
-            .collect();
-        hardlinked_outside_the_workspace(&files).contains(path)
+        std::fs::metadata(path).is_ok_and(|meta| meta.nlink() > 1)
     }
     #[cfg(not(unix))]
     {
-        let _ = (root, path);
+        let _ = path;
         false
+    }
+}
+
+/// The same rule as `hardlinked_outside_the_workspace`, asked one path
+/// at a time: does `path` name an inode with a link outside the root?
+///
+/// `Index::scan` can only answer this after its own walk, so the watcher
+/// -- which sees files created *after* the scan, hardlinks included --
+/// had no way to apply it and admitted them. One guard per event batch,
+/// like the ignore matcher beside it: `nlink > 1` is a stat per path,
+/// and the workspace walk that question needs then happens **once**,
+/// however many paths ask. A vault inside a `cp -al` backup tree has
+/// `nlink > 1` on every file, so a per-path walk turned one save into
+/// one rescan of the workspace per changed note.
+pub struct HardlinkGuard<W> {
+    root: PathBuf,
+    walk: W,
+    /// The escaping paths, computed by the first path that needs them.
+    escaping: Option<std::collections::HashSet<PathBuf>>,
+}
+
+impl HardlinkGuard<fn(&Path) -> Vec<PathBuf>> {
+    /// A guard over the real workspace walk.
+    pub fn new(root: &Path) -> Self {
+        Self::with_walker(root, workspace_files)
+    }
+}
+
+impl<W: FnMut(&Path) -> Vec<PathBuf>> HardlinkGuard<W> {
+    fn with_walker(root: &Path, walk: W) -> Self {
+        HardlinkGuard { root: root.to_path_buf(), walk, escaping: None }
+    }
+
+    /// True if `path` reads bytes that also live outside the workspace.
+    pub fn escapes(&mut self, path: &Path) -> bool {
+        if !shares_its_inode(path) {
+            return false;
+        }
+        if self.escaping.is_none() {
+            let files = (self.walk)(&self.root);
+            self.escaping = Some(hardlinked_outside_the_workspace(&files));
+        }
+        self.escaping.as_ref().is_some_and(|escaping| escaping.contains(path))
     }
 }
 
@@ -437,15 +474,12 @@ impl Index {
         // path — and every lookup answers from the index before any
         // escape guard runs. The walker does not follow links
         // (`follow_links(false)`), so a symlink arrives here as an
-        // entry of its own with `is_symlink()` set; dropping it is
-        // what makes the in-index short-circuit in `resolve` safe.
-        let files: Vec<PathBuf> = crate::files::workspace_walk(root)
-            .flatten()
-            .filter(|item| item.file_type().is_some_and(|t| t.is_file()))
-            .map(|item| item.path().to_path_buf())
-            .collect();
-        // A hardlink is not a symlink -- the filter above never sees
-        // it -- but deciding whether one escapes the workspace needs
+        // entry of its own with `is_symlink()` set; `workspace_files`
+        // dropping it is what makes the in-index short-circuit in
+        // `resolve` safe.
+        let files = workspace_files(root);
+        // A hardlink is not a symlink -- the walk's `is_file()` filter
+        // never sees one -- but deciding whether it escapes needs
         // every path the walk found, so it can't run until the walk
         // above has finished.
         let excluded = hardlinked_outside_the_workspace(&files);
@@ -1108,6 +1142,42 @@ mod tests {
             !index.notes.contains_key(&leak),
             "a hardlinked note must never enter the index"
         );
+    }
+
+    /// A vault inside a hardlinked backup tree has nlink > 1 on every
+    /// file. One save must not walk the workspace once per path.
+    #[cfg(unix)]
+    #[test]
+    fn the_hardlink_walk_happens_once_per_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let notes = ["a.md", "b.md", "c.md"];
+        for name in notes {
+            let outside = dir.path().join(format!("backup-{name}"));
+            std::fs::write(&outside, "x\n").unwrap();
+            std::fs::hard_link(&outside, root.join(name)).unwrap();
+        }
+        let walks = std::cell::Cell::new(0);
+        let mut guard = HardlinkGuard::with_walker(&root, |root: &Path| {
+            walks.set(walks.get() + 1);
+            workspace_files(root)
+        });
+        for name in notes {
+            assert!(guard.escapes(&root.join(name)), "{name} is linked outside the workspace");
+        }
+        assert_eq!(walks.get(), 1, "one walk for the whole batch, not one per path");
+
+        // And an ordinary file pays for no walk at all: one stat says
+        // its inode has a single name, which ends the question.
+        std::fs::write(root.join("plain.md"), "y\n").unwrap();
+        let walks = std::cell::Cell::new(0);
+        let mut guard = HardlinkGuard::with_walker(&root, |root: &Path| {
+            walks.set(walks.get() + 1);
+            workspace_files(root)
+        });
+        assert!(!guard.escapes(&root.join("plain.md")));
+        assert_eq!(walks.get(), 0, "nlink == 1 needs no walk");
     }
 
     /// The failure mode `nlink() > 1` alone would cause: a note

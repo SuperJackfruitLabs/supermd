@@ -1,6 +1,6 @@
 # Notes that Know Each Other
 
-Open a folder and SuperMD quietly indexes the markdown files in it — links, backlinks, and tags, all computed locally and kept fresh as you type. Hidden files, build directories, and anything your `.gitignore` excludes stay out of the graph, and so does a note reached only through a symlink or a hardlink to something outside it — the index never reads outside the workspace it was opened on. Your files stay plain CommonMark on disk; the index is just a cache that rebuilds itself.
+Open a folder and SuperMD quietly indexes the markdown files in it — links, backlinks, and tags, all computed locally and kept fresh as you type. Hidden files, build directories, and anything your `.gitignore` excludes stay out of the graph, and so does a note reached only through a symlink to something outside it — the index never reads outside the workspace it was opened on. On macOS and Linux a hardlink to a file outside the workspace is excluded too; Windows reports no link count for that check, so there a hardlinked note is indexed like any other file. Your files stay plain CommonMark on disk; the index is just a cache that rebuilds itself.
 
 ## Wiki links
 
