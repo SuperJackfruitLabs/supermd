@@ -718,6 +718,9 @@ pub struct Workspace {
     pending_link_opens: Vec<PathBuf>,
     /// Full-workspace graph overlay.
     graph: Option<GraphViewState>,
+    /// The view the last graph was closed with. Opening a note closes
+    /// the overlay; it no longer forgets it.
+    graph_cache: Option<GraphViewState>,
     graph_focus: FocusHandle,
     /// Inline rename / create in progress in the sidebar.
     sidebar_edit: Option<SidebarEdit>,
@@ -1160,6 +1163,7 @@ impl Workspace {
             sidebar_selected: 0,
             pending_link_opens: Vec::new(),
             graph: None,
+            graph_cache: None,
             graph_focus: cx.focus_handle(),
             sidebar_edit: None,
             move_picker: None,
@@ -1320,7 +1324,7 @@ impl Workspace {
         // rather than per path: the cache holds at most the handful of
         // dots someone has rested on, and rebuilding an entry is one
         // small read behind a 400ms dwell.
-        if let Some(graph) = self.graph.as_mut() {
+        for graph in [self.graph.as_mut(), self.graph_cache.as_mut()].into_iter().flatten() {
             graph.preview_cache.clear();
         }
         self.refresh_git_status();
@@ -1621,6 +1625,8 @@ impl Workspace {
                 cx.global_mut::<crate::diagram::DiagramCache>().clear();
             }
             *self.knowledge.lock().unwrap() = crate::knowledge::Index::scan(path);
+            // A layout of the folder we just left describes nothing here.
+            self.graph_cache = None;
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
@@ -3126,6 +3132,10 @@ impl Workspace {
         // no longer on disk.
         self.history.rewrite(|entry| crate::fileops::retarget(entry, old, new));
         self.rewrite_knowledge_links(old, new, cx);
+        // Every node in the put-away view is a path, and some of them
+        // just moved. The count would not notice, so the layout goes
+        // rather than describing a vault that no longer exists.
+        self.graph_cache = None;
         cx.notify();
     }
 
@@ -5004,6 +5014,22 @@ impl Workspace {
             (n, e)
         };
         let _ = &mut edges;
+        // The view you left, if the vault still looks like the one it
+        // described. A different node count means notes were added or
+        // deleted while the graph was away, and a layout that does not
+        // describe the vault is worse than starting over.
+        if let Some(mut cached) = self.graph_cache.take() {
+            if cached.nodes().len() == nodes.len() {
+                // Its ticker is a task from the previous open; the
+                // layout is picked up again below, from settled or not.
+                cached.ticker = None;
+                self.graph = Some(cached);
+                window.focus(&self.graph_focus);
+                self.graph_tick(cx);
+                cx.notify();
+                return;
+            }
+        }
         // Seed with a short run so the first frame is already sensible,
         // then let the ticker carry it the rest of the way on screen —
         // the graph settles in front of you instead of appearing done.
@@ -5245,7 +5271,10 @@ impl Workspace {
         let Some(node) = self.graph.as_ref().and_then(|g| g.nodes().get(ix)).cloned() else {
             return;
         };
-        self.graph = None;
+        // The view is put away, not thrown away: coming back lands where
+        // you left rather than re-simulating a layout you had already
+        // arranged.
+        self.graph_cache = self.graph.take();
         if node.ghost {
             let Some(source) = node.ghost_source else { return };
             let Some(dir) = source.parent() else { return };
@@ -9074,6 +9103,96 @@ pub(crate) mod tests {
             assert!(ws.graph.is_some(), "still on the board");
             assert_eq!(ws.graph.as_ref().unwrap().peek, Some(spoke), "the peek walked");
             assert_eq!(ws.tabs.len(), 0, "and no tab opened");
+        });
+    }
+
+    /// Opening a note from the graph used to throw the layout away, so
+    /// coming back re-simulated from scratch and landed you somewhere
+    /// else entirely. The view you left is the view you return to.
+    #[gpui::test]
+    fn reopening_the_graph_returns_the_view_you_left(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        // Settle, then move the view somewhere recognisable.
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_mut().unwrap();
+            g.zoom = 1.7;
+            g.pan = (42.0, -17.0);
+            g.filter.query = "alpha".into();
+        });
+        let positions: Vec<(f32, f32)> = ws.update_in(cx, |ws, _, _| {
+            ws.graph.as_ref().unwrap().nodes().iter().map(|n| (n.x, n.y)).collect()
+        });
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.is_none(), "the note is open, the graph closed");
+            assert_eq!(ws.tabs.len(), 1);
+        });
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.zoom, 1.7, "the zoom you left");
+            assert_eq!(g.pan, (42.0, -17.0), "the pan you left");
+            assert_eq!(g.filter.query, "alpha", "and what it was narrowed to");
+            let now: Vec<(f32, f32)> = g.nodes().iter().map(|n| (n.x, n.y)).collect();
+            assert_eq!(now, positions, "no re-simulation");
+        });
+    }
+
+    /// A layout that no longer describes the vault is worse than no
+    /// layout: restoring it would show a note that has been deleted, or
+    /// leave a new one out entirely.
+    #[gpui::test]
+    fn a_note_added_while_away_rebuilds_the_graph(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| ws.graph.as_mut().unwrap().zoom = 1.7);
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        // A note arrives while the graph is put away.
+        let added = root.path().join("b.md");
+        std::fs::write(&added, "# Beta\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[added], cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.nodes().len(), 2, "the new note is in the graph");
+            assert_ne!(g.zoom, 1.7, "and the stale layout was not restored");
+        });
+    }
+
+    /// A rename rewrites every link in the vault, so a cached layout
+    /// from before it describes a set of paths that no longer exist --
+    /// and the node count alone would not notice.
+    #[gpui::test]
+    fn a_rename_drops_the_cached_view(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("a.md");
+        std::fs::write(&old, "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph_cache.is_some(), "put away, not thrown"));
+        let new = root.path().join("renamed.md");
+        std::fs::rename(&old, &new).unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.after_path_change(&old, &new, cx));
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph_cache.is_none(), "a move invalidates the layout");
         });
     }
 
