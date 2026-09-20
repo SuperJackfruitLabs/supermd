@@ -451,6 +451,32 @@ pub fn map(scheme: &Scheme) -> Tokens {
 
     let added = nearest_hue(scheme, 120. / 360., "base0B");
     let removed = nearest_hue(scheme, 0., "base08");
+    // The diff wash is the accent at 18% over the page, and until this
+    // walk existed the ink on it was the accent itself -- saturated
+    // text on a fifth of itself. Twenty-five of the forty pairs were
+    // under 4.5:1 and `ayu-light`'s added ink was at 1.90:1, so a diff
+    // hunk read as a green smear with green writing in it.
+    //
+    // The same walk the fence does above, for the same reason and in
+    // the same shape: the wash is the surface the palette chose, so it
+    // is left alone and the ink moves away from it. Raising the mix
+    // cannot fix this -- a paler wash is closer to the page, and a
+    // mid-lightness green on white is under 3:1 however pale the wash
+    // gets, so the ink is the only thing that can move. Every one of
+    // the twenty schemes clears the floor this way, with no exception
+    // band, and thirteen of the forty pairs never move at all.
+    let diff_ink = |ink: Srgb, wash: Srgb| {
+        let mut ink = ink;
+        for _ in 0..45 {
+            if contrast(ink, wash) >= 4.55 {
+                break;
+            }
+            ink = step(ink, 0.02, dark);
+        }
+        ink
+    };
+    let added_bg = mix(page, added, 0.18);
+    let removed_bg = mix(page, removed, 0.18);
 
     Tokens {
         bg,
@@ -478,10 +504,10 @@ pub fn map(scheme: &Scheme) -> Tokens {
         // 0.34 dark / 0.18 light, the two hand-tuned strengths, both
         // well under the 0.5 the loader clamps at.
         shadow_alpha: if dark { 0x57 } else { 0x2e },
-        diff_added_bg: mix(page, added, 0.18),
-        diff_added_fg: added,
-        diff_deleted_bg: mix(page, removed, 0.18),
-        diff_deleted_fg: removed,
+        diff_added_bg: added_bg,
+        diff_added_fg: diff_ink(added, added_bg),
+        diff_deleted_bg: removed_bg,
+        diff_deleted_fg: diff_ink(removed, removed_bg),
         syntax: [
             b("base0E"), // keyword: keywords, storage, selector
             b("base0D"), // function: functions, methods, headings
@@ -950,17 +976,27 @@ mod tests {
     /// put their foreground in `base08`. The substitution finds each
     /// scheme's real green and red, and leaves every obedient scheme's
     /// slots alone.
+    ///
+    /// The choice is measured at `nearest_hue`, not at the token: the
+    /// readability walk that follows it moves most of these inks off
+    /// their slot for a reason that has nothing to do with the naming,
+    /// and reading the token would report that as a substitution. The
+    /// hue assertions below still read the shipped token, because the
+    /// walk mixes toward white or black -- an affine map on every
+    /// channel at once, which leaves the hue exactly where it was.
     #[test]
     fn diff_colours_fall_back_to_the_palettes_real_green_and_red() {
         let mut substituted = Vec::new();
         for (slug, yaml, _) in CONVERTED {
             let scheme = Scheme::parse(slug, yaml).expect("scheme parses");
             let t = map(&scheme);
-            if t.diff_added_fg != scheme.slot("base0B") {
-                substituted.push(format!("{slug} added {}", t.diff_added_fg.hex()));
+            let added = nearest_hue(&scheme, 120. / 360., "base0B");
+            let removed = nearest_hue(&scheme, 0., "base08");
+            if added != scheme.slot("base0B") {
+                substituted.push(format!("{slug} added {}", added.hex()));
             }
-            if t.diff_deleted_fg != scheme.slot("base08") {
-                substituted.push(format!("{slug} removed {}", t.diff_deleted_fg.hex()));
+            if removed != scheme.slot("base08") {
+                substituted.push(format!("{slug} removed {}", removed.hex()));
             }
             // Whatever was chosen, it has to be the right end of the wheel.
             assert!(

@@ -33,7 +33,7 @@ shadow = "#14151b57"          # derived, translucent
 diff_added_bg = "#2f4f42"     # derived
 diff_added_fg = "#50fa7b"     # base0B
 diff_deleted_bg = "#4f323c"   # derived
-diff_deleted_fg = "#ff5555"   # base08
+diff_deleted_fg = "#ff7d7d"   # derived
 
 [syntax]
 keyword = "#ff79c6"           # base0E

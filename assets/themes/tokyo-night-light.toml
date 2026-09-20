@@ -31,9 +31,9 @@ find_match_bg = "#74d4e5"     # derived
 find_active_bg = "#28bcd5"    # derived
 shadow = "#292c3d2e"          # derived, translucent
 diff_added_bg = "#bcc0bc"     # derived
-diff_added_fg = "#485e30"     # base0B
+diff_added_fg = "#3e502a"     # derived
 diff_deleted_bg = "#c8bcc2"   # derived
-diff_deleted_fg = "#8c4351"   # base0F
+diff_deleted_fg = "#773a45"   # derived
 
 [syntax]
 keyword = "#5a4a78"           # base0E

@@ -1252,6 +1252,49 @@ attribute = "#d19a66"
         }
     }
 
+    /// Diff ink is painted on its own wash, and that pair was the one
+    /// ink nothing measured.
+    ///
+    /// `diff_added_fg` and `diff_deleted_fg` were guarded only against
+    /// `page_bg`, for the thematic-break divider a hidden `---` leaves
+    /// behind (`every_background_token_is_visible_on_what_it_is_painted_on`).
+    /// But the place they carry *text* is on top of their own
+    /// background: Show Changes sets `a.bg = diff_added_bg` and
+    /// `a.color = diff_added_fg` per character (`editor/mod.rs`), the
+    /// command-error strip is `diff_deleted_fg` on `diff_deleted_bg`
+    /// (`workspace.rs`) and so is the reading view's `diagram error:`
+    /// line (`view.rs`). None of the three was ever measured.
+    ///
+    /// Unmeasured, the base16 conversion shipped saturated accent text
+    /// on eighteen percent of itself: twenty-five of the forty pairs
+    /// were under 4.5:1 and seven under 3.0:1, `ayu-light`'s added ink
+    /// worst at 1.90:1. The eight hand-written themes name no diff
+    /// colours and inherit the built-ins, which were 4.77:1 or better
+    /// all along -- so the converter was two to three times worse than
+    /// the set it was measured against, in the one dimension nobody
+    /// looked at.
+    ///
+    /// The floor is body text's, because this is body text: a line of
+    /// the document in the diff view, and a whole sentence of refusal in
+    /// the toast. The fix is the fence's fix -- walk the ink away from
+    /// the wash until it clears (`base16::theme_for`) -- so no theme
+    /// needs an exception here and there is no table under this test.
+    #[test]
+    fn diff_ink_stays_readable_on_its_own_wash() {
+        for (name, t) in shipped_themes() {
+            for (what, ink, wash) in [
+                ("added", t.diff_added_fg, t.diff_added_bg),
+                ("removed", t.diff_deleted_fg, t.diff_deleted_bg),
+            ] {
+                let text = Theme::contrast(ink, wash);
+                assert!(
+                    text >= 4.5,
+                    "{name}: {what} diff text is {text:.2}:1 on its own wash"
+                );
+            }
+        }
+    }
+
     /// A background token is only a signal if it differs from what it
     /// is painted on. `code_bg` was the first of these found collapsed
     /// onto the page; it was not the only one.
