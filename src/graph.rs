@@ -911,6 +911,32 @@ pub fn label_opacity(zoom: f32) -> f32 {
     (zoom - LABEL_FADE_START) / (LABEL_FULL - LABEL_FADE_START)
 }
 
+/// A node's drawn radius in board pixels. The painter, the hit-tester
+/// and the arrowhead inset all read this one function: a hit-test that
+/// disagrees with the paint by a pixel opens the wrong note.
+pub fn node_radius(degree: usize, zoom: f32) -> f32 {
+    (5.0 + (degree as f32).sqrt() * 3.0) * zoom.sqrt()
+}
+
+/// Below this, an arrowhead is sub-pixel and costs a tessellated path
+/// per edge for nothing. Deliberately the same threshold labels use, so
+/// detail arrives all at once instead of in two unexplained stages.
+pub const ARROWHEAD_MIN_ZOOM: f32 = LABEL_FADE_START;
+
+/// What the renderer draws at a given zoom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lod {
+    pub arrowheads: bool,
+    pub labels: bool,
+}
+
+pub fn lod(zoom: f32) -> Lod {
+    Lod {
+        arrowheads: zoom >= ARROWHEAD_MIN_ZOOM,
+        labels: label_opacity(zoom) > 0.0,
+    }
+}
+
 /// The bounding box of a layout, as (min_x, min_y, max_x, max_y).
 /// Empty layouts give the unit square, so callers need no special case.
 pub fn bounds(nodes: &[GraphNode]) -> (f32, f32, f32, f32) {
@@ -1489,6 +1515,36 @@ mod tests {
             assert!(o >= last, "opacity went backwards at zoom {}", i as f32 / 20.0);
             last = o;
         }
+    }
+
+    /// The painter and the hit-tester must agree to the float. This
+    /// expression used to be written twice in `render_graph`, which is
+    /// exactly the arrangement that drifts.
+    #[test]
+    fn radius_grows_with_degree_and_zoom() {
+        let base = node_radius(0, 1.0);
+        assert!((base - 5.0).abs() < 1e-4, "an orphan is the bare dot: {base}");
+        assert!(node_radius(9, 1.0) > node_radius(1, 1.0), "degree widens it");
+        // Zoom scales by its square root, so a graph zoomed 4x has dots
+        // twice the size rather than four times -- the board gets
+        // denser as you zoom out without the dots vanishing.
+        let (near, far) = (node_radius(4, 4.0), node_radius(4, 1.0));
+        assert!((near / far - 2.0).abs() < 1e-3, "{near} vs {far}");
+    }
+
+    /// Arrowheads are one or two extra tessellated paths per edge and
+    /// are sub-pixel below half zoom -- which is the whole-vault view,
+    /// where nothing can be culled because everything is on screen.
+    #[test]
+    fn arrowheads_and_labels_switch_on_with_zoom() {
+        assert!(!lod(0.3).arrowheads, "whole vault: lines only");
+        assert!(!lod(0.3).labels);
+        assert!(lod(0.9).arrowheads, "close in: direction is readable");
+        assert!(lod(0.9).labels);
+        // The boundary is the same one labels already used, so the two
+        // appear together rather than at two unexplained zooms.
+        assert_eq!(ARROWHEAD_MIN_ZOOM, LABEL_FADE_START);
+        assert!(lod(ARROWHEAD_MIN_ZOOM).arrowheads, "inclusive at the edge");
     }
 
     #[test]
