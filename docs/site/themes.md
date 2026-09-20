@@ -4,7 +4,9 @@
 
 SuperMD keeps one light theme and one dark theme, and the control at the top decides which of the two is in force. On **System** — the default — it follows your OS, so the app switches when your Mac or PC does. **Light** and **Dark** pin it, and a pinned choice outranks both the system setting and [flux](#flux-themes-that-follow-the-sun)'s night switch: set Light and the app stays light at midnight.
 
-Choosing an appearance applies at once, and survives closing the dialog with Escape. Picking a *theme* previews as you move through the list, and Enter keeps it — including the appearance it belongs to. Confirming a light theme while Dark was pinned moves the control to Light, because the preview you just watched was the light one; Escape puts the theme back.
+Choosing an appearance applies at once, and survives closing the dialog with Escape. Picking a *theme* previews as you move through the list, and Enter keeps it — the theme you watched is the theme you get.
+
+That last part needs one rule, because the list holds both kinds. Confirm a theme whose appearance **matches** the one in force and only its slot is written: if you were on System you stay on System, and the OS and flux keep switching you as before. Confirm a theme of the **other** appearance — a light theme while it is dark out — and the control moves to match it, because that is what the preview showed you. Doing that takes you off System, so the OS and flux stop switching until you set it back to System yourself. Escape before Enter puts the theme back and changes nothing.
 
 The choice is written to `~/.supermd/settings.toml`, and you can set it there directly:
 

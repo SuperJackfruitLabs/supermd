@@ -3317,36 +3317,52 @@ impl Workspace {
         };
         self.theme_picker = None;
         {
-            let picked = &cx.global::<crate::theme::ThemeState>().themes[ix];
+            let state = cx.global::<crate::theme::ThemeState>();
+            let picked = &state.themes[ix];
             let (name, is_dark) = (picked.name.clone(), picked.theme.is_dark);
-            // The appearance travels with the name, because the preview
-            // already moved it. `theme_picker_apply` sets `ActiveTheme`
-            // to the highlighted theme directly, whatever its
-            // appearance, while `ThemeState::resolve` reads the slot for
-            // the appearance in force -- so writing only the slot made
-            // highlighting "Paper" under Dark turn the app light and
-            // Enter turn it back. One glance at this dialog showed the
-            // Light/Dark/System control at the top and twenty-eight rows
-            // of both kinds below it, contradicting itself.
+            // The appearance travels with the name ONLY when the picked
+            // theme disagrees with the appearance in force.
             //
-            // Setting the appearance is the fix that keeps the list
-            // whole. Filtering the rows to the appearance in force is
-            // the other way, and it costs more than it saves: under
-            // Dark it hides nineteen themes of twenty-eight behind a
-            // setting, it makes each row's Light/Dark badge dead
-            // weight, and under `System` -- where the resolved
-            // appearance is the OS's, not a choice -- it either hides
-            // rows the user never chose to hide or leaves the lie in
-            // place. This way preview and result agree in every case,
-            // System included, and the change is not silent: the
-            // segmented control above the list is what it moves.
+            // It has to travel at all because the preview already moved
+            // it: `theme_picker_apply` sets `ActiveTheme` to the
+            // highlighted theme directly, whatever its appearance, while
+            // `ThemeState::resolve` reads the slot for the appearance in
+            // force -- so writing only the slot made highlighting
+            // "Paper" under Dark turn the app light and Enter turn it
+            // back. One glance at this dialog showed the
+            // Light/Dark/System control at the top and twenty-eight rows
+            // of both kinds below it, contradicting itself. Filtering
+            // the rows instead costs more than it saves: under Dark it
+            // hides nineteen themes of twenty-eight behind a setting, it
+            // makes each row's Light/Dark badge dead weight, and under
+            // `System` the resolved appearance is the OS's rather than a
+            // choice, so there is nothing explicit to filter by and the
+            // lie would survive.
+            //
+            // But it must travel no further than that. `Light` and
+            // `Dark` short-circuit ahead of `flux.auto_dark` and
+            // `system_dark` in `resolved_dark`, so an unconditional
+            // write pinned every user who ever pressed Enter: a flux
+            // user on the default `System` picking their dark theme at
+            // night got `appearance := Dark` forever, and the next
+            // morning the app no longer came back to light. In that
+            // case the pin bought nothing -- the picked theme already
+            // matches what `resolve` chooses, so the slot write alone
+            // yields the previewed theme -- and cost flux and
+            // OS-following outright. Asking `resolved_dark` keeps
+            // previewed-is-what-you-get without that.
+            let switches_appearance = is_dark != state.resolved_dark();
             persist_setting(cx, move |s| {
                 if is_dark {
                     s.dark_theme = name.clone();
-                    s.appearance = crate::settings::Appearance::Dark;
+                    if switches_appearance {
+                        s.appearance = crate::settings::Appearance::Dark;
+                    }
                 } else {
                     s.light_theme = name.clone();
-                    s.appearance = crate::settings::Appearance::Light;
+                    if switches_appearance {
+                        s.appearance = crate::settings::Appearance::Light;
+                    }
                 }
             });
         }
@@ -9483,6 +9499,94 @@ pub(crate) mod tests {
         });
         let on_disk = crate::settings::load(&home._dir.path().join(".supermd"));
         assert_eq!(on_disk.appearance, crate::settings::Appearance::Light, "and persists");
+    }
+
+    /// ...and confirming a theme that already matches leaves the
+    /// appearance setting exactly where it was.
+    ///
+    /// The appearance write above is what makes previewed-is-what-you-get
+    /// true, and it is only *needed* when the picked theme disagrees with
+    /// the appearance in force. Written unconditionally it pinned
+    /// everybody: `Light` and `Dark` short-circuit ahead of
+    /// `flux.auto_dark` and `system_dark` in `resolved_dark`, so a flux
+    /// user on the default `System` who picked their dark theme at night
+    /// got `appearance := Dark` forever and the next morning the app no
+    /// longer came back to light. `auto_dark` never fired again. Same
+    /// shape for plain OS-following.
+    ///
+    /// So this is the case that must *not* move the setting -- and the
+    /// morning at the end of the test is the actual regression, not just
+    /// the field it came from.
+    #[gpui::test]
+    fn confirming_a_theme_that_already_matches_leaves_the_appearance_alone(
+        cx: &mut TestAppContext,
+    ) {
+        let home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // A flux user on the default System, at night: dark is in force
+        // because `auto_dark` says so, not because anything explicit
+        // does -- `system_dark` is false underneath it.
+        cx.update(|_, app| {
+            let state = app.global_mut::<crate::theme::ThemeState>();
+            state.settings.appearance = crate::settings::Appearance::System;
+            state.settings.flux.enabled = true;
+            state.settings.flux.auto_dark = true;
+            state.system_dark = false;
+            state.flux_blend = 1.0;
+            assert!(
+                app.global::<crate::theme::ThemeState>().resolved_dark(),
+                "flux night decides here, and it says dark"
+            );
+            crate::theme::refresh_active_theme(app);
+        });
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        // A dark theme: its appearance already agrees with what
+        // `resolve` would choose, so there is nothing to pin.
+        let (pos, picked_name) = cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker should be open");
+            let state = app.global::<crate::theme::ThemeState>();
+            let pos = picker
+                .order
+                .iter()
+                .position(|&i| state.themes[i].theme.is_dark)
+                .expect("a dark theme ships");
+            (pos, state.themes[picker.order[pos]].name.clone())
+        });
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_apply(pos, cx));
+        cx.update(|_, app| assert!(theme(app).is_dark, "previewing a dark theme"));
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        cx.update(|_, app| {
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(state.settings.dark_theme, picked_name, "the slot still took the name");
+            assert_eq!(
+                state.settings.appearance,
+                crate::settings::Appearance::System,
+                "confirming a theme that already matches must not pin the appearance"
+            );
+            assert!(theme(app).is_dark, "and it is the picked theme that is showing");
+        });
+        let on_disk = crate::settings::load(&home._dir.path().join(".supermd"));
+        assert_eq!(
+            on_disk.appearance,
+            crate::settings::Appearance::System,
+            "nothing pinned on disk either"
+        );
+
+        // The regression itself: morning still comes.
+        cx.update(|_, app| {
+            app.global_mut::<crate::theme::ThemeState>().flux_blend = 0.0;
+            crate::theme::refresh_active_theme(app);
+            assert!(!theme(app).is_dark, "auto_dark still fires -- the app returns to light");
+        });
     }
 
     /// Every persisted setting is a read-modify-write against *disk*.

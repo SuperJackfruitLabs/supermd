@@ -1654,13 +1654,23 @@ pub struct ThemeState {
 impl Global for ThemeState {}
 
 impl ThemeState {
-    pub fn resolve(&self) -> Arc<Theme> {
+    /// Which of the two slots is in force right now.
+    ///
+    /// Precedence: an explicit appearance beats both flux's night
+    /// override and the system. Under System, flux night still forces
+    /// dark and day still follows the system appearance -- unchanged
+    /// from before this setting existed.
+    ///
+    /// Split out of `resolve` so the theme picker can ask the same
+    /// question `resolve` answers. Confirming a theme writes
+    /// `appearance` only when the picked theme disagrees with this,
+    /// because writing it unconditionally pins `System` users to an
+    /// explicit value and kills both flux's night switch and
+    /// OS-following -- and it was the *picked theme already agreeing*
+    /// case where that pin bought nothing at all.
+    pub fn resolved_dark(&self) -> bool {
         let flux = &self.settings.flux;
-        // Precedence: an explicit appearance beats both flux's night
-        // override and the system. Under System, flux night still
-        // forces dark and day still follows the system appearance --
-        // unchanged from before this setting existed.
-        let dark = match self.settings.appearance {
+        match self.settings.appearance {
             crate::settings::Appearance::Light => false,
             crate::settings::Appearance::Dark => true,
             crate::settings::Appearance::System => {
@@ -1670,7 +1680,12 @@ impl ThemeState {
                     self.system_dark
                 }
             }
-        };
+        }
+    }
+
+    pub fn resolve(&self) -> Arc<Theme> {
+        let flux = &self.settings.flux;
+        let dark = self.resolved_dark();
         let want = if dark {
             &self.settings.dark_theme
         } else {
