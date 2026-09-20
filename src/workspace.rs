@@ -793,6 +793,11 @@ struct GraphViewState {
     ticker: Option<gpui::Task<()>>,
     /// What node colour means right now.
     color_by: crate::graph::ColorBy,
+    /// The colour groups in this layout, sorted and deduplicated so a
+    /// group's colour is the same on every open rather than depending
+    /// on node order. Held rather than rebuilt per frame: it changes
+    /// only when the nodes or the colour mode do.
+    group_keys: Vec<String>,
     /// How spread out the layout sits.
     spread: crate::graph::Spread,
     /// What the view is narrowed to. Non-matching nodes fade rather
@@ -809,6 +814,24 @@ impl GraphViewState {
 
     fn edges(&self) -> &[crate::graph::Edge] {
         &self.sim.edges
+    }
+
+    /// Recompute `group_keys`. Called where the nodes or the colour
+    /// mode change -- never from the render, which read it 60 times a
+    /// second for data that had not moved.
+    fn rebuild_group_keys(&mut self) {
+        let mut keys: Vec<String> = self
+            .nodes()
+            .iter()
+            .filter_map(|n| match self.color_by {
+                crate::graph::ColorBy::None => None,
+                crate::graph::ColorBy::Folder => n.folder.clone(),
+                crate::graph::ColorBy::Tag => n.tag.clone(),
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        self.group_keys = keys;
     }
 
     /// Nodes one hop from `ix`, plus itself.
@@ -4975,10 +4998,14 @@ impl Workspace {
             label_count: 0,
             ticker: None,
             color_by: crate::graph::ColorBy::Folder,
+            group_keys: Vec::new(),
             spread: crate::graph::Spread::Normal,
             filter: crate::graph::Filter::default(),
             searching: false,
         });
+        if let Some(graph) = self.graph.as_mut() {
+            graph.rebuild_group_keys();
+        }
         window.focus(&self.graph_focus);
         // The layout is unbounded, so frame it before the first paint —
         // otherwise a large vault opens somewhere off screen.
@@ -5037,6 +5064,7 @@ impl Workspace {
             ColorBy::Tag => ColorBy::None,
             ColorBy::None => ColorBy::Folder,
         };
+        graph.rebuild_group_keys();
         let what = match graph.color_by {
             ColorBy::Folder => "folder",
             ColorBy::Tag => "tag",
@@ -5256,22 +5284,10 @@ impl Workspace {
             t.syntax.tag,
             t.syntax.property,
         ];
-        // Sorted and deduplicated, so a group's colour is the same on
-        // every open rather than depending on node order.
-        let group_keys: Vec<String> = {
-            let mut keys: Vec<String> = state
-                .nodes()
-                .iter()
-                .filter_map(|n| match state.color_by {
-                    crate::graph::ColorBy::None => None,
-                    crate::graph::ColorBy::Folder => n.folder.clone(),
-                    crate::graph::ColorBy::Tag => n.tag.clone(),
-                })
-                .collect();
-            keys.sort();
-            keys.dedup();
-            keys
-        };
+        // Held on the state, not rebuilt here: cloning, sorting and
+        // deduplicating every node's folder or tag is work for a change
+        // of nodes or colour mode, not for a frame.
+        let group_keys = &state.group_keys;
         let label_alpha = crate::graph::label_opacity(state.zoom);
         // What this zoom is worth drawing at all.
         let lod = crate::graph::lod(state.zoom);
@@ -5292,6 +5308,8 @@ impl Workspace {
                 (at(a), at(b), on, e.both, node_r(a), node_r(b))
             })
             .collect();
+        // Copied out so the canvas closure owns it rather than `lod`.
+        let arrowheads = lod.arrowheads;
         let edge_color = Hsla { a: 0.35, ..t.fg_muted };
         let dim_edge = Hsla { a: 0.08, ..t.fg_muted };
         let edges_canvas = gpui::canvas(
@@ -5308,15 +5326,19 @@ impl Workspace {
                     // Which way the link points. A pair that links both
                     // ways gets an arrowhead at each end rather than two
                     // lines drawn over each other.
-                    window.paint_path(
-                        crate::graph::arrow_path(pa, pb, rb + 2.0, 7.0),
-                        color,
-                    );
-                    if *both {
-                        window.paint_path(
-                            crate::graph::arrow_path(pb, pa, ra + 2.0, 7.0),
-                            color,
-                        );
+                    //
+                    // Below half zoom an arrowhead is sub-pixel, and it
+                    // is one or two tessellated paths per edge at
+                    // exactly the zoom where the whole vault is on
+                    // screen and nothing can be culled.
+                    if arrowheads {
+                        window.paint_path(crate::graph::arrow_path(pa, pb, rb + 2.0, 7.0), color);
+                        if *both {
+                            window.paint_path(
+                                crate::graph::arrow_path(pb, pa, ra + 2.0, 7.0),
+                                color,
+                            );
+                        }
                     }
                 }
             },
@@ -5345,7 +5367,7 @@ impl Workspace {
                     node_base_color(
                         node,
                         state.color_by,
-                        &group_keys,
+                        group_keys,
                         &palette,
                         open_path.as_deref(),
                         &t,
@@ -8389,6 +8411,54 @@ pub(crate) mod tests {
         cx.update(|_, app| {
             assert!(ws.read(app).graph.is_some(), "still on the board");
         });
+    }
+
+    /// group_keys cloned every node's folder or tag, sorted and
+    /// deduplicated them -- 60 times a second, for data that changes
+    /// only when the index or the colour mode does.
+    #[gpui::test]
+    fn group_keys_are_computed_once_not_per_frame(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/a.md"), "# a\n\nfiled under #planning\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let before = ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().group_keys.clone());
+        assert_eq!(before, vec!["notes".to_string()], "the folder is a group");
+        // A render changes nothing: only a colour-mode or index change
+        // may rebuild this.
+        ws.update_in(cx, |_, _, cx| cx.notify());
+        cx.run_until_parked();
+        let after = ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().group_keys.clone());
+        assert_eq!(before, after, "stable across renders");
+        // The colour mode is one of the two things that does rebuild it,
+        // so hoisting must not mean going stale.
+        ws.update_in(cx, |ws, window, cx| ws.graph_color_by(&GraphColorBy, window, cx));
+        cx.run_until_parked();
+        let by_tag = ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().group_keys.clone());
+        assert_eq!(by_tag, vec!["planning".to_string()], "the tag is the group now");
+    }
+
+    /// Below half zoom an arrowhead is sub-pixel, and it costs one or
+    /// two tessellated paths per edge -- at exactly the zoom where
+    /// nothing can be culled because the whole vault is on screen.
+    #[gpui::test]
+    fn arrowheads_are_skipped_at_whole_vault_zoom(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# a\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# b\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_graph_view(window, cx);
+            if let Some(g) = ws.graph.as_mut() {
+                g.zoom = 0.3;
+            }
+        });
+        cx.run_until_parked();
+        assert!(!crate::graph::lod(0.3).arrowheads, "and the renderer asks lod()");
     }
 
     /// `FsEntry.ignored` is computed and tested; this is the only test
