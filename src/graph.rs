@@ -952,6 +952,42 @@ pub fn orphan_dim(color: Hsla, degree: usize) -> Hsla {
     Hsla { a: color.a * ORPHAN_ALPHA, ..color }
 }
 
+/// Resolves a board position to a node, replacing the per-node gpui
+/// hit-boxes the graph used to build. One element now covers the whole
+/// board, so the pointer has to be matched against the dots by hand.
+///
+/// A linear scan is deliberate: 2,500 float comparisons per mouse-move
+/// is microseconds, while a spatial index is more code and more state
+/// to invalidate for no measurable gain at this size.
+pub struct Picker {
+    /// (x, y, radius) in board pixels, in paint order.
+    dots: Vec<(f32, f32, f32)>,
+}
+
+impl Picker {
+    pub fn build(dots: Vec<(f32, f32, f32)>) -> Self {
+        Self { dots }
+    }
+
+    pub fn len(&self) -> usize {
+        self.dots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dots.is_empty()
+    }
+
+    /// The topmost dot containing the point, or `None`. Back to front,
+    /// because gpui paints later siblings over earlier ones and this
+    /// has to resolve a crowded cluster the same way gpui did.
+    pub fn pick(&self, x: f32, y: f32) -> Option<usize> {
+        self.dots.iter().enumerate().rev().find_map(|(ix, &(dx, dy, r))| {
+            let (ox, oy) = (x - dx, y - dy);
+            (ox * ox + oy * oy <= r * r).then_some(ix)
+        })
+    }
+}
+
 /// The bounding box of a layout, as (min_x, min_y, max_x, max_y).
 /// Empty layouts give the unit square, so callers need no special case.
 pub fn bounds(nodes: &[GraphNode]) -> (f32, f32, f32, f32) {
@@ -1585,6 +1621,63 @@ mod tests {
     fn dimming_composes_with_an_already_faded_colour() {
         let faded = Hsla { h: 0.5, s: 0.6, l: 0.6, a: 0.25 };
         assert!(orphan_dim(faded, 0).a < faded.a);
+    }
+
+    /// The dot you click is the dot you get. Board pixels in, node
+    /// index out.
+    #[test]
+    fn pick_finds_the_dot_under_the_point() {
+        let p = Picker::build(vec![(10.0, 10.0, 5.0), (100.0, 100.0, 8.0)]);
+        assert_eq!(p.pick(10.0, 10.0), Some(0), "dead centre");
+        assert_eq!(p.pick(13.0, 13.0), Some(0), "inside the radius");
+        assert_eq!(p.pick(100.0, 104.0), Some(1), "the bigger dot");
+        assert_eq!(p.pick(50.0, 50.0), None, "empty board is not a node");
+    }
+
+    /// gpui paints later siblings over earlier ones, so where dots
+    /// overlap the last drawn is the one the pointer was hitting. This
+    /// replaces gpui's own hit-testing and has to agree with it, or
+    /// clicking a crowded cluster opens the wrong note.
+    #[test]
+    fn overlapping_dots_resolve_to_the_topmost() {
+        let p = Picker::build(vec![(10.0, 10.0, 6.0), (12.0, 10.0, 6.0)]);
+        assert_eq!(p.pick(11.0, 10.0), Some(1), "the later dot is on top");
+    }
+
+    /// A miss just outside the edge must not round into a hit: at the
+    /// whole-vault zoom dots are a few pixels across and sit close
+    /// together, so a generous radius would open a neighbour.
+    #[test]
+    fn a_near_miss_is_a_miss() {
+        let p = Picker::build(vec![(0.0, 0.0, 5.0)]);
+        assert_eq!(p.pick(4.9, 0.0), Some(0));
+        assert_eq!(p.pick(5.1, 0.0), None);
+    }
+
+    /// Built from real nodes, the picker's radii are the painter's --
+    /// one rule, so a click cannot drift from the dot it looks at.
+    #[test]
+    fn picker_radii_match_the_painter() {
+        let mut nodes = chain(3);
+        nodes.0[0].x = 0.0;
+        nodes.0[0].y = 0.0;
+        // chain() lays its notes out in the unit square while radii are
+        // board pixels, so the other two dots would swallow the origin.
+        // Park them off the board; this test is about one dot's edge.
+        for n in nodes.0.iter_mut().skip(1) {
+            n.x = 500.0;
+            n.y = 500.0;
+        }
+        let zoom = 2.0;
+        let dots: Vec<(f32, f32, f32)> = nodes
+            .0
+            .iter()
+            .map(|n| (n.x, n.y, node_radius(n.degree, zoom)))
+            .collect();
+        let r = dots[0].2;
+        let p = Picker::build(dots);
+        assert_eq!(p.pick(0.0, r * 0.9), Some(0), "just inside the painted edge");
+        assert_eq!(p.pick(0.0, r * 1.1), None, "just outside it");
     }
 
     #[test]
