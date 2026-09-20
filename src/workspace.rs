@@ -3308,11 +3308,34 @@ impl Workspace {
         {
             let picked = &cx.global::<crate::theme::ThemeState>().themes[ix];
             let (name, is_dark) = (picked.name.clone(), picked.theme.is_dark);
+            // The appearance travels with the name, because the preview
+            // already moved it. `theme_picker_apply` sets `ActiveTheme`
+            // to the highlighted theme directly, whatever its
+            // appearance, while `ThemeState::resolve` reads the slot for
+            // the appearance in force -- so writing only the slot made
+            // highlighting "Paper" under Dark turn the app light and
+            // Enter turn it back. One glance at this dialog showed the
+            // Light/Dark/System control at the top and twenty-eight rows
+            // of both kinds below it, contradicting itself.
+            //
+            // Setting the appearance is the fix that keeps the list
+            // whole. Filtering the rows to the appearance in force is
+            // the other way, and it costs more than it saves: under
+            // Dark it hides nineteen themes of twenty-eight behind a
+            // setting, it makes each row's Light/Dark badge dead
+            // weight, and under `System` -- where the resolved
+            // appearance is the OS's, not a choice -- it either hides
+            // rows the user never chose to hide or leaves the lie in
+            // place. This way preview and result agree in every case,
+            // System included, and the change is not silent: the
+            // segmented control above the list is what it moves.
             persist_setting(cx, move |s| {
                 if is_dark {
                     s.dark_theme = name.clone();
+                    s.appearance = crate::settings::Appearance::Dark;
                 } else {
                     s.light_theme = name.clone();
+                    s.appearance = crate::settings::Appearance::Light;
                 }
             });
         }
@@ -9392,6 +9415,60 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(settings.contains(&picked_name), "picked theme persisted: {settings}");
+    }
+
+    /// What the picker previewed is what confirm gives you.
+    ///
+    /// `theme_picker_apply` previews by setting `ActiveTheme` to the
+    /// highlighted theme, whatever its appearance. Confirm used to
+    /// write only the matching slot and re-resolve, and
+    /// `ThemeState::resolve` reads the slot for the appearance in
+    /// force -- so with Dark set, highlighting a light theme turned
+    /// the app light and Enter turned it straight back. The dialog said
+    /// both things at once: the Light/Dark/System control at the top,
+    /// nine light and nineteen dark rows below it.
+    ///
+    /// The previously shipped test only ever confirmed a theme whose
+    /// appearance already matched what `resolve` would choose, so it
+    /// could not see this. This one sets the appearance explicitly
+    /// first, which is the case that lied.
+    #[gpui::test]
+    fn confirming_a_theme_of_the_other_appearance_keeps_what_was_previewed(
+        cx: &mut TestAppContext,
+    ) {
+        let home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, _, cx| {
+            ws.set_appearance(crate::settings::Appearance::Dark, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        // Row 0: `theme_picker_rows` lists every light theme first, so
+        // this is the appearance the setting says the app is not in.
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_apply(0, cx));
+        let previewed = cx.update(|_, app| theme(app));
+        assert!(!previewed.is_dark, "previewing a light theme under Dark");
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(
+                Arc::ptr_eq(&theme(app), &previewed),
+                "confirm kept a different theme than the preview showed"
+            );
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(
+                state.settings.appearance,
+                crate::settings::Appearance::Light,
+                "the appearance follows the picked theme"
+            );
+        });
+        let on_disk = crate::settings::load(&home._dir.path().join(".supermd"));
+        assert_eq!(on_disk.appearance, crate::settings::Appearance::Light, "and persists");
     }
 
     /// Every persisted setting is a read-modify-write against *disk*.
