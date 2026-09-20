@@ -3,6 +3,7 @@
 //! reproduce exactly.
 
 use crate::knowledge::Index;
+use gpui::Hsla;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -937,6 +938,20 @@ pub fn lod(zoom: f32) -> Lod {
     }
 }
 
+/// How much of its alpha an unlinked note keeps.
+pub const ORPHAN_ALPHA: f32 = 0.45;
+
+/// An unlinked note recedes rather than disappearing. Multiplying
+/// rather than assigning keeps this composable with the filter's own
+/// fade: an orphan that also fails the filter must not end up brighter
+/// than a linked node that failed it.
+pub fn orphan_dim(color: Hsla, degree: usize) -> Hsla {
+    if degree > 0 {
+        return color;
+    }
+    Hsla { a: color.a * ORPHAN_ALPHA, ..color }
+}
+
 /// The bounding box of a layout, as (min_x, min_y, max_x, max_y).
 /// Empty layouts give the unit square, so callers need no special case.
 pub fn bounds(nodes: &[GraphNode]) -> (f32, f32, f32, f32) {
@@ -1545,6 +1560,31 @@ mod tests {
         // appear together rather than at two unexplained zooms.
         assert_eq!(ARROWHEAD_MIN_ZOOM, LABEL_FADE_START);
         assert!(lod(ARROWHEAD_MIN_ZOOM).arrowheads, "inclusive at the edge");
+    }
+
+    /// An unlinked note is still a note: it shows, dimmed, rather than
+    /// being hidden behind a toggle nobody finds. Hue and lightness are
+    /// untouched so a dimmed orphan still reads as its colour group.
+    #[test]
+    fn an_orphan_is_dimmer_but_still_itself() {
+        let c = Hsla { h: 0.5, s: 0.6, l: 0.6, a: 1.0 };
+        let linked = orphan_dim(c, 3);
+        let orphan = orphan_dim(c, 0);
+        assert_eq!(linked, c, "a linked node is untouched");
+        assert!(orphan.a < c.a, "the orphan recedes");
+        assert_eq!((orphan.h, orphan.s, orphan.l), (c.h, c.s, c.l), "only alpha moves");
+        // Dim enough to recede, not so dim it reads as absent.
+        assert!(orphan.a > 0.3, "still visible: {}", orphan.a);
+    }
+
+    /// Dimming multiplies whatever alpha the caller already chose --
+    /// the filter fades non-matching nodes to 0.25, and an orphan that
+    /// also fails the filter must not come back brighter than a linked
+    /// one that failed it.
+    #[test]
+    fn dimming_composes_with_an_already_faded_colour() {
+        let faded = Hsla { h: 0.5, s: 0.6, l: 0.6, a: 0.25 };
+        assert!(orphan_dim(faded, 0).a < faded.a);
     }
 
     #[test]
