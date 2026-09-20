@@ -58,6 +58,12 @@ pub fn radius(surface: Surface) -> Pixels {
 /// that into surface, shadow and radius. Before this, fifteen sites each reached
 /// for gpui's `shadow_lg()` on their own, so depth was a default nobody
 /// had chosen.
+///
+/// The list is the whole of what floats: anything absolutely positioned
+/// over the page belongs in it. `CommandError` was the counter-example
+/// that proved the claim needed checking -- a strip over the page with
+/// its own fill, no shadow and no radius, outside the vocabulary the
+/// module's first line says covers every pixel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
     /// ⌘P.
@@ -90,11 +96,15 @@ pub enum Overlay {
     ConsentPrompt,
     /// "Install this plugin?"; the install waits on the answer.
     InstallConfirmation,
+    /// The strip that says a command refused, bottom-centre over the
+    /// page for four seconds. The only overlay that carries the refusal
+    /// colour instead of the floating surface -- see `fill`.
+    CommandError,
 }
 
 impl Overlay {
     #[cfg(test)]
-    pub const ALL: [Overlay; 15] = [
+    pub const ALL: [Overlay; 16] = [
         Overlay::Finder,
         Overlay::Palette,
         Overlay::Search,
@@ -110,6 +120,7 @@ impl Overlay {
         Overlay::Shortcuts,
         Overlay::ConsentPrompt,
         Overlay::InstallConfirmation,
+        Overlay::CommandError,
     ];
 
     /// A thing you pick from and leave floats; a thing that stops to
@@ -124,7 +135,8 @@ impl Overlay {
             | Overlay::LinkHover
             | Overlay::PreviewTooltip
             | Overlay::ContextMenu
-            | Overlay::AppMenu => Surface::Floating,
+            | Overlay::AppMenu
+            | Overlay::CommandError => Surface::Floating,
             Overlay::InstallFlow
             | Overlay::ThemePicker
             | Overlay::About
@@ -132,6 +144,40 @@ impl Overlay {
             | Overlay::ConsentPrompt
             | Overlay::InstallConfirmation => Surface::Modal,
         }
+    }
+
+    /// What an overlay is filled with.
+    ///
+    /// `floating_bg` for all but one, and it lives here for the same
+    /// reason the tier does: the fill is what a call site gets wrong.
+    /// The exception is the command-error strip, whose whole job is to
+    /// say that something refused -- it carries the removed-diff wash,
+    /// the app's one "this did not happen" colour, and it read as an
+    /// ordinary card in any other fill. Naming the exception here keeps
+    /// it inside the vocabulary rather than beside it: before this the
+    /// toast was absolutely positioned with its own `.bg`, no shadow and
+    /// no tier, a sixteenth floating thing the system did not know about.
+    pub fn fill(self, t: &crate::theme::Theme) -> Hsla {
+        match self {
+            Overlay::CommandError => t.diff_deleted_bg,
+            _ => t.floating_bg,
+        }
+    }
+}
+
+/// How far the app dims itself behind a surface, if it does.
+///
+/// A modal is partly *defined* by this (`Overlay::surface`), and the two
+/// dialogs that painted one spelled two different alphas inline -- 0.25
+/// under the theme picker, 0.35 under the shortcuts sheet -- so "behind
+/// a scrim" meant two different amounts of dimming depending on which
+/// dialog you opened. One number for the tier, the midpoint of the two
+/// that shipped: the strength of a scrim is a property of how far away
+/// the thing above it is, not of which dialog it happens to be.
+pub fn scrim(surface: Surface) -> Option<Hsla> {
+    match surface {
+        Surface::Ground | Surface::Page | Surface::Floating => None,
+        Surface::Modal => Some(Hsla { h: 0., s: 0., l: 0., a: 0.30 }),
     }
 }
 
@@ -158,7 +204,7 @@ pub fn corner_inset(overlay: Overlay) -> Pixels {
 pub(crate) trait Elevated: gpui::Styled + Sized {
     fn elevated(self, overlay: Overlay, t: &crate::theme::Theme) -> Self {
         let surface = overlay.surface();
-        self.bg(t.floating_bg).shadow(shadows(surface, t.shadow)).rounded(radius(surface))
+        self.bg(overlay.fill(t)).shadow(shadows(surface, t.shadow)).rounded(radius(surface))
     }
 }
 
@@ -263,6 +309,61 @@ mod tests {
         assert!(deepest(&m) > deepest(&f) * 1.5, "a modal reads as further away");
     }
 
+    /// One tier dims the app behind it and the others do not, and the
+    /// amount is the tier's rather than each dialog's. The theme picker
+    /// spelled 0.25 and the shortcuts sheet 0.35, inline, while
+    /// `Overlay::surface` defined modal partly *as* the tier the app
+    /// dims itself behind -- two numbers for one idea.
+    #[test]
+    fn only_a_modal_dims_the_app_behind_it() {
+        assert_eq!(scrim(Surface::Ground), None);
+        assert_eq!(scrim(Surface::Page), None);
+        assert_eq!(scrim(Surface::Floating), None, "a popover does not dim the app");
+        let dim = scrim(Surface::Modal).expect("a modal dims what is behind it");
+        assert_eq!((dim.h, dim.s, dim.l), (0., 0., 0.), "a scrim is neutral black");
+        assert!(dim.a > 0.1 && dim.a < 0.5, "visible, and still see-through: {}", dim.a);
+    }
+
+    /// And no dialog spells one for itself. Two did, at two alphas; the
+    /// shape they used was a literal neutral black with an alpha, so
+    /// that is what this looks for outside this module.
+    #[test]
+    fn no_dialog_spells_its_own_scrim() {
+        for (file, src) in [
+            ("workspace.rs", include_str!("workspace.rs")),
+            ("install_ui.rs", include_str!("install_ui.rs")),
+            ("search_ui.rs", include_str!("search_ui.rs")),
+            ("finder.rs", include_str!("finder.rs")),
+            ("palette.rs", include_str!("palette.rs")),
+        ] {
+            for (ix, line) in src.lines().enumerate() {
+                assert!(
+                    !(line.contains(".bg(") && line.contains("s: 0., l: 0., a:")),
+                    "{file}:{}: a dialog spells its own scrim -- `elevation::scrim` owns it",
+                    ix + 1
+                );
+            }
+        }
+    }
+
+    /// The command-error strip is the one overlay that does not take the
+    /// floating surface: it carries the removed-diff wash, because what
+    /// it says is that something refused. Every other overlay takes
+    /// `floating_bg`, and the decision is here either way.
+    #[test]
+    fn only_the_command_error_strip_departs_from_the_floating_surface() {
+        let t = crate::theme::Theme::dark();
+        for o in Overlay::ALL {
+            let expected =
+                if o == Overlay::CommandError { t.diff_deleted_bg } else { t.floating_bg };
+            assert_eq!(o.fill(&t), expected, "{o:?}");
+        }
+        assert_ne!(
+            t.diff_deleted_bg, t.floating_bg,
+            "the exception has to be an exception, or this test proves nothing"
+        );
+    }
+
     /// Pickers, menus and popovers float; anything that stops to ask or
     /// dims the app behind it is modal. Nothing an overlay names may
     /// land on the ground or the page -- those are not overlays.
@@ -279,6 +380,7 @@ mod tests {
             PreviewTooltip,
             ContextMenu,
             AppMenu,
+            CommandError,
         ];
         let modal = [
             InstallFlow,
@@ -313,7 +415,7 @@ mod tests {
         for o in Overlay::ALL {
             let mut el = gpui::div().elevated(o, &t);
             let st = el.style();
-            assert_eq!(st.background, Some(t.floating_bg.into()), "{o:?} surface");
+            assert_eq!(st.background, Some(o.fill(&t).into()), "{o:?} surface");
             assert_eq!(st.box_shadow, Some(shadows(o.surface(), s)), "{o:?} shadow");
             let r: Option<gpui::AbsoluteLength> = Some(radius(o.surface()).into());
             let c = &st.corner_radii;

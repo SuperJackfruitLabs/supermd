@@ -3484,7 +3484,9 @@ impl Workspace {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .bg(gpui::Hsla { h: 0., s: 0., l: 0., a: 0.25 })
+                .when_some(crate::elevation::scrim(crate::elevation::Surface::Modal), |d, c| {
+                    d.bg(c)
+                })
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3922,7 +3924,9 @@ impl Workspace {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .bg(gpui::Hsla { h: 0., s: 0., l: 0., a: 0.35 })
+                .when_some(crate::elevation::scrim(crate::elevation::Surface::Modal), |d, c| {
+                    d.bg(c)
+                })
                 .flex()
                 .items_center()
                 .justify_center()
@@ -6646,8 +6650,7 @@ impl Render for Workspace {
                             div()
                                 .px_3()
                                 .py(px(6.))
-                                .rounded_md()
-                                .bg(t.diff_deleted_bg)
+                                .elevated(crate::elevation::Overlay::CommandError, &t)
                                 .text_size(px(12.))
                                 .text_color(t.diff_deleted_fg)
                                 .child(msg),
