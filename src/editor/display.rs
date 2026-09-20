@@ -999,13 +999,42 @@ mod tests {
     }
 
     /// Metadata is literal: nothing in it hides, caret or no caret.
+    ///
+    /// `**x**` was the only marker this covered, and it passes for a
+    /// reason that does not generalise -- `markdown_spans` feeds the
+    /// parser the body only, so no `Strong` span is ever made up there.
+    /// A wiki link is not the parser's; it comes from
+    /// `extract_all_links` over the whole source, which scans the
+    /// metadata on purpose. That handed `display.rs` a `Link` span in
+    /// the frontmatter and `related: "[[Plan]]"` displayed as
+    /// `related: "Plan"`, while the reading view's `literal_block`
+    /// showed it verbatim -- the same construct reading two ways in the
+    /// two views. Both markers are in the fixture now.
     #[test]
     fn frontmatter_lines_display_verbatim() {
-        let src = "---\ntitle: **x**\n---\nbody\n";
-        for ix in 0..3 {
+        let src = "---\ntitle: **x**\nrelated: \"[[Plan]]\"\n---\nbody\n";
+        for ix in 0..4 {
             let (dl, _) = shown(src, ix, 100..100);
             assert_eq!(dl.text, src.split('\n').nth(ix).unwrap(), "line {ix}");
         }
+        // The body's own wiki link still hides its brackets: this is a
+        // frontmatter rule, not the end of the feature.
+        let body = "[[Plan]]\n";
+        let (dl, _) = shown(body, 0, 100..100);
+        assert_eq!(dl.text, "Plan", "a wiki link in the body still hides its markers");
+    }
+
+    /// Hiding is what frontmatter suppresses; following is not.
+    /// `[[Plan]]` in the metadata stays a link you can click -- the
+    /// click path asks `extract_all_links` directly and never consults
+    /// the style spans, so dropping the span cannot take that away.
+    #[test]
+    fn a_wiki_link_in_frontmatter_is_still_followable() {
+        let src = "---\nrelated: \"[[Plan]]\"\n---\nbody\n";
+        let at = src.find("Plan").expect("in the fixture");
+        let hit = crate::knowledge::Index::link_at(src, at).expect("followable");
+        assert_eq!(hit.target, "Plan");
+        assert!(hit.wiki);
     }
 
     #[test]

@@ -146,8 +146,21 @@ pub fn markdown_spans(source: &str) -> Vec<StyleSpan> {
     // looks clickable and isn't. Fenced and inline code are already
     // skipped there, so this inherits that rule rather than restating
     // it. Pushed before the sort below, so the result stays ordered.
+    //
+    // Frontmatter is the one place the extractor reaches that this pass
+    // must not follow it into. `knowledge::scan` deliberately scans the
+    // metadata lines -- `related: "[[Plan]]"` is a real link and stays
+    // followable -- but a `Link` span there makes `display.rs` hide the
+    // `[[` and `]]`, so the editor showed `related: "Plan"` where the
+    // reading view's `literal_block` showed the brackets. Frontmatter is
+    // literal in both or it is neither. The body is where the markers
+    // belong, and `body_start` is the one rule for where it begins --
+    // the same rule `body_events` above and `scan` itself use. The
+    // plugin inline pass already skips `StyleKind::FrontMatter` for
+    // exactly this reason; this pass simply had not been told.
+    let body = crate::markdown::body_start(source);
     for link in crate::knowledge::extract_all_links(source) {
-        if link.wiki {
+        if link.wiki && link.range.start >= body {
             spans.push(StyleSpan { range: link.range, kind: StyleKind::Link });
         }
     }
