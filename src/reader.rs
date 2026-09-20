@@ -229,6 +229,22 @@ impl Reader {
         describe_link(self.path.as_deref(), dest, self.knowledge.as_ref(), cx)
     }
 
+    /// The hover-preview callback the rendered view hands to
+    /// `view::list_item`: every tooltip asks the reader itself, so it
+    /// resolves with both halves the workspace handed over -- the file
+    /// and the index.
+    ///
+    /// Named rather than written inline in `render` so a test can hold
+    /// the same callback the view gets. Built any other way -- calling
+    /// `describe_link` here with `None` for the index, say -- every wiki
+    /// link and every relative link in the reading view previews as a
+    /// note that does not exist, and a test that calls `describe`
+    /// directly cannot see the difference.
+    fn describe_callback(reader: &gpui::Entity<Self>) -> view::Describe {
+        let reader = reader.clone();
+        std::rc::Rc::new(move |dest: &str, cx: &mut App| reader.read(cx).describe(dest, cx))
+    }
+
     pub fn scroll_to_block(&mut self, block_ix: usize, cx: &mut Context<Self>) {
         let state = self.list_state.clone();
         let current = -state.scroll_px_offset_for_scrollbar().y;
@@ -411,14 +427,7 @@ impl Render for Reader {
                             reader.update(cx, |_, cx| cx.emit(ReaderEvent::Follow(dest)));
                         })
                     };
-                    let describe: view::Describe = {
-                        let reader = reader.clone();
-                        std::rc::Rc::new(
-                            move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
-                                reader.read(cx).describe(dest, cx)
-                            },
-                        )
-                    };
+                    let describe = Self::describe_callback(&reader);
                     let toggle: Option<view::ToggleTask> =
                         reader.read(cx).task_edits.then(|| {
                             let reader = reader.clone();
@@ -843,6 +852,41 @@ mod tests {
         cx.dispatch_action(ScrollTop);
         cx.run_until_parked();
         assert_eq!(offset_px(&reader, cx), 0., "Home should land at the top");
+    }
+
+    /// The callback the rendered view actually hands to `view::list_item`
+    /// has to carry the reader's own index. Only `describe` was tested,
+    /// so building that callback any other way -- `describe_link` with
+    /// `None` for the index, say -- left the suite green while every
+    /// wiki link and every relative link in the reading view previewed
+    /// as a note that does not exist.
+    #[gpui::test]
+    fn the_rendered_views_callback_previews_through_the_index(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Target.md"), "# Target\n\nthe body\n").unwrap();
+        let note = dir.path().join("Note.md");
+        let source = "see [[Target]] and [here](Target.md)\n";
+        std::fs::write(&note, source).unwrap();
+        let index = Arc::new(std::sync::Mutex::new(crate::knowledge::Index::scan(dir.path())));
+
+        let langs = Languages::new();
+        let reader = cx.new(|cx| {
+            let mut reader =
+                Reader::from_source_at(Some(note.clone()), "Note".into(), source, &langs, cx);
+            reader.set_knowledge(index);
+            reader
+        });
+        // The very callback `render` builds, not `describe` behind it.
+        let describe = Reader::describe_callback(&reader);
+        cx.update(|app| {
+            for dest in ["[[Target", "Target.md"] {
+                assert!(
+                    matches!(describe(dest, app), Some(crate::preview::Preview::Note { .. })),
+                    "{dest} must preview the note it resolves to, not a missing one: {:?}",
+                    describe(dest, app),
+                );
+            }
+        });
     }
 
     /// The tooltip's preview must answer from `PreviewState`'s cached
