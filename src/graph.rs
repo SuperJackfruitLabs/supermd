@@ -992,7 +992,12 @@ impl Picker {
 /// How long the pointer must rest on a node before its card appears.
 /// Long enough that sweeping across a cluster fires nothing, short
 /// enough that stopping feels answered.
-pub const CARD_DWELL: Duration = Duration::from_millis(400);
+///
+/// The same decision as a link's hover preview, so it is the same
+/// constant: two independent 400ms literals are two things to drift.
+/// Only the delay is shared — `Hover` keeps its own `Lit` state, which
+/// `preview::HoverState` has no equivalent of.
+pub const CARD_DWELL: Duration = crate::preview::DWELL;
 
 /// What the pointer is currently doing to a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

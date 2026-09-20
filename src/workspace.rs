@@ -766,15 +766,29 @@ struct GraphViewState {
     drag: Option<(f32, f32)>,
     /// The node being dragged, and the pointer offset within it.
     node_drag: Option<usize>,
-    /// The pointer actually moved while a node was held. gpui only
-    /// suppresses a click past its drag threshold when a drag listener
-    /// is registered, and this drag is hand-rolled — so without this,
-    /// releasing after moving a node fired `on_click` and opened the
-    /// note, which made dragging impossible.
+    /// The pointer actually moved while a node was held. The board is
+    /// one element, so gpui's click machinery cannot tell a press that
+    /// grabbed a dot from a pan that happens to end over one: the
+    /// release decides for itself, and without this a drag would end by
+    /// opening the note it had just moved.
     node_dragged: bool,
     /// The node under the pointer: it and its neighbours stay lit while
     /// everything else dims.
     hovered: Option<usize>,
+    /// The dots the last render painted, in board pixels. One element
+    /// covers the whole board now, so the pointer is matched against
+    /// this rather than against a hit-box per node.
+    picker: Option<crate::graph::Picker>,
+    /// The dwell timer behind the card.
+    hover: crate::graph::Hover,
+    /// What the pointer is doing to `hovered`, as of the last event.
+    hover_state: crate::graph::Hovering,
+    /// How many node labels the last render produced. The graph used to
+    /// build one per node whether or not it was visible; this is what
+    /// holds that shut. Test-only, because nothing in the app reads it
+    /// and a write-only field is a warning.
+    #[cfg(test)]
+    label_count: usize,
     /// Ticks the layout while it still has motion in it.
     ticker: Option<gpui::Task<()>>,
     /// What node colour means right now.
@@ -809,6 +823,43 @@ impl GraphViewState {
             }
         }
         set
+    }
+}
+
+/// A node's colour before anything fades it: the open note, a ghost, a
+/// colour group, a linked note, an unlinked one.
+///
+/// Free of the render because the paint list is built outside the
+/// element tree now -- the canvas closure owns its data, so the colour
+/// has to be decided before the closure exists.
+fn node_base_color(
+    node: &crate::graph::GraphNode,
+    color_by: crate::graph::ColorBy,
+    group_keys: &[String],
+    palette: &[Hsla],
+    open_path: Option<&Path>,
+    t: &Theme,
+) -> Hsla {
+    if open_path == Some(node.path.as_path()) {
+        return t.link;
+    }
+    if node.ghost {
+        // Hollow: it is a name, not a note. Clicking it creates the
+        // file, the same as following the link would.
+        return Hsla { a: 0.30, ..t.fg_muted };
+    }
+    let group = match color_by {
+        crate::graph::ColorBy::None => None,
+        crate::graph::ColorBy::Folder => node.folder.as_deref(),
+        crate::graph::ColorBy::Tag => node.tag.as_deref(),
+    };
+    if let Some(slot) = crate::graph::color_slot(group, group_keys, palette.len()) {
+        return palette[slot];
+    }
+    if node.degree > 0 {
+        t.accent
+    } else {
+        t.fg_muted
     }
 }
 
@@ -4917,6 +4968,11 @@ impl Workspace {
             node_drag: None,
             node_dragged: false,
             hovered: None,
+            picker: None,
+            hover: Default::default(),
+            hover_state: crate::graph::Hovering::Idle,
+            #[cfg(test)]
+            label_count: 0,
             ticker: None,
             color_by: crate::graph::ColorBy::Folder,
             spread: crate::graph::Spread::Normal,
@@ -5156,13 +5212,29 @@ impl Workspace {
         self.open_path(&node.path, window, cx);
     }
 
-    fn render_graph(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// How many node labels the last render produced. The graph used to
+    /// build one per node whether or not it was visible; this is what
+    /// holds that shut.
+    #[cfg(test)]
+    fn graph_label_count(&self) -> usize {
+        self.graph.as_ref().map_or(0, |g| g.label_count)
+    }
+
+    fn render_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         /// Width of a node's label box. Fixed, and centred on the node,
         /// so label length never displaces the dot.
         const LABEL_W: f32 = 160.0;
+        /// How far a label's box reaches below its dot. Culling reads
+        /// it, so a name whose dot sits just above the top edge is
+        /// still drawn.
+        const LABEL_ROW: f32 = 20.0;
         // Which note is open, so its node can be marked. Read before
         // borrowing the graph state.
         let open_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
+        // Labels are culled against this: a name for a dot that is not
+        // on screen is an element shaped for nothing.
+        let viewport = window.viewport_size();
+        let (view_w, view_h) = (f32::from(viewport.width), f32::from(viewport.height));
         let state = self.graph.as_ref()?;
         let t = theme(cx);
         // World transform: unit square → an 900px board, panned/zoomed.
@@ -5201,11 +5273,12 @@ impl Workspace {
             keys
         };
         let label_alpha = crate::graph::label_opacity(state.zoom);
+        // What this zoom is worth drawing at all.
+        let lod = crate::graph::lod(state.zoom);
         // (from, to, lit, reciprocated, radius at each end) — the radii
         // let the arrowhead stop short of the node it points at.
-        let node_r = |n: &crate::graph::GraphNode| {
-            (5.0 + (n.degree as f32).sqrt() * 3.0) * state.zoom.sqrt()
-        };
+        let node_r =
+            |n: &crate::graph::GraphNode| crate::graph::node_radius(n.degree, state.zoom);
         let edge_px: Vec<((f32, f32), (f32, f32), bool, bool, f32, f32)> = state
             .edges()
             .iter()
@@ -5251,131 +5324,123 @@ impl Workspace {
         .absolute()
         .size_full();
 
-        let mut board = div().absolute().inset_0().child(edges_canvas);
-        for (ix, node) in state.nodes().iter().enumerate() {
+        // (centre, radius, colour) in board pixels, in the order gpui
+        // painted the node divs in -- so `Picker`, which reads back to
+        // front, resolves a crowded cluster exactly as gpui's own
+        // hit-testing did.
+        let dots: Vec<((f32, f32), f32, Hsla)> = state
+            .nodes()
+            .iter()
+            .enumerate()
+            .map(|(ix, node)| {
+                // Lit means: inside the hovered neighbourhood, and
+                // matching whatever the view is narrowed to.
+                let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
+                    && state.filter.matches_at(ix, node);
+                // The dot under the pointer is picked out, which is what
+                // the per-node `:hover` used to say.
+                let base = if state.hovered == Some(ix) {
+                    t.link
+                } else {
+                    node_base_color(
+                        node,
+                        state.color_by,
+                        &group_keys,
+                        &palette,
+                        open_path.as_deref(),
+                        &t,
+                    )
+                };
+                let faded = if on { base } else { Hsla { a: 0.25, ..base } };
+                (
+                    at(node),
+                    crate::graph::node_radius(node.degree, state.zoom),
+                    crate::graph::orphan_dim(faded, node.degree),
+                )
+            })
+            .collect();
+        // The pointer is matched against exactly what was painted.
+        let picker =
+            crate::graph::Picker::build(dots.iter().map(|&((x, y), r, _)| (x, y, r)).collect());
+        let nodes_canvas = gpui::canvas(
+            move |bounds, _, _| bounds,
+            move |bounds, _, window, _| {
+                for ((x, y), r, color) in &dots {
+                    // A quad with corner radii of half its size is a
+                    // filled circle, and a quad never reaches the path
+                    // tessellator -- which is the whole point: 2,500
+                    // tessellated circles a frame is what made this
+                    // stutter.
+                    let d = px(r * 2.0);
+                    let origin = point(bounds.origin.x + px(x - r), bounds.origin.y + px(y - r));
+                    window.paint_quad(gpui::quad(
+                        gpui::Bounds { origin, size: gpui::size(d, d) },
+                        gpui::Corners::all(px(*r)),
+                        *color,
+                        gpui::Edges::default(),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::default(),
+                    ));
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+
+        // Edges first, then dots: a canvas paints in call order, and a
+        // dot hidden under its own edges is the mistake this order
+        // avoids.
+        let mut board =
+            div().absolute().inset_0().child(edges_canvas).child(nodes_canvas);
+
+        // Names stay elements rather than canvas text, so they keep the
+        // theme's font stack and the same opacity rule as before. What
+        // changed is how many: at readable zoom, the dots on screen;
+        // below it, only the hovered neighbourhood -- and that one at
+        // full strength, because a dot in a whole-vault view is
+        // otherwise unnameable short of opening it.
+        let (named, name_alpha): (Vec<usize>, f32) = if lod.labels {
+            let on_screen = |ix: usize| {
+                let (x, y) = at(&state.nodes()[ix]);
+                // The label box is LABEL_W wide and centred on the dot,
+                // so half of it may hang past either side edge, and it
+                // sits below the dot.
+                x > -LABEL_W / 2.0
+                    && x < view_w + LABEL_W / 2.0
+                    && y > -LABEL_ROW
+                    && y < view_h
+            };
+            ((0..state.nodes().len()).filter(|&ix| on_screen(ix)).collect(), label_alpha)
+        } else {
+            (lit.as_ref().map(|l| l.iter().copied().collect()).unwrap_or_default(), 1.0)
+        };
+        #[cfg(test)]
+        let label_count = named.len();
+        for ix in named {
+            let node = &state.nodes()[ix];
             let (x, y) = at(node);
-            let r = (5.0 + (node.degree as f32).sqrt() * 3.0) * state.zoom.sqrt();
+            let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
+                && state.filter.matches_at(ix, node);
             let name = node
                 .path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            // Hovering one node lights it and everything it links to,
-            // and fades the rest back — the shape stays legible while
-            // one neighbourhood is picked out.
-            // Lit means: inside the hovered neighbourhood, and matching
-            // whatever the view is narrowed to.
-            let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
-                && state.filter.matches_at(ix, node);
-            let is_open = open_path.as_deref() == Some(node.path.as_path());
-            let is_ghost = node.ghost;
-            let group = match state.color_by {
-                crate::graph::ColorBy::None => None,
-                crate::graph::ColorBy::Folder => node.folder.as_deref(),
-                crate::graph::ColorBy::Tag => node.tag.as_deref(),
-            };
-            let grouped = crate::graph::color_slot(group, &group_keys, palette.len())
-                .map(|slot| palette[slot]);
-            let base_color = if is_open {
-                t.link
-            } else if node.ghost {
-                // Hollow: it is a name, not a note. Clicking it creates
-                // the file, the same as following the link would.
-                Hsla { a: 0.30, ..t.fg_muted }
-            } else if let Some(c) = grouped {
-                c
-            } else if node.degree > 0 {
-                t.accent
-            } else {
-                t.fg_muted
-            };
-            let node_color = if on { base_color } else { Hsla { a: 0.25, ..base_color } };
-            let label_color = Hsla {
-                a: if on { label_alpha } else { label_alpha * 0.25 },
-                ..t.fg
-            };
             board = board.child(
+                // A fixed-width box centred on the node, so the label
+                // grows sideways from the dot rather than moving it.
                 div()
-                    .id(("graph-node", ix))
                     .absolute()
-                    .left(px(x - r))
-                    .top(px(y - r))
-                    // Exactly the dot's size. A flex column sized by its
-                    // widest child let a long label stretch the box, and
-                    // `items_center` then centred the dot inside *that*
-                    // — so nodes with long names sat right of where
-                    // their edges met. The label is positioned below
-                    // without contributing to this box.
-                    .w(px(r * 2.0))
-                    .h(px(r * 2.0))
-                    .cursor_pointer()
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if let Some(graph) = &mut this.graph {
-                            graph.hovered = hovered.then_some(ix);
-                            cx.notify();
-                        }
-                    }))
-                    // Press on a node grabs it rather than panning the
-                    // board, and holds the layout warm so the graph
-                    // keeps reacting while it is dragged around.
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(graph) = &mut this.graph {
-                                graph.node_drag = Some(ix);
-                                graph.node_dragged = false;
-                                graph.sim.hold_warm(true);
-                            }
-                            this.graph_tick(cx);
-                        }),
-                    )
-                    .on_mouse_down(
-                        gpui::MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(graph) = &mut this.graph {
-                                graph.hovered = Some(ix);
-                            }
-                            let surface = if is_ghost {
-                                crate::menus::Surface::GraphGhost
-                            } else {
-                                crate::menus::Surface::GraphNode
-                            };
-                            this.context_menu =
-                                Some((event.position, surface, Default::default()));
-                            cx.notify();
-                        }),
-                    )
-                    .child(
-                        div()
-                            .size(px(r * 2.0))
-                            .rounded_full()
-                            .bg(node_color)
-                            .hover(|s| s.bg(t.link)),
-                    )
-                    .child(
-                        // A fixed-width box centred on the node, so the
-                        // label grows sideways from the dot rather than
-                        // moving it.
-                        div()
-                            .absolute()
-                            .top(px(r * 2.0 + 2.0))
-                            .left(px(r - LABEL_W / 2.0))
-                            .w(px(LABEL_W))
-                            .text_center()
-                            .text_size(px(11.))
-                            .text_color(label_color)
-                            .child(SharedString::from(name)),
-                    )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        // A release that ends a drag is not a click.
-                        if this.graph.as_ref().is_some_and(|g| g.node_dragged) {
-                            return;
-                        }
-                        this.open_graph_node(ix, window, cx);
-                    })),
+                    .left(px(x - LABEL_W / 2.0))
+                    .top(px(y + node_r(node) + 2.0))
+                    .w(px(LABEL_W))
+                    .text_center()
+                    .text_size(px(11.))
+                    .text_color(Hsla {
+                        a: if on { name_alpha } else { name_alpha * 0.25 },
+                        ..t.fg
+                    })
+                    .child(SharedString::from(name)),
             );
         }
 
@@ -5419,6 +5484,22 @@ impl Workspace {
                 .child(SharedString::from(parts.join("  ·  ")))
         });
 
+        // The dots have no elements of their own to carry a cursor, so
+        // the board wears the pointer's while one is under it.
+        let on_a_dot = state.hovered.is_some();
+
+        // Last use of `state`, so the graph can be borrowed mutably to
+        // hand back what this render decided. The pointer has to be
+        // matched against the dots this frame painted, not the ones
+        // before it.
+        if let Some(g) = self.graph.as_mut() {
+            g.picker = Some(picker);
+            #[cfg(test)]
+            {
+                g.label_count = label_count;
+            }
+        }
+
         Some(
             div()
                 .absolute()
@@ -5426,6 +5507,7 @@ impl Workspace {
                 .occlude()
                 .bg(t.bg)
                 .key_context("GraphView")
+                .when(on_a_dot, |d| d.cursor_pointer())
                 .track_focus(&self.graph_focus)
                 // Typing narrows the view. Only while searching, so the
                 // other single-key shortcuts keep working otherwise.
@@ -5474,19 +5556,69 @@ impl Workspace {
                 .on_action(cx.listener(Self::graph_freeze))
                 .on_action(cx.listener(Self::graph_spread))
                 .overflow_hidden()
+                // One element covers the whole board, so a press either
+                // grabs the dot under it or starts a pan. Grabbing a
+                // node holds the layout warm, so the graph keeps
+                // reacting while it is dragged around.
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                        if let Some(graph) = &mut this.graph {
-                            graph.drag =
-                                Some((f32::from(event.position.x), f32::from(event.position.y)));
-                            cx.notify();
+                        let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                        let Some(graph) = this.graph.as_mut() else { return };
+                        let hit = graph.picker.as_ref().and_then(|p| p.pick(x, y));
+                        match hit {
+                            Some(ix) => {
+                                graph.node_drag = Some(ix);
+                                graph.node_dragged = false;
+                                graph.sim.hold_warm(true);
+                            }
+                            None => graph.drag = Some((x, y)),
                         }
+                        cx.notify();
+                        if hit.is_some() {
+                            // Only a press on a dot is consumed; a press
+                            // on empty board still reaches whatever is
+                            // behind the overlay, as it always did.
+                            cx.stop_propagation();
+                            this.graph_tick(cx);
+                        }
+                    }),
+                )
+                // Right-click raises the node menu. A ghost gets the
+                // menu that offers to create the file.
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                        let Some(graph) = this.graph.as_mut() else { return };
+                        let Some(ix) = graph.picker.as_ref().and_then(|p| p.pick(x, y)) else {
+                            return;
+                        };
+                        graph.hovered = Some(ix);
+                        let surface = if graph.nodes()[ix].ghost {
+                            crate::menus::Surface::GraphGhost
+                        } else {
+                            crate::menus::Surface::GraphNode
+                        };
+                        cx.stop_propagation();
+                        this.context_menu = Some((event.position, surface, Default::default()));
+                        cx.notify();
                     }),
                 )
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                     let Some(graph) = &mut this.graph else { return };
                     let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                    // What the pointer is over, and how long it has
+                    // rested there. This is what the per-node `on_hover`
+                    // used to say, now that there are no per-node
+                    // elements to say it.
+                    let hit = graph.picker.as_ref().and_then(|p| p.pick(x, y));
+                    let hovering = graph.hover.at(hit, std::time::Instant::now());
+                    if graph.hovered != hit || graph.hover_state != hovering {
+                        graph.hovered = hit;
+                        graph.hover_state = hovering;
+                        cx.notify();
+                    }
                     // Dragging a node: convert the pointer back into
                     // layout space and pin the node there. The rest of
                     // the graph is pushed around by it, live.
@@ -5533,21 +5665,31 @@ impl Workspace {
                 )
                 .on_mouse_up(
                     gpui::MouseButton::Left,
-                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                        if let Some(graph) = &mut this.graph {
-                            graph.drag = None;
-                            // Letting go hands the node back to the
-                            // layout, which pulls it into place instead
-                            // of leaving it stranded where it was
-                            // dropped.
-                            if let Some(ix) = graph.node_drag.take() {
-                                graph.sim.release(ix);
-                                graph.sim.hold_warm(false);
-                                graph.sim.reheat(0.6);
-                            }
-                            cx.notify();
+                    cx.listener(|this, _: &MouseUpEvent, window, cx| {
+                        let Some(graph) = this.graph.as_mut() else { return };
+                        graph.drag = None;
+                        // Letting go hands the node back to the layout,
+                        // which pulls it into place instead of leaving
+                        // it stranded where it was dropped.
+                        let released = graph.node_drag.take();
+                        let moved = std::mem::take(&mut graph.node_dragged);
+                        if let Some(ix) = released {
+                            graph.sim.release(ix);
+                            graph.sim.hold_warm(false);
+                            graph.sim.reheat(0.6);
                         }
+                        cx.notify();
                         this.graph_tick(cx);
+                        // A press that grabbed a dot and did not move it
+                        // is a click on that dot. gpui's own click
+                        // machinery cannot tell that apart from a pan
+                        // that happens to end over a dot, now that one
+                        // element covers the whole board — so the open
+                        // is decided here, from the node the press
+                        // actually grabbed.
+                        if let Some(ix) = released.filter(|_| !moved) {
+                            this.open_graph_node(ix, window, cx);
+                        }
                     }),
                 )
                 .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
@@ -5999,6 +6141,10 @@ impl Render for Workspace {
         let titlebar = self.render_titlebar(window, cx);
         let outline = self.render_outline(cx);
         let knowledge = self.render_knowledge(cx);
+        // Built here rather than in the chain below because it needs the
+        // window (for the viewport it culls labels against); where it is
+        // *placed* in the chain is what decides its z-order.
+        let graph_view = self.render_graph(window, cx);
         // Each arm says whether what it renders is a document, because
         // only a document gets the page. An image is not one -- it
         // keeps the ground, and a ground-coloured fill inside a page
@@ -6502,7 +6648,7 @@ impl Render for Workspace {
                         ),
                 )
             })
-            .children(self.render_graph(cx))
+            .children(graph_view)
             .when_some(self.move_picker.as_ref(), |root, (picker, _)| {
                 let picker = picker.clone();
                 root.child(
@@ -8098,6 +8244,150 @@ pub(crate) mod tests {
         cx.update(|_, app| {
             let graph = ws.read(app).graph.as_ref().expect("graph open");
             assert_eq!(graph.filter.local, Some((hub, 1)), "the open note");
+        });
+    }
+
+    /// The regression that started this work: a label element was
+    /// built for every node whether or not it could be seen, and at
+    /// the whole-vault zoom label_opacity is 0 -- so a 2,500-note vault
+    /// shaped 2,500 invisible text elements every frame.
+    #[gpui::test]
+    fn no_label_is_built_when_no_label_is_visible(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..40 {
+            std::fs::write(root.path().join(format!("n{i}.md")), "# n\n").unwrap();
+        }
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_graph_view(window, cx);
+            if let Some(g) = ws.graph.as_mut() {
+                g.zoom = 0.3;
+            }
+        });
+        cx.run_until_parked();
+        let labels = ws.update_in(cx, |ws, _, _| ws.graph_label_count());
+        assert_eq!(labels, 0, "zoomed out, nothing is named");
+    }
+
+    /// Hovering names the node and its neighbours at any zoom -- the
+    /// whole-vault view otherwise has no way to tell you what a dot is
+    /// short of opening it.
+    #[gpui::test]
+    fn hovering_names_the_neighbourhood_even_zoomed_out(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# a\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# b\n").unwrap();
+        std::fs::write(root.path().join("c.md"), "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_graph_view(window, cx);
+            let a = ws
+                .graph
+                .as_ref()
+                .unwrap()
+                .nodes()
+                .iter()
+                .position(|n| n.path.ends_with("a.md"))
+                .expect("a.md is a node");
+            if let Some(g) = ws.graph.as_mut() {
+                g.zoom = 0.3;
+                g.hovered = Some(a);
+                g.hover_state = crate::graph::Hovering::Lit(a);
+            }
+        });
+        cx.run_until_parked();
+        let labels = ws.update_in(cx, |ws, _, _| ws.graph_label_count());
+        assert_eq!(labels, 2, "the hovered note and the one it links to");
+    }
+
+    /// The picker replaces gpui's per-node hit-boxes, so it has to be
+    /// built from the same positions and radii the canvas paints.
+    #[gpui::test]
+    fn the_picker_covers_every_node(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            std::fs::write(root.path().join(format!("n{i}.md")), "# n\n").unwrap();
+        }
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().expect("graph open");
+            let picker = g.picker.as_ref().expect("built during render");
+            assert_eq!(picker.len(), g.nodes().len(), "one dot per node");
+        });
+    }
+
+    /// The board where a node's dot sits, in the transform
+    /// `render_graph` paints with. The press has to land on the dot the
+    /// canvas drew, which is what `Picker` is asked to confirm.
+    #[cfg(test)]
+    fn dot_at(g: &GraphViewState, ix: usize) -> gpui::Point<gpui::Pixels> {
+        let n = &g.nodes()[ix];
+        let base = 900.0 * g.zoom;
+        point(px(g.pan.0 + n.x * base + 60.0), px(g.pan.1 + n.y * base + 60.0))
+    }
+
+    /// One element covers the whole board now, so gpui's own click
+    /// machinery cannot tell a press that grabbed a dot from a pan that
+    /// happens to end over one. What a release opens is the dot the
+    /// press grabbed -- and only when the pointer never moved.
+    #[gpui::test]
+    fn a_press_and_release_on_a_dot_opens_its_note(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# a\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# b\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        // Runs the ticker out, so the layout has settled and the dot is
+        // still where it was painted when the press lands.
+        cx.run_until_parked();
+        let at = ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().expect("graph open");
+            let at = dot_at(g, 0);
+            let hit = g.picker.as_ref().unwrap().pick(f32::from(at.x), f32::from(at.y));
+            assert_eq!(hit, Some(0), "the press lands on the dot that was painted");
+            at
+        });
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(w.graph.is_none(), "the graph closes behind the note it opened");
+            assert!(
+                w.tabs.iter().any(|t| t.path(app).is_some_and(|p| p.ends_with("a.md"))),
+                "and the note is the one under the pointer"
+            );
+        });
+    }
+
+    /// Releasing after dragging a node is not a click. gpui suppressed
+    /// this for us while every node had its own hit-box; with one
+    /// element it is the board's job.
+    #[gpui::test]
+    fn a_release_that_ends_a_drag_opens_nothing(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# a\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# b\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let at = ws.update_in(cx, |ws, _, _| dot_at(ws.graph.as_ref().unwrap(), 0));
+        let away = point(at.x + px(120.), at.y + px(90.));
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(away, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(away, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(ws.read(app).graph.is_some(), "still on the board");
         });
     }
 
