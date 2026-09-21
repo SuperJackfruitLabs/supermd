@@ -190,6 +190,39 @@ replaced in one respect nobody was aiming at: on a document past
 numbers *inside* fences up there. The window keeps fence detection alive
 above that ceiling.
 
+### The `mas` suite fails in parallel and passes serially
+
+`workspace::tests::confirming_a_theme_that_already_matches_leaves_the_appearance_alone`
+fails under `cargo test --bin supermd --no-default-features --features mas`
+with `cannot save settings: No such file or directory`, and the
+assertion that nothing was pinned on disk. Measured on 2026-09-21 at
+`2798b06` and again at `da2f094`:
+
+| run | result |
+| --- | --- |
+| `--features mas`, default parallelism | 1122 passed, **1 failed** |
+| `--features mas`, `--test-threads=1` | **1123 passed, 0 failed**, no save errors |
+| default features, either way | passes |
+| the test alone | passes |
+
+So it is a test-isolation race, not a defect in the App Store build: the
+`mas` feature gates only `install`, `update` and `bookmarks`, and touches
+nothing on the settings path. `settings::save` already does
+`create_dir_all`, and `platform::home_dir` reads `$HOME` fresh with no
+caching — so the ENOENT means the directory went away between the
+`create_dir_all` and the write.
+
+The shape to look for: `temp_home()` sets `$HOME` process-wide and holds
+`HOME_LOCK` for the test's lifetime, but a test that writes settings
+*without* taking that lock reads whatever `$HOME` happens to be at that
+instant — which may be another test's temp directory, about to be
+deleted. The `mas` build compiles a different set of tests, which is why
+changing the feature flag changes whether the race is hit.
+
+The fix is to make every test that reaches `persist_setting` or
+`record_recent` hold `HOME_LOCK`, most simply by taking `temp_home()`.
+There are ~25 call sites to audit.
+
 ## Distribution & platform
 
 | Item | Notes |
