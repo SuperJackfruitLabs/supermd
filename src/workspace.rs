@@ -9254,6 +9254,86 @@ pub(crate) mod tests {
         });
     }
 
+    /// The measurement harness for the graph's render pass. Not an
+    /// assertion about anything: structural tests cannot prove "smooth",
+    /// and a timing assertion in CI is a flake generator -- so this is
+    /// `#[ignore]`d, prints, and asserts only that a vault was actually
+    /// loaded.
+    ///
+    /// ```sh
+    /// SUPERMD_GRAPH_VAULT=$HOME/notes \
+    ///   cargo test --bin supermd graph_view_timing -- --ignored --nocapture
+    /// ```
+    ///
+    /// Measured at the fit-to-window zoom with the layout still warm --
+    /// the frame the whole render pass was written for, where nothing
+    /// can be culled.
+    #[gpui::test]
+    #[ignore = "measurement; run: SUPERMD_GRAPH_VAULT=<vault> cargo test --bin supermd graph_view_timing -- --ignored --nocapture"]
+    fn graph_view_timing(cx: &mut TestAppContext) {
+        /// How many samples each number is the best and the median of.
+        /// One sample of a 16ms budget is noise.
+        const SAMPLES: usize = 21;
+        let Some(vault) = std::env::var_os("SUPERMD_GRAPH_VAULT") else {
+            eprintln!("SKIP: set SUPERMD_GRAPH_VAULT to a real vault");
+            return;
+        };
+        let vault = PathBuf::from(vault);
+        let _home = temp_home();
+        let scan = std::time::Instant::now();
+        let (ws, cx) = open_workspace(cx, &vault);
+        let scanned = scan.elapsed();
+        let open = std::time::Instant::now();
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let opened = open.elapsed();
+        let (nodes, edges, zoom) = ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().expect("the vault opened a graph");
+            (g.nodes().len(), g.edges().len(), g.zoom)
+        });
+        assert!(nodes > 0, "{} produced no nodes", vault.display());
+
+        // The ticker only runs while the layout still has motion in it,
+        // and a settled step returns early -- which is not the frame
+        // worth measuring. Reheat, and read the render and the step at
+        // the same temperature.
+        let mut renders: Vec<std::time::Duration> = Vec::new();
+        let mut steps: Vec<std::time::Duration> = Vec::new();
+        let mut labels = 0usize;
+        for _ in 0..SAMPLES {
+            ws.update_in(cx, |ws, window, cx| {
+                let g = ws.graph.as_mut().unwrap();
+                g.sim.reheat(0.3);
+                let t = std::time::Instant::now();
+                let element = ws.render_graph(window, cx);
+                renders.push(t.elapsed());
+                drop(element);
+                let g = ws.graph.as_mut().unwrap();
+                let t = std::time::Instant::now();
+                g.sim.step();
+                steps.push(t.elapsed());
+                labels = g.label_count;
+            });
+        }
+        let stat = |mut v: Vec<std::time::Duration>| {
+            v.sort();
+            (v[0], v[v.len() / 2])
+        };
+        let (render_best, render_mid) = stat(renders);
+        let (step_best, step_mid) = stat(steps);
+        // The board is one canvas: whatever the vault's size, the render
+        // builds that one element plus the labels it did not cull. At
+        // the fit zoom `label_opacity` is 0, so it builds none.
+        let elements = 1 + labels;
+        eprintln!("\n=== graph: {} ===", vault.display());
+        eprintln!("  nodes {nodes} · edges {edges} · fit zoom {zoom:.3}");
+        eprintln!("  index scan          {scanned:>12.1?}");
+        eprintln!("  open + seed + fit   {opened:>12.1?}");
+        eprintln!("  render_graph        {render_best:>12.1?}  (best of {SAMPLES}, median {render_mid:.1?})");
+        eprintln!("  sim.step            {step_best:>12.1?}  (best of {SAMPLES}, median {step_mid:.1?})");
+        eprintln!("  graph elements      {elements:>12}  (1 canvas + {labels} labels)\n");
+    }
+
     /// A rename rewrites every link in the vault, so a cached layout
     /// from before it describes a set of paths that no longer exist --
     /// and the node count alone would not notice.

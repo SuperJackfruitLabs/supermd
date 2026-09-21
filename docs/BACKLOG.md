@@ -4,7 +4,7 @@ Everything consciously deferred, cut from a spec's scope, or discussed and
 parked — with why, so future planning starts from decisions instead of
 archaeology. Living document: prune what ships, add what gets cut.
 
-_Last groomed: 2026-08-31, after the Mac App Store pass._
+_Last groomed: 2026-09-21, after the graph-view render pass._
 
 ## Knowledge features (deferred from M1–M4)
 
@@ -17,9 +17,55 @@ _Last groomed: 2026-08-31, after the Mac App Store pass._
 | Unlinked mentions | Backlinks panel shows explicit links only; Obsidian-style "this note's name appears un-linked in 4 files" is a separate index pass |
 | Embeds / transclusion | `![[note]]` rendering a note inline — needs a block-projection surface decision |
 | Note aliases / frontmatter | YAML frontmatter is currently plain text; aliases would feed resolution and completion |
-| Graph: tag nodes & ghosts | Tags and unresolved targets as first-class graph nodes; color clusters by folder/tag |
-| Graph: live physics | Layout is computed once at open (150 iterations); a running simulation with drag-a-node would feel alive |
+| Graph: tag nodes | Unresolved targets are graph nodes now (drawn hollow) and colour clusters by folder or tag; **tags themselves** as nodes you can link through is the part still outstanding |
 | Index scaling | Full synchronous scan at workspace-open and per-event re-read; fine to ~thousands of notes, wants a background/incremental pass for huge vaults |
+
+## Graph view (deferred from the 2026-09-21 render pass)
+
+### `graph.rs` carries two subjects and wants splitting at the seam
+
+The file is ~2,000 lines: the force simulation on one side, the
+view-model rules on the other — radius, level of detail, dimming, the
+picker, the dwell timer, the fit maths — and the tests for both. The
+split was deliberately deferred so the render pass stayed reviewable as
+one change rather than arriving mixed with a file move.
+
+The seam is already visible in the file: `Simulation` and `layout` know
+nothing about zoom, and everything below `node_radius` knows nothing
+about forces. A `graph/sim.rs` and a `graph/view.rs` would fall out
+along that line with no logic moved, which is exactly why it can wait —
+and exactly why it should not wait indefinitely.
+
+### The simulation still steps on the UI thread
+
+`graph_tick` steps the layout inside `this.update`, on the foreground,
+once every 16ms while the graph has motion in it. The render pass made
+the frame much cheaper — the board is one canvas now instead of an
+element per node — so on the vaults measured the step is no longer what
+you feel.
+
+If measurement ever shows step time dominating a frame again, the next
+move is the background executor with a positions snapshot: step off
+thread, hand the render a plain `Vec<(f32, f32)>`, and keep pins and
+drags as messages into the simulation rather than mutations of it. Not
+done now because it trades a measurable win for real complexity —
+pointer interaction has to stay correct against a layout that is one
+frame behind — and the measurement does not currently ask for it.
+
+### The arrowhead detector cannot see the painter
+
+`arrowheads_drawn` is derived from the `head_to`/`head_from` flags baked
+into `edge_px`, not from what `paint_path` was actually called with. So
+it catches the level-of-detail gate disappearing — the thing that was
+regressed and fixed — but it would stay green if the paint closure
+started ignoring the gate's output: delete the `if *head_to` guards
+inside the closure and the test still passes.
+
+Pinning it properly needs a paint-recording harness that GPUI does not
+offer today: something that captures the primitives a frame actually
+submitted so a test can count them. Left as is because the failure mode
+is bounded — a silent performance regression at low zoom, never a wrong
+picture — and a fake harness would cost more confidence than it bought.
 
 ## Writing ergonomics (deferred from the v0.0.11 batch)
 

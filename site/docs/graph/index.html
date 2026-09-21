@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Getting Started — SuperMD Docs</title>
-<meta name="description" content="SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Open a folder and your notes know each other: wiki links with completion, backlinks, tags, and a graph — all computed from your files. Which stay plain CommonMark on disk: no database, no proprietary format, no lock-in.">
-<link rel="canonical" href="https://supermd.app/docs/">
+<title>The Graph — SuperMD Docs</title>
+<meta name="description" content="⌘ ⇧ G turns the whole workspace into a map: one dot per note, one line per link, laid out by a force simulation that runs in front of you and settles. It is also in Go → Graph View and in the command palette as Graph View. It needs a folder open: on a single file there is nothing to draw, and SuperMD says so rather than showing you an empty board.">
+<link rel="canonical" href="https://supermd.app/docs/graph/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -143,13 +143,13 @@
 <aside class="sidebar">
 <h4>Using SuperMD</h4>
 <ul>
-<li class="current"><a href="/docs/">Getting Started</a></li>
+<li><a href="/docs/">Getting Started</a></li>
 <li><a href="/docs/editing/">Editing</a></li>
 <li><a href="/docs/shortcuts/">Keyboard Shortcuts</a></li>
 <li><a href="/docs/diagrams/">Diagrams</a></li>
 <li><a href="/docs/workspace/">Working with a Folder</a></li>
 <li><a href="/docs/knowledge/">Links, Tags & Graph</a></li>
-<li><a href="/docs/graph/">The Graph</a></li>
+<li class="current"><a href="/docs/graph/">The Graph</a></li>
 <li><a href="/docs/themes/">Themes</a></li>
 </ul>
 <h4>Extending SuperMD</h4>
@@ -162,19 +162,56 @@
 
 </aside>
 <main class="doc">
-<h1>Getting Started</h1>
-<p>SuperMD is a Markdown editor that reads like a finished page and edits like plain text. Formatting markers stay hidden until your cursor touches them, then reveal in place — headings, lists, tables, diagrams, all live. Open a folder and your notes <a href="/docs/knowledge/">know each other</a>: wiki links with completion, backlinks, tags, and a graph — all computed from your files. Which stay plain CommonMark on disk: no database, no proprietary format, no lock-in.</p>
-<h2>Install</h2>
-<p><strong>macOS — Mac App Store</strong> — <a href="https://apps.apple.com/app/supermd-editor/id6807117461?mt=12">get SuperMD Editor</a>. Installs and updates itself, and runs in Apple's sandbox. Needs Apple silicon and macOS 12 or later.</p>
-<p><strong>macOS — direct download</strong> — <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">get the DMG</a>, open it, and drag SuperMD into Applications. Signed and notarized, so it opens without warnings, and if you launch it straight from the DMG, SuperMD offers to move itself into Applications for you. Also needs Apple silicon.</p>
-<p>The two builds are the same editor. The sandboxed one asks permission the first time it opens a folder, keeps its settings inside the app container rather than <code>~/.supermd</code>, and cannot load <a href="/docs/grammars/">grammar plugins</a> — so GraphQL fences render as plain text there. Everything else is identical.</p>
-<p><strong>Linux</strong> — grab the <code>.deb</code> or the <code>.tar.gz</code> from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<p><strong>Windows</strong> — run the installer from the <a href="https://github.com/SuperJackfruitLabs/supermd/releases/latest">latest release</a>.</p>
-<h2>First launch</h2>
-<p>SuperMD opens with a welcome tour — and the tour itself is a real, editable document. Click things: checkboxes toggle, tables dissolve into editable text, bold markers appear under your cursor and fold away when you leave.</p>
-<p>When you're ready to work with your own notes, press <strong>⌘ O</strong> (Ctrl+O on Windows/Linux) or click <strong>Open Folder</strong> in the sidebar. SuperMD remembers your recent workspaces and can reopen the last one on launch.</p>
+<h1>The Graph</h1>
+<p><strong>⌘ ⇧ G</strong> turns the whole workspace into a map: one dot per note, one line per link, laid out by a force simulation that runs in front of you and settles. It is also in <strong>Go → Graph View</strong> and in the command palette as <em>Graph View</em>. It needs a folder open: on a single file there is nothing to draw, and SuperMD says so rather than showing you an empty board.</p>
+<p>Drag the background to pan, scroll to zoom, <strong>⌘ 0</strong> to fit the whole vault back into the window. Drag a dot to move it; the layout reflows around where you put it, and lets go when you do.</p>
+<h2>Reading the map</h2>
+<p><strong>Size is link count.</strong> A dot grows with the number of links into and out of its note, so the notes everything hangs off are the big ones. Nothing configures this — it is just degree.</p>
+<p><strong>Colour is grouping.</strong> By default notes are coloured by their top-level folder, so a vault with <code>Projects/</code>, <code>Journal/</code> and <code>Reference/</code> reads as three coloured regions. <strong>⌘ G</strong> cycles the colour meaning: folder → first tag → nothing (one colour for everything). Group colours come from your theme's palette and are assigned in sorted order, so a folder keeps its colour between sessions instead of depending on which note was indexed first.</p>
+<p>Two dots are coloured for what they are rather than where they live:</p>
+<ul>
+<li><strong>The note you have open</strong> takes the theme's link colour, so you can always find where you are.</li>
+<li><strong>A note that does not exist yet</strong> — something links to <code>[[Roadmap]]</code> and there is no <code>Roadmap.md</code> — is drawn hollow. These are your to-write list, and the graph is where they are easiest to see. Clicking one creates the note beside the note that referenced it, exactly as following the link would.</li>
+</ul>
+<p><strong>Unlinked notes are dimmed, not hidden.</strong> A note nothing links to and that links to nothing keeps its dot, at a little under half opacity, out at the edge where the simulation leaves it. Hiding orphans would mean the map quietly disagreed with the folder; dimming them means you can still see how many there are, and go fix it. <strong>⌘ ⇧ O</strong> shows <em>only</em> them.</p>
+<p>Zoomed out, names and arrowheads go away — at the whole-vault zoom a name is unreadable and an arrowhead is smaller than a pixel. Names fade in from about half zoom; arrowheads come back at the same point.</p>
+<h2>Hovering names things</h2>
+<p>Rest the pointer on a dot and it lights up together with everything one hop from it, while the rest of the vault dims. The lit notes are named, at any zoom — that is how you read a dot in a view too dense to label.</p>
+<p>Keep resting, and after a moment a card appears beside the dot: the note's title, the first few lines of it, and its link counts as <em>n out · n in</em>. The card waits for you on purpose. Sweeping the pointer across a cluster reads nothing off disk; only actually stopping on a note does, and stopping on the same note again is free. A hollow dot says it does not exist yet; a note deleted since the index last ran says it could not be read, on the card rather than as an error.</p>
+<h2>Clicking peeks</h2>
+<p>Clicking a dot does <strong>not</strong> leave the graph. A panel opens on the right describing that note — its title, its excerpt, and every note that links to it:</p>
+<ul>
+<li><strong>Open</strong> opens the note in a tab and puts the graph away.</li>
+<li><strong>Any backlink row</strong> moves the panel to <em>that</em> note, so you can walk backwards through the vault a hop at a time without losing the view. The board pans to bring each note into sight as you go, and the zoom stays where you set it.</li>
+</ul>
+<p>The board narrows by the panel's width while it is open, so nothing you might want to click sits underneath it.</p>
+<h2>Narrowing</h2>
+<p><strong>⌘ F</strong> opens a search box: type, and matching notes stay bright while the rest fade. A filter never removes a dot, because the layout would jump under you with every character — the shape you were reading stays put while matches light up. A strip along the bottom says what is currently narrowing the view and how many notes match.</p>
+<p>The rest of the controls, all while the graph has focus:</p>
+<table><thead><tr><th>Key</th><th>What it does</th></tr></thead><tbody>
+<tr><td><strong>⌘ 0</strong></td><td>Fit the graph to the window</td></tr>
+<tr><td><strong>⌘ G</strong></td><td>Colour by folder / tag / nothing</td></tr>
+<tr><td><strong>⌘ F</strong></td><td>Search the graph</td></tr>
+<tr><td><strong>⌘ ⇧ O</strong></td><td>Unlinked notes only</td></tr>
+<tr><td><strong>⌘ L</strong></td><td>Narrow to what is near the dot under the pointer (or the note you have open), and back out to the whole vault</td></tr>
+<tr><td><strong>⌘ =</strong> / <strong>⌘ -</strong></td><td>One hop further out / nearer in, once narrowed</td></tr>
+<tr><td><strong>⌘ E</strong></td><td>Spread: tight / normal / loose</td></tr>
+<tr><td><strong>⌘ .</strong></td><td>Freeze the layout, or let it run again</td></tr>
+</tbody></table>
+<h2>Escape, in order</h2>
+<p><strong>Esc</strong> closes the most recent thing first, never more:</p>
+<ol>
+<li>the peek panel, if one is open;</li>
+<li>the search box and any filter;</li>
+<li>the graph itself.</li>
+</ol>
+<p>So escaping a note you were peeking at leaves you on the board you were exploring, and it takes one more Esc to put the board away.</p>
+<h2>The view is remembered</h2>
+<p>Opening a note from the graph puts the view away rather than throwing it out. Come back with <strong>⌘ ⇧ G</strong> and you land on the layout you left — same pan, same zoom, same filter, every dot where you dragged it — instead of watching the vault re-simulate into a different arrangement.</p>
+<p>It is remembered only while it still describes your notes. If the vault changed underneath — a note added or deleted, a link written or removed, a file renamed — the layout is rebuilt, because a map that shows a note that is gone, or misses one that arrived, is worse than starting over.</p>
+<p>The links and tags the graph is drawn from are <a href="/docs/knowledge/">Links, Tags &amp; Graph</a>.</p>
 
-<div class="pager"><span class="pager-gap"></span><a class="next-link" href="/docs/editing/">Editing &rarr;</a></div>
+<div class="pager"><a class="prev-link" href="/docs/knowledge/">&larr; Links, Tags & Graph</a><span class="pager-gap"></span><a class="next-link" href="/docs/themes/">Themes &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

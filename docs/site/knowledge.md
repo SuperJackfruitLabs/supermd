@@ -26,7 +26,7 @@ Rename or move a note — or a whole folder — in the sidebar, and every link p
 
 The knowledge panel starts with a **local graph**: the current note and its immediate neighbors. Click any node to navigate.
 
-**Graph View** in the command palette (⌘ ⇧ P) opens the full workspace graph — every note, every link, laid out by a force simulation and rendered natively. Drag to pan, scroll to zoom, click a note to open it, esc to close. Connected clusters pull together; orphan notes drift to the edges, which is exactly how you find them.
+**⌘ ⇧ G** opens the full workspace graph — every note, every link, laid out by a force simulation and rendered natively. Drag to pan, scroll to zoom, hover a dot to see what it is, click it to peek at the note without leaving the board. Connected clusters pull together; unlinked notes dim and drift to the edges, which is exactly how you find them. [The Graph](graph.md) has the whole of it.
 
 ## Where's the database?
 
