@@ -5014,12 +5014,21 @@ impl Workspace {
             (n, e)
         };
         let _ = &mut edges;
-        // The view you left, if the vault still looks like the one it
-        // described. A different node count means notes were added or
-        // deleted while the graph was away, and a layout that does not
-        // describe the vault is worse than starting over.
+        // The view you left, if the vault still describes the one it
+        // was laid out from. Counted nodes alone did not: a link added
+        // between two notes that both exist moves no dots, and an
+        // outside-the-app delete plus create cancel out. The
+        // fingerprint is node count, edge count and an
+        // order-independent fold of the paths, and all three have to
+        // agree -- anything else re-simulates, because a layout that
+        // does not describe the vault is worse than starting over.
+        //
+        // Deliberately checked here and not on every fs event: an edit
+        // made while the graph is away would otherwise throw the view
+        // out, which is the thing this cache exists to avoid.
+        let fresh = crate::graph::shape(&nodes, &edges);
         if let Some(mut cached) = self.graph_cache.take() {
-            if cached.nodes().len() == nodes.len() {
+            if crate::graph::shape(cached.nodes(), cached.edges()) == fresh {
                 // Its ticker is a task from the previous open; the
                 // layout is picked up again below, from settled or not.
                 cached.ticker = None;
@@ -9170,6 +9179,78 @@ pub(crate) mod tests {
             let g = ws.graph.as_ref().unwrap();
             assert_eq!(g.nodes().len(), 2, "the new note is in the graph");
             assert_ne!(g.zoom, 1.7, "and the stale layout was not restored");
+        });
+    }
+
+    /// The count is not the vault. Adding a link between two notes that
+    /// both already exist moves no dots in or out, so a count-only key
+    /// restores a layout whose edge list is a description of the vault
+    /// as it was -- connectivity drawn that is not on disk.
+    #[gpui::test]
+    fn a_link_added_while_away_rebuilds_the_graph(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.md");
+        std::fs::write(&a, "# Alpha\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_mut().unwrap();
+            assert_eq!(g.edges().len(), 0, "nothing links anything yet");
+            g.zoom = 1.7;
+        });
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph_cache.is_some(), "put away, not thrown"));
+        // Alpha starts pointing at Beta while the graph is away. Two
+        // notes before, two notes after.
+        std::fs::write(&a, "# Alpha\n\n[[b]]\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[a.clone()], cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.nodes().len(), 2, "still two notes");
+            assert_ne!(g.zoom, 1.7, "so the stale layout was not restored");
+            assert_eq!(g.edges().len(), 1, "and the link on disk is drawn");
+        });
+    }
+
+    /// A delete and a create outside the app leave the count where it
+    /// was, and `after_path_change` never fires -- it is only reached by
+    /// an in-app rename or move. A count-only key restores a layout that
+    /// describes neither vault: a dot for the note that is gone, none
+    /// for the note that arrived.
+    #[gpui::test]
+    fn a_swap_while_away_rebuilds_the_graph(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let gone = root.path().join("b.md");
+        std::fs::write(&gone, "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| ws.graph.as_mut().unwrap().zoom = 1.7);
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph_cache.is_some(), "put away, not thrown"));
+        // One out, one in: the count says nothing changed.
+        let arrived = root.path().join("c.md");
+        std::fs::remove_file(&gone).unwrap();
+        std::fs::write(&arrived, "# Gamma\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[gone.clone(), arrived.clone()], cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.nodes().len(), 2, "two notes, as before");
+            assert_ne!(g.zoom, 1.7, "so the stale layout was not restored");
+            let paths: Vec<&Path> = g.nodes().iter().map(|n| n.path.as_path()).collect();
+            assert!(!paths.contains(&gone.as_path()), "the deleted note has no dot");
+            assert!(paths.contains(&arrived.as_path()), "and the new one has one");
         });
     }
 

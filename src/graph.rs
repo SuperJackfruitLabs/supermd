@@ -764,6 +764,48 @@ pub fn with_ghosts(
     }
 }
 
+/// A fingerprint of a built graph: what a cached layout has to agree
+/// with before it can be shown again.
+///
+/// Node count alone is not a description of a vault. Two real cases
+/// slip past it: a link added or removed between notes that both
+/// already exist moves no dots at all, and a delete plus a create
+/// outside the app cancel out — the restored layout then draws
+/// connectivity that is not on disk, or a dot for a note that is gone
+/// and none for the note that arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Shape {
+    pub nodes: usize,
+    pub edges: usize,
+    /// An order-independent fold of the node paths. Order-independent
+    /// because node order is an artefact of the index walk, not of the
+    /// vault: two identical vaults enumerated differently describe the
+    /// same graph and must compare equal. Summed rather than xored —
+    /// xor cancels a repeated path against itself, so a pair of
+    /// duplicates would be indistinguishable from neither being there.
+    pub paths: u64,
+}
+
+/// Fingerprint a built graph. One pass over the nodes and one length:
+/// unmeasurable beside the layout it guards, so nothing caches it.
+pub fn shape(nodes: &[GraphNode], edges: &[Edge]) -> Shape {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut paths: u64 = 0;
+    for node in nodes {
+        // Only ever compared against another fingerprint taken in the
+        // same process, so a hasher with no cross-version guarantee is
+        // fine and nothing is persisted.
+        let mut h = DefaultHasher::new();
+        node.path.hash(&mut h);
+        // A deleted note that something still links to comes back as a
+        // ghost at the same path. Same name, different thing — and the
+        // graph draws it differently — so the flag is part of the key.
+        node.ghost.hash(&mut h);
+        paths = paths.wrapping_add(h.finish());
+    }
+    Shape { nodes: nodes.len(), edges: edges.len(), paths }
+}
+
 /// Which nodes the view is showing.
 ///
 /// A filter never removes nodes from the simulation — the layout would
@@ -1353,6 +1395,44 @@ mod tests {
             .find(|e| (e.from == hub && e.to == a) || (e.from == a && e.to == hub))
             .expect("hub <-> SpokeA exists");
         assert!(mutual.both, "a mutual pair is marked reciprocated");
+    }
+
+    /// The fingerprint that decides whether a cached layout may be
+    /// shown again. Node order is an artefact of the index walk, so a
+    /// reordered vault is the same vault; a different link set, a
+    /// different path set, or a note turning into a ghost is not.
+    #[test]
+    fn a_shape_ignores_order_and_nothing_else() {
+        let (_d, index) = fixture();
+        let (nodes, edges) = build(&index);
+        let base = shape(&nodes, &edges);
+        assert_eq!(base.nodes, nodes.len());
+        assert_eq!(base.edges, edges.len());
+
+        let mut shuffled = nodes.clone();
+        shuffled.reverse();
+        assert_eq!(shape(&shuffled, &edges), base, "node order is not the vault");
+
+        let mut fewer = edges.clone();
+        fewer.pop().expect("the fixture links something");
+        assert_ne!(shape(&nodes, &fewer), base, "a link removed is a different graph");
+
+        let mut renamed = nodes.clone();
+        renamed[0].path = PathBuf::from("somewhere/else.md");
+        assert_ne!(shape(&renamed, &edges), base, "a path that moved is noticed");
+
+        // One out, one in: the counts say nothing happened.
+        let mut swapped = nodes.clone();
+        swapped[0].path = PathBuf::from("brand/new.md");
+        assert_ne!(shape(&swapped, &edges), base, "and so is a swap");
+
+        // Summed, not xored: duplicates must not cancel each other.
+        let dup = vec![nodes[0].clone(), nodes[0].clone()];
+        assert_ne!(shape(&dup, &[]).paths, 0, "a repeated path does not vanish");
+
+        let mut ghosted = nodes.clone();
+        ghosted[0].ghost = true;
+        assert_ne!(shape(&ghosted, &edges), base, "a note that became a ghost too");
     }
 
     /// A pair that links both ways is one edge with two arrowheads, not
