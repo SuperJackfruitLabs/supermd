@@ -56,6 +56,12 @@ pub struct Reader {
     knowledge: Option<crate::knowledge::KnowledgeHandle>,
     focus_handle: FocusHandle,
     scroll_anim: Option<gpui::Task<()>>,
+    /// The text `document` was parsed from.
+    source: String,
+    /// Whether `source` is a file's own Markdown, so a checkbox click
+    /// can become an edit to it. Off by default: a viewer plugin's
+    /// output or a wrapped code file is not the file.
+    task_edits: bool,
 }
 
 /// Language token for a file. Delegates to the central mapping.
@@ -109,23 +115,40 @@ impl Reader {
         langs: &Languages,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut document = markdown::parse(source);
-        langs.highlight_document(&mut document);
-        Self::from_document(path, title, document, cx)
+        Self::from_markdown(path, title, source.to_string(), langs, cx)
     }
 
     pub fn welcome(langs: &Languages, cx: &mut Context<Self>) -> Self {
-        let mut document = markdown::parse(include_str!("../WELCOME.md"));
-        langs.highlight_document(&mut document);
-        Self::from_document(None, "Welcome".into(), document, cx)
+        Self::from_markdown(None, "Welcome".into(), include_str!("../WELCOME.md").into(), langs, cx)
     }
 
-    fn from_document(
+    fn from_markdown(
         path: Option<PathBuf>,
         title: SharedString,
-        document: Document,
+        source: String,
+        langs: &Languages,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (document, toc) = Self::build(&source, langs);
+        let list_state = ListState::new(document.blocks.len(), ListAlignment::Top, px(512.));
+        Self {
+            path,
+            title,
+            document,
+            toc,
+            list_state,
+            knowledge: None,
+            focus_handle: cx.focus_handle(),
+            scroll_anim: None,
+            source,
+            task_edits: false,
+        }
+    }
+
+    /// Parse, highlight, and outline one source text.
+    fn build(source: &str, langs: &Languages) -> (std::sync::Arc<Document>, Vec<TocEntry>) {
+        let mut document = markdown::parse(source);
+        langs.highlight_document(&mut document);
         let toc = document
             .blocks
             .iter()
@@ -139,18 +162,56 @@ impl Reader {
                 _ => None,
             })
             .collect();
-        let document = std::sync::Arc::new(document);
-        let list_state = ListState::new(document.blocks.len(), ListAlignment::Top, px(512.));
-        Self {
-            path,
-            title,
-            document,
-            toc,
-            list_state,
-            knowledge: None,
-            focus_handle: cx.focus_handle(),
-            scroll_anim: None,
+        (std::sync::Arc::new(document), toc)
+    }
+
+    /// The text the document was parsed from.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Let checkbox clicks edit the source. Only for a reader showing a
+    /// Markdown file's own text; the owner applies the emitted edit.
+    pub fn allow_task_toggles(&mut self) {
+        self.task_edits = true;
+    }
+
+    /// Re-render from new source text, keeping the scroll position.
+    pub fn set_source(&mut self, source: String, cx: &mut Context<Self>) {
+        let langs = cx
+            .try_global::<crate::highlight::SyntaxLanguages>()
+            .map(|l| l.0.clone())
+            .unwrap_or_else(|| std::sync::Arc::new(Languages::new()));
+        let (document, toc) = Self::build(&source, &langs);
+        if document.blocks.len() != self.document.blocks.len() {
+            let top = self.list_state.logical_scroll_top();
+            self.list_state.reset(document.blocks.len());
+            self.list_state.scroll_to(ListOffset {
+                item_ix: top.item_ix.min(document.blocks.len().saturating_sub(1)),
+                offset_in_item: top.offset_in_item,
+            });
         }
+        self.document = document;
+        self.toc = toc;
+        self.source = source;
+        cx.notify();
+    }
+
+    /// Flip the Nth task's checkbox (`ListItem::task`). The view shows
+    /// the new state at once, and the one-byte edit is emitted for the
+    /// owner of the file to apply and save -- this never writes a file.
+    pub fn toggle_task(&mut self, nth: usize, cx: &mut Context<Self>) {
+        if !self.task_edits {
+            return;
+        }
+        let Some((range, replacement)) = markdown::task_toggle(&self.source, nth) else {
+            return;
+        };
+        let before = self.source.clone();
+        let mut after = before.clone();
+        after.replace_range(range.clone(), replacement);
+        self.set_source(after, cx);
+        cx.emit(ReaderEvent::EditSource { before, range, replacement });
     }
 
     /// Hand the reader its workspace's index (the workspace does this
@@ -166,6 +227,22 @@ impl Reader {
     /// every relative link previews as a note that does not exist.
     pub fn describe(&self, dest: &str, cx: &App) -> Option<crate::preview::Preview> {
         describe_link(self.path.as_deref(), dest, self.knowledge.as_ref(), cx)
+    }
+
+    /// The hover-preview callback the rendered view hands to
+    /// `view::list_item`: every tooltip asks the reader itself, so it
+    /// resolves with both halves the workspace handed over -- the file
+    /// and the index.
+    ///
+    /// Named rather than written inline in `render` so a test can hold
+    /// the same callback the view gets. Built any other way -- calling
+    /// `describe_link` here with `None` for the index, say -- every wiki
+    /// link and every relative link in the reading view previews as a
+    /// note that does not exist, and a test that calls `describe`
+    /// directly cannot see the difference.
+    fn describe_callback(reader: &gpui::Entity<Self>) -> view::Describe {
+        let reader = reader.clone();
+        std::rc::Rc::new(move |dest: &str, cx: &mut App| reader.read(cx).describe(dest, cx))
     }
 
     pub fn scroll_to_block(&mut self, block_ix: usize, cx: &mut Context<Self>) {
@@ -276,6 +353,9 @@ impl gpui::Focusable for Reader {
 #[derive(Debug, Clone)]
 pub enum ReaderEvent {
     Follow(String),
+    /// A checkbox was clicked: replace `range` of `before` -- the text
+    /// the reader was showing -- with `replacement`.
+    EditSource { before: String, range: std::ops::Range<usize>, replacement: &'static str },
 }
 
 impl gpui::EventEmitter<ReaderEvent> for Reader {}
@@ -315,7 +395,14 @@ impl Render for Reader {
         let t = theme(cx);
         div()
             .size_full()
-            .bg(t.bg)
+            .bg(t.page_bg)
+            // GPUI content masks are rectangular -- `ContentMask` has
+            // bounds and no radii -- so this square fill would
+            // otherwise overpaint the page's rounded bottom corners.
+            // Rounding here keeps the common case honest; the page
+            // masks its own corners for everything deeper than this
+            // root (see `Workspace::page_corner_masks`).
+            .rounded_b(crate::elevation::radius(crate::elevation::Surface::Page))
             .key_context("Reader")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::scroll_up))
@@ -340,15 +427,27 @@ impl Render for Reader {
                             reader.update(cx, |_, cx| cx.emit(ReaderEvent::Follow(dest)));
                         })
                     };
-                    let describe: view::Describe = {
-                        let reader = reader.clone();
-                        std::rc::Rc::new(
-                            move |dest: &str, cx: &mut App| -> Option<crate::preview::Preview> {
-                                reader.read(cx).describe(dest, cx)
-                            },
-                        )
-                    };
-                    view::list_item(&document, ix, &t, cx, Some(&follow), Some(&describe))
+                    let describe = Self::describe_callback(&reader);
+                    let toggle: Option<view::ToggleTask> =
+                        reader.read(cx).task_edits.then(|| {
+                            let reader = reader.clone();
+                            std::rc::Rc::new(move |task: usize, _: &mut Window, cx: &mut App| {
+                                reader.update(cx, |reader, cx| reader.toggle_task(task, cx));
+                            }) as view::ToggleTask
+                        });
+                    let base = reader.read(cx).path.clone();
+                    view::list_item(
+                        &document,
+                        ix,
+                        &t,
+                        cx,
+                        view::Links {
+                            follow: Some(&follow),
+                            describe: Some(&describe),
+                            toggle: toggle.as_ref(),
+                            base: base.as_deref(),
+                        },
+                    )
                 })
                 .size_full(),
             )
@@ -435,6 +534,22 @@ mod tests {
         });
     }
 
+    /// The outline lists the document's headings. A metadata block is
+    /// not one, and it used to appear there as a garbled row.
+    #[gpui::test]
+    fn the_outline_skips_frontmatter(cx: &mut TestAppContext) {
+        let src = "---\ntitle: x\ntags: [a]\n---\n\n# Only Me\n";
+        let langs = Languages::new();
+        let entity = cx.new(|cx| Reader::from_source("fm".into(), src, &langs, cx));
+        entity.read_with(cx, |reader, _| {
+            let toc: Vec<(u8, &str)> =
+                reader.toc.iter().map(|e| (e.level, e.text.as_ref())).collect();
+            assert_eq!(toc, [(1, "Only Me")]);
+            assert!(matches!(reader.document.blocks[0], Block::FrontMatter(_)));
+            assert_eq!(reader.toc[0].block_ix, 1, "the entry points past the metadata");
+        });
+    }
+
     #[gpui::test]
     fn welcome_document_carries_the_bundled_tour(cx: &mut TestAppContext) {
         let langs = Languages::new();
@@ -450,6 +565,109 @@ mod tests {
         );
         assert!(reader.document.blocks.len() > 5, "welcome tour lost its body");
         });
+    }
+
+    // ── task toggles ───────────────────────────────────────────────────
+
+    /// Everything the reader emitted, in order.
+    fn record_events(
+        reader: &Entity<Reader>,
+        cx: &mut VisualTestContext,
+    ) -> std::rc::Rc<std::cell::RefCell<Vec<ReaderEvent>>> {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        cx.update(|_, app| {
+            app.subscribe(reader, move |_, event: &ReaderEvent, _| {
+                sink.borrow_mut().push(event.clone())
+            })
+            .detach()
+        });
+        seen
+    }
+
+    fn checked_states(reader: &Entity<Reader>, cx: &mut VisualTestContext) -> Vec<Option<bool>> {
+        cx.update(|_, app| {
+            let doc = &reader.read(app).document;
+            let Block::List { items, .. } = &doc.blocks[0] else { panic!("{:?}", doc.blocks) };
+            items.iter().map(|i| i.checked).collect()
+        })
+    }
+
+    /// A toggle in the reading view is an edit to the source: the
+    /// reader shows it at once and hands exactly that one-byte edit to
+    /// whoever owns the file. It never writes the file itself -- the
+    /// editor's buffer is the file's in-memory truth, and writing past
+    /// it would leave that buffer stale and let its next save undo the
+    /// click.
+    #[gpui::test]
+    fn toggling_a_task_updates_the_view_and_emits_the_edit(cx: &mut TestAppContext) {
+        let src = "- [ ] one\n- [x] two\n";
+        let (reader, cx) = open_reader(cx, src);
+        reader.update(cx, |r, _| r.allow_task_toggles());
+        let events = record_events(&reader, cx);
+
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        assert_eq!(checked_states(&reader, cx), [Some(true), Some(true)]);
+        let seen = events.borrow().clone();
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ReaderEvent::EditSource { before, range, replacement }]
+                    if before == src && *range == (3..4) && *replacement == "x"
+            ),
+            "{seen:?}"
+        );
+
+        // A second click flips it back, from the updated source.
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        assert_eq!(checked_states(&reader, cx), [Some(false), Some(true)]);
+        assert!(
+            matches!(&events.borrow()[1], ReaderEvent::EditSource { before, .. } if before == "- [x] one\n- [x] two\n")
+        );
+    }
+
+    /// A reader whose text is not the file's own -- a viewer plugin's
+    /// rendering, a wrapped code file, the bundled welcome tour -- has
+    /// nothing a toggle could be written back to, so the box stays
+    /// decoration rather than pretending.
+    #[gpui::test]
+    fn task_toggles_are_off_unless_the_text_is_the_file(cx: &mut TestAppContext) {
+        let (reader, cx) = open_reader(cx, "- [ ] one\n");
+        let events = record_events(&reader, cx);
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        assert_eq!(checked_states(&reader, cx), [Some(false)]);
+        assert!(events.borrow().is_empty());
+        // Past the last task is nothing, too.
+        reader.update(cx, |r, cx| {
+            r.allow_task_toggles();
+            r.toggle_task(7, cx)
+        });
+        assert!(events.borrow().is_empty());
+    }
+
+    /// The glyph is the control: a real click on the drawn marker, not
+    /// a call, reaches the toggle. The marker used to have no id and no
+    /// handler at all.
+    #[gpui::test]
+    fn clicking_the_drawn_marker_toggles_that_task(cx: &mut TestAppContext) {
+        // Two separate lists: the second box is the first row of its own
+        // list but the document's second task, and it is the second
+        // task that must flip.
+        let src = "- [ ] one\n\nbetween\n\n- [ ] two\n- [ ] three\n";
+        let (reader, cx) = open_reader(cx, src);
+        reader.update(cx, |r, cx| {
+            r.allow_task_toggles();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let second = cx.debug_bounds("task-1").expect("the second marker drew");
+        cx.simulate_click(second.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let source = cx.update(|_, app| reader.read(app).source.clone());
+        assert_eq!(source, "- [ ] one\n\nbetween\n\n- [x] two\n- [ ] three\n", "only the clicked box");
     }
 
     // ── window rendering and scrolling ─────────────────────────────────
@@ -634,6 +852,41 @@ mod tests {
         cx.dispatch_action(ScrollTop);
         cx.run_until_parked();
         assert_eq!(offset_px(&reader, cx), 0., "Home should land at the top");
+    }
+
+    /// The callback the rendered view actually hands to `view::list_item`
+    /// has to carry the reader's own index. Only `describe` was tested,
+    /// so building that callback any other way -- `describe_link` with
+    /// `None` for the index, say -- left the suite green while every
+    /// wiki link and every relative link in the reading view previewed
+    /// as a note that does not exist.
+    #[gpui::test]
+    fn the_rendered_views_callback_previews_through_the_index(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Target.md"), "# Target\n\nthe body\n").unwrap();
+        let note = dir.path().join("Note.md");
+        let source = "see [[Target]] and [here](Target.md)\n";
+        std::fs::write(&note, source).unwrap();
+        let index = Arc::new(std::sync::Mutex::new(crate::knowledge::Index::scan(dir.path())));
+
+        let langs = Languages::new();
+        let reader = cx.new(|cx| {
+            let mut reader =
+                Reader::from_source_at(Some(note.clone()), "Note".into(), source, &langs, cx);
+            reader.set_knowledge(index);
+            reader
+        });
+        // The very callback `render` builds, not `describe` behind it.
+        let describe = Reader::describe_callback(&reader);
+        cx.update(|app| {
+            for dest in ["[[Target", "Target.md"] {
+                assert!(
+                    matches!(describe(dest, app), Some(crate::preview::Preview::Note { .. })),
+                    "{dest} must preview the note it resolves to, not a missing one: {:?}",
+                    describe(dest, app),
+                );
+            }
+        });
     }
 
     /// The tooltip's preview must answer from `PreviewState`'s cached

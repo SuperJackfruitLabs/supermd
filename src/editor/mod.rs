@@ -36,6 +36,7 @@ use gpui::{
     TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 
+use crate::elevation::Elevated as _;
 use crate::highlight::Languages;
 use crate::reader::language_for_path;
 use crate::theme::{theme, Theme};
@@ -117,6 +118,13 @@ pub struct DiffState {
 }
 
 pub struct Editor {
+    /// Test seams standing in for a format-on-save plugin and a save
+    /// hook plugin, consulted at the exact points the plugins are, so
+    /// tests can make a save change the buffer without building wasm.
+    #[cfg(test)]
+    pub(crate) test_formatter: Option<fn(&str) -> String>,
+    #[cfg(test)]
+    pub(crate) test_save_hook: Option<fn(&str) -> String>,
     core: EditorCore,
     provider: Provider,
     diff: Option<DiffState>,
@@ -233,6 +241,10 @@ pub enum EditorEvent {
     /// raise it), so the editor reports where the press was and what it
     /// knew at the caret; `menus::items_for` turns that into rows.
     ContextMenu { position: gpui::Point<Pixels>, ctx: crate::menus::EditorContext },
+    /// A command declined and has to say why. A refusal nobody can see
+    /// is indistinguishable from a broken command, and the workspace
+    /// owns the one transient message strip (`show_command_error`).
+    CommandError(String),
 }
 
 /// The `[[` completion popup: doc offset of the opener, the filtered
@@ -372,6 +384,10 @@ impl Editor {
             scroll_anim: None,
             pending_enrich: None,
             status_text: None,
+            #[cfg(test)]
+            test_formatter: None,
+            #[cfg(test)]
+            test_save_hook: None,
             status_task: None,
             completion: None,
             toolbar_visible: false,
@@ -417,6 +433,16 @@ impl Editor {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Where an image destination in this document points.
+    ///
+    /// Anchored to the document that wrote the link, never to the
+    /// process's working directory -- and the reading view asks the
+    /// same function with the same anchor, so one link cannot resolve
+    /// two ways (#57).
+    pub fn image_source(&self, dest: &str) -> crate::markdown::ImageSource {
+        crate::markdown::resolve_image(dest, Some(&self.path))
     }
 
     pub fn title(&self) -> SharedString {
@@ -1046,6 +1072,18 @@ impl Editor {
         if !crate::settings::load(&crate::settings::config_dir()).format_on_save {
             return;
         }
+        #[cfg(test)]
+        if let Some(format) = self.test_formatter {
+            let snapshot = self.core.buffer.text();
+            let formatted = format(&snapshot);
+            if formatted != snapshot {
+                self.apply_command_output(
+                    &crate::extensions::CommandOutput::ReplaceDocument(formatted),
+                    cx,
+                );
+            }
+            return;
+        }
         let plugins = crate::extensions::format_plugins();
         let Some(plugin) = plugins.first() else {
             return;
@@ -1070,6 +1108,18 @@ impl Editor {
     /// thread, so the buffer cannot move between snapshot and apply —
     /// the same guarantee the formatter relies on.
     fn run_save_hooks(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        if let Some(hook) = self.test_save_hook {
+            let snapshot = self.core.buffer.text();
+            let result = hook(&snapshot);
+            if result != snapshot {
+                self.apply_command_output(
+                    &crate::extensions::CommandOutput::ReplaceDocument(result),
+                    cx,
+                );
+            }
+            return;
+        }
         let plugins = crate::extensions::hook_plugins();
         if plugins.is_empty() {
             return;
@@ -1090,8 +1140,36 @@ impl Editor {
         }
     }
 
+    /// Apply an edit that came from outside the editor (a checkbox
+    /// clicked in the reading view) and save it now, through the one
+    /// save path. One undo step; the selection stays where it was.
+    ///
+    /// The opt-in formatter is skipped (decided with the user): a click
+    /// is a one-byte change, and a formatter run on it rewrote the file
+    /// out of sight, added a second undo step and moved the caret. Save
+    /// hooks still run -- they are always on -- so the caller must
+    /// expect the buffer to differ from its own edit afterwards.
+    pub fn replace_and_save(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        let saved = self.core.selection;
+        self.core.break_undo_group();
+        self.core.replace_range(range, text, Instant::now());
+        self.core.break_undo_group();
+        let len = self.core.buffer.len_bytes();
+        self.core.selection = saved;
+        self.core.selection.anchor = self.core.selection.anchor.min(len);
+        self.core.selection.head = self.core.selection.head.min(len);
+        self.after_edit(cx);
+        self.flush_with(false, cx);
+    }
+
     pub fn flush(&mut self, cx: &mut Context<Self>) {
-        self.maybe_format_before_save(cx);
+        self.flush_with(true, cx);
+    }
+
+    fn flush_with(&mut self, format: bool, cx: &mut Context<Self>) {
+        if format {
+            self.maybe_format_before_save(cx);
+        }
         self.run_save_hooks(cx);
         if !self.save.take_flush_now() {
             return;
@@ -1530,12 +1608,24 @@ impl Editor {
         self.after_edit(cx);
     }
 
+    /// Report a command that declined. The editor has no message
+    /// surface of its own; the workspace owns the transient strip and
+    /// turns this into `show_command_error`.
+    fn refuse(&mut self, why: &str, cx: &mut Context<Self>) {
+        cx.emit(EditorEvent::CommandError(why.to_string()));
+    }
+
+    /// "Put the caret in a table first" -- the four table commands all
+    /// share this precondition, and all four used to fail it in silence.
+    const NOT_IN_A_TABLE: &'static str = "Put the cursor in a table first";
+
     fn table_insert_row(&mut self, _: &TableInsertRow, _: &mut Window, cx: &mut Context<Self>) {
         if !self.can_format() {
             cx.propagate();
             return;
         }
         let Some((br, block, pos)) = self.table_cursor() else {
+            self.refuse(Self::NOT_IN_A_TABLE, cx);
             return;
         };
         // Not `pos.row + 1`: a row asked for from the header lands
@@ -1551,12 +1641,21 @@ impl Editor {
             return;
         }
         let Some((br, block, pos)) = self.table_cursor() else {
+            self.refuse(Self::NOT_IN_A_TABLE, cx);
             return;
         };
         let Some(new_block) = table_ops::delete_row(&block, pos.row) else {
+            self.refuse(
+                "The header and the dashed line under it are the table's structure, not rows",
+                cx,
+            );
             return;
         };
-        let row = table_edit::rows(&new_block).len().saturating_sub(1).min(pos.row);
+        // Row 1 is the delimiter; a caret there turns the next
+        // keystroke into `| z--- | --- |`. Clamp to a body row, and
+        // fall back to the header when the body is now empty.
+        let rows = table_edit::rows(&new_block).len();
+        let row = if rows > 2 { pos.row.clamp(2, rows - 1) } else { 0 };
         self.apply_table_edit(br, &new_block, table_edit::CellPos { row, cell: pos.cell }, cx);
     }
 
@@ -1571,6 +1670,7 @@ impl Editor {
             return;
         }
         let Some((br, block, pos)) = self.table_cursor() else {
+            self.refuse(Self::NOT_IN_A_TABLE, cx);
             return;
         };
         let new_block = table_ops::insert_column(&block, pos.cell);
@@ -1588,9 +1688,11 @@ impl Editor {
             return;
         }
         let Some((br, block, pos)) = self.table_cursor() else {
+            self.refuse(Self::NOT_IN_A_TABLE, cx);
             return;
         };
         let Some(new_block) = table_ops::delete_column(&block, pos.cell) else {
+            self.refuse("A table needs at least one column", cx);
             return;
         };
         let cell = pos.cell.min(table_edit::rows(&new_block)[pos.row].cells.len().saturating_sub(1));
@@ -2377,13 +2479,49 @@ impl Editor {
         // states it too and this one must not quietly depend on that.
         window.focus(&self.focus_handle);
 
-        // An empty menu is worse than none: a code file or the diff
-        // view takes none of these commands, so no overlay opens.
+        self.raise_context_menu(caret, event.position, cx);
+    }
+
+    /// Ask the workspace to raise the context menu at `position`, with
+    /// the facts read at `caret` -- *after* the caret has moved, so a
+    /// command's own precondition and its menu row agree.
+    ///
+    /// An empty menu is worse than none: a code file or the diff view
+    /// takes none of these commands, so no overlay opens.
+    fn raise_context_menu(
+        &mut self,
+        caret: usize,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         let ctx = self.menu_context(caret);
         if !crate::menus::items_for(crate::menus::Surface::Editor, ctx).is_empty() {
-            cx.emit(EditorEvent::ContextMenu { position: event.position, ctx });
+            cx.emit(EditorEvent::ContextMenu { position, ctx });
         }
         cx.notify();
+    }
+
+    /// A right-click on a table drawn as a widget. The context menu
+    /// hangs off line elements and a widget is not one, so this is the
+    /// widget's own way in: drop the caret on the row's source line --
+    /// exactly where the left-click handler puts it -- and raise the
+    /// same menu, which then reads `in_table` as true.
+    fn right_click_table_row(
+        &mut self,
+        line: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.diff.is_some() {
+            return; // read-only, same as every other right press
+        }
+        let start = self.core.buffer.line_range(line).start;
+        self.core.set_cursor(start);
+        self.core.break_undo_group();
+        self.preferred_x = None;
+        window.focus(&self.focus_handle);
+        self.raise_context_menu(start, position, cx);
     }
 
     fn on_root_mouse_move(
@@ -2858,7 +2996,13 @@ impl Editor {
                 (t.heading_size(*n), weight, t.body_family.clone(), 1.35)
             }
             Some(LineKind::Code) => (t.code_size, FontWeight::NORMAL, t.mono_family.clone(), 1.55),
-            _ => (t.body_size, FontWeight::NORMAL, t.body_family.clone(), 1.65),
+            Some(LineKind::FrontMatter) => {
+                let s = crate::view::frontmatter_style(t);
+                (s.size, FontWeight::NORMAL, s.family, 1.55)
+            }
+            Some(LineKind::Body) | None => {
+                (t.body_size, FontWeight::NORMAL, t.body_family.clone(), 1.65)
+            }
         }
     }
 
@@ -2931,6 +3075,7 @@ impl Editor {
                     StyleKind::FenceDelimiter => {
                         a.color = Hsla { a: 0.55, ..t.fg_muted };
                     }
+                    StyleKind::FrontMatter => a.color = crate::view::frontmatter_style(t).ink,
                     StyleKind::InlineReplace(_) => {
                         // Rendering handled by the display transform;
                         // source text (when revealed) keeps base style.
@@ -2952,7 +3097,10 @@ impl Editor {
 
         // Plugin decoration overlays (prose lines only).
         if !self.is_code_mode()
-            && !matches!(self.view_line_kinds().get(ix), Some(LineKind::Code))
+            && !matches!(
+                self.view_line_kinds().get(ix),
+                Some(LineKind::Code | LineKind::FrontMatter)
+            )
         {
             for (deco, color, is_bg) in crate::extensions::with_decoration_table(|table| {
                 decoration_overlay(&text, &range, table, t)
@@ -3022,6 +3170,24 @@ impl Editor {
         }
 
         (text, attrs)
+    }
+
+    /// The colour of the divider drawn over a hidden thematic break.
+    /// In diff mode a change covering the break is painted into it:
+    /// the per-character wash lands on hyphens that are not drawn.
+    fn rule_color(&self, ix: usize, t: &Theme) -> Hsla {
+        let (_, plain) = crate::view::rule_style(t);
+        let Some(d) = &self.diff else {
+            return plain;
+        };
+        let range = self.view_buffer().line_range(ix);
+        d.changes
+            .iter()
+            .find(|c| c.range.start < range.end && range.start < c.range.end)
+            .map_or(plain, |c| match c.kind {
+                crate::diff::ChangeKind::Added => t.diff_added_fg,
+                crate::diff::ChangeKind::Deleted => t.diff_deleted_fg,
+            })
     }
 
     /// Display text, styled runs, and the source↔display map for a line.
@@ -3627,12 +3793,13 @@ fn render_table(
         }
     }
     let ncols = rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(1);
+    let style = crate::view::table_style(t);
 
     let mut container = div()
         .my_1()
         .rounded_lg()
         .border_1()
-        .border_color(t.border)
+        .border_color(style.outer)
         .font_family(t.body_family.clone())
         .flex()
         .flex_col()
@@ -3640,7 +3807,14 @@ fn render_table(
 
     for (row_ix, (line, cells)) in rows.into_iter().enumerate() {
         let is_header = row_ix == 0;
+        // The rule under the header keeps full weight; every other row
+        // separates from its neighbour with a hairline. The first body
+        // row's separator IS the header rule, drawn as the header's own
+        // bottom border -- giving it a second, hairline top border here
+        // would double the line.
+        let is_first_body_row = row_ix == 1;
         let handle = editor.clone();
+        let menu_handle = editor.clone();
         let mut row = div()
             .id(("trow", item_ix * 1024 + row_ix))
             .flex()
@@ -3648,15 +3822,18 @@ fn render_table(
             .w_full()
             .cursor_pointer()
             .when(is_header, |d| {
-                d.bg(t.panel_bg)
+                d.bg(style.header_bg)
+                    .rounded_t_lg()
+                    .border_b_1()
+                    .border_color(style.header)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(t.fg_strong)
             })
+            .when(!is_header && !is_first_body_row, |d| {
+                d.border_t_1().border_color(style.row)
+            })
             .when(!is_header, |d| {
-                d.border_t_1()
-                    .border_color(t.border)
-                    .text_color(t.fg)
-                    .hover(|s| s.bg(t.hover_bg))
+                d.text_color(t.fg).hover(|s| s.bg(t.hover_bg))
             })
             .on_click(move |_, window, cx| {
                 handle.update(cx, |editor, cx| {
@@ -3666,7 +3843,17 @@ fn render_table(
                     window.focus(&editor.focus_handle);
                     cx.notify();
                 });
-            });
+            })
+            // The row/column commands are what people right-click a
+            // table for, and the line-element menu cannot see a widget.
+            .on_mouse_down(
+                MouseButton::Right,
+                move |event: &MouseDownEvent, window, cx| {
+                    menu_handle.update(cx, |editor, cx| {
+                        editor.right_click_table_row(line, event.position, window, cx);
+                    });
+                },
+            );
         for c in 0..ncols {
             let cell = cells.get(c).cloned().unwrap_or_default();
             let mut cell_el = div()
@@ -3702,15 +3889,9 @@ fn render_image(
     t: &Theme,
     cx: &mut App,
 ) -> gpui::AnyElement {
-    let is_remote = dest.starts_with("http://") || dest.starts_with("https://");
-    let local_path = (!is_remote).then(|| {
-        editor
-            .read(cx)
-            .path()
-            .parent()
-            .map(|dir| dir.join(dest))
-            .unwrap_or_else(|| PathBuf::from(dest))
-    });
+    // Shared with the reading view: one answer about where an image
+    // lives, so the same document cannot resolve two ways (#57).
+    let source = editor.read(cx).image_source(dest);
 
     let handle = editor.clone();
     let on_click = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
@@ -3723,34 +3904,33 @@ fn render_image(
         });
     };
 
-    let available = match &local_path {
-        Some(path) => path.exists(),
-        None => true, // remote: let gpui's loader handle it
+    let image = match source {
+        crate::markdown::ImageSource::Remote(url) => gpui::img(url),
+        crate::markdown::ImageSource::Local(path) => gpui::img(path),
+        crate::markdown::ImageSource::Missing(_) => {
+            return div()
+                .id(("img", item_ix))
+                .my_1()
+                .cursor_pointer()
+                .on_click(on_click)
+                .font_family(t.mono_family.clone())
+                .text_size(px(t.code_size))
+                .text_color(Hsla { a: 0.8, ..t.accent })
+                .child(SharedString::from(format!("![{alt}]({dest}) — file not found")))
+                .into_any_element();
+        }
     };
-    if !available {
-        return div()
-            .id(("img", item_ix))
-            .my_1()
-            .cursor_pointer()
-            .on_click(on_click)
-            .font_family(t.mono_family.clone())
-            .text_size(px(t.code_size))
-            .text_color(Hsla { a: 0.8, ..t.accent })
-            .child(SharedString::from(format!("![{alt}]({dest}) — file not found")))
-            .into_any_element();
-    }
-
-    let image = match local_path {
-        Some(path) => gpui::img(path),
-        None => gpui::img(dest.to_string()),
-    };
+    // The same corner as the reading view draws, on the element that
+    // actually paints: gpui's `ContentMask` carries no radii, so a
+    // rounded parent cannot clip a square child.
+    let radius = crate::elevation::radius(crate::elevation::Surface::Page);
     div()
         .id(("img", item_ix))
         .my_1()
         .w_full()
         .cursor_pointer()
         .on_click(on_click)
-        .child(image.w_full().max_h(px(420.)).rounded_md())
+        .child(image.w_full().max_h(px(420.)).rounded(radius))
         .into_any_element()
 }
 
@@ -3858,11 +4038,9 @@ impl Render for Editor {
                     .items_center()
                     .gap(px(2.))
                     .p(px(3.))
-                    .bg(t.panel_bg)
                     .border_1()
                     .border_color(t.border)
-                    .rounded_lg()
-                    .shadow_lg()
+                    .elevated(crate::elevation::Overlay::FormatToolbar, &t)
                     .child(button(0, "B").font_weight(FontWeight::BOLD).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|ed, _, w, cx| {
@@ -3984,12 +4162,16 @@ impl Render for Editor {
                     .child(
                         div()
                             .w(px(280.))
-                            .bg(t.panel_bg)
                             .border_1()
                             .border_color(t.border)
-                            .rounded_lg()
-                            .shadow_lg()
+                            .elevated(crate::elevation::Overlay::LinkCompletion, &t)
                             .overflow_hidden()
+                            // The first row is selected by default and
+                            // its fill is square: flush with the rounded
+                            // edge it would paint over the corner arcs.
+                            .py(crate::elevation::corner_inset(
+                                crate::elevation::Overlay::LinkCompletion,
+                            ))
                             .flex()
                             .flex_col()
                             .children(rows),
@@ -4133,11 +4315,9 @@ impl Render for Editor {
                                 }
                             }))
                             .max_w(px(360.))
-                            .bg(t.panel_bg)
                             .border_1()
                             .border_color(t.border)
-                            .rounded_lg()
-                            .shadow_lg()
+                            .elevated(crate::elevation::Overlay::LinkHover, &t)
                             .overflow_hidden()
                             .p_3()
                             .child(inner),
@@ -4217,7 +4397,16 @@ impl Render for Editor {
 
         div()
             .size_full()
-            .bg(t.bg)
+            .bg(t.page_bg)
+            // GPUI content masks are rectangular -- `ContentMask` has
+            // bounds and no radii -- so this square fill would
+            // otherwise overpaint the page's rounded bottom corners.
+            // Rounding here keeps the common case honest; the page
+            // masks its own corners for everything deeper than this
+            // root (see `Workspace::page_corner_masks`), because no
+            // test can see a corner and nothing else can enforce it.
+            .rounded_b(crate::elevation::radius(crate::elevation::Surface::Page))
+            .debug_selector(|| "editor-root".into())
             .key_context(if diffing { "DiffView" } else { "Editor" })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::move_left))
@@ -4336,10 +4525,14 @@ impl Render for Editor {
                                 is_code,
                                 code_mode,
                                 line_count,
+                                rule_color,
                             ) = {
                                 let editor = editor_entity.read(cx);
                                 let (size_f, _, _, mult) = editor.line_typography(line_ix, &t);
                                 let (text, runs, dl) = editor.display_for_line(line_ix, &t);
+                                let rule_color = (!editor.is_code_mode()
+                                    && display::draws_rule(&dl, editor.view_spans()))
+                                .then(|| editor.rule_color(line_ix, &t));
                                 (
                                     editor.view_buffer().line_range(line_ix),
                                     text,
@@ -4353,6 +4546,7 @@ impl Render for Editor {
                                     ),
                                     editor.is_code_mode(),
                                     editor.view_buffer().line_count(),
+                                    rule_color,
                                 )
                             };
                             let mouse_editor = editor_entity.clone();
@@ -4433,7 +4627,33 @@ impl Render for Editor {
                                             .when(is_code, |d| d.bg(t.code_bg))
                                             .on_mouse_down(MouseButton::Left, on_down)
                                             .on_mouse_down(MouseButton::Right, on_right)
-                                            .child(line_el),
+                                            .child(if let Some(color) = rule_color {
+                                                // A hidden thematic break: the
+                                                // line keeps its height (and
+                                                // its hit-testing) and a divider
+                                                // is drawn across its middle,
+                                                // styled as the reading view's
+                                                // (or in its diff colour).
+                                                let (thick, _) = crate::view::rule_style(&t);
+                                                div()
+                                                    .relative()
+                                                    .child(line_el)
+                                                    .child(
+                                                        div()
+                                                            .debug_selector(move || {
+                                                                format!("rule-line-{line_ix}")
+                                                            })
+                                                            .absolute()
+                                                            .left_0()
+                                                            .right_0()
+                                                            .top(line_height_px / 2. - px(thick / 2.))
+                                                            .h(px(thick))
+                                                            .bg(color),
+                                                    )
+                                                    .into_any_element()
+                                            } else {
+                                                line_el.into_any_element()
+                                            }),
                                     )
                                     .into_any_element()
                             }
@@ -5451,6 +5671,34 @@ mod tests {
         (backups, editor, cx)
     }
 
+    /// An image's destination is anchored to the document that wrote
+    /// it, and a destination with nothing behind it says so rather
+    /// than quietly drawing nothing. The reading view asks the same
+    /// function with the same anchor (#57).
+    #[gpui::test]
+    fn an_images_path_is_anchored_to_its_own_document(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("assets")).unwrap();
+        std::fs::write(dir.path().join("assets").join("pic.png"), b"x").unwrap();
+        let note = dir.path().join("note.md");
+        std::fs::write(&note, "![p](assets/pic.png)\n\n![q](assets/gone.png)\n").unwrap();
+        let (_backups, editor, cx) = open_editor_path(cx, &note);
+        cx.update(|_, app| {
+            assert_eq!(
+                editor.read(app).image_source("assets/pic.png"),
+                crate::markdown::ImageSource::Local(dir.path().join("assets").join("pic.png"))
+            );
+            assert!(matches!(
+                editor.read(app).image_source("assets/gone.png"),
+                crate::markdown::ImageSource::Missing(_)
+            ));
+            assert_eq!(
+                editor.read(app).image_source("https://example.com/r.png"),
+                crate::markdown::ImageSource::Remote("https://example.com/r.png".to_string())
+            );
+        });
+    }
+
     /// Author git fixtures with the system CLI (same approach as
     /// src/git.rs tests) so no git library shows up in fixture setup.
     fn sh_git(dir: &Path, args: &[&str]) {
@@ -5750,6 +5998,26 @@ mod tests {
         opened
     }
 
+    /// Every refusal an editor reported through
+    /// `EditorEvent::CommandError` — the workspace turns each into
+    /// `show_command_error`.
+    fn command_error_sink(
+        cx: &mut VisualTestContext,
+        editor: &Entity<Editor>,
+    ) -> Rc<RefCell<Vec<String>>> {
+        let said: Rc<RefCell<Vec<String>>> = Rc::default();
+        let sink = said.clone();
+        cx.update(|_, app| {
+            app.subscribe(editor, move |_, event: &EditorEvent, _| {
+                if let EditorEvent::CommandError(msg) = event {
+                    sink.borrow_mut().push(msg.clone());
+                }
+            })
+            .detach();
+        });
+        said
+    }
+
     // ── right-click context menu ───────────────────────────────────────
 
     /// Every `EditorEvent::ContextMenu` an editor raised.
@@ -5816,6 +6084,35 @@ mod tests {
         ] {
             assert!(ids.contains(&expected), "{expected} missing from {ids:?}");
         }
+    }
+
+    /// Right-clicking a rendered table offers the table commands. The
+    /// menu lives on line elements, and a widget is not one, so this
+    /// gesture used to do nothing at all.
+    #[gpui::test]
+    fn right_clicking_a_widget_table_opens_the_table_menu(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) =
+            open_editor(cx, "t.md", "para\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nafter\n");
+        let raised = menu_sink(cx, &editor);
+        // Caret in the paragraph, so the table renders as a widget.
+        caret_and_draw(&editor, cx, 0);
+        assert_eq!(widget_count(&editor, cx), 1, "the table is a widget, not lines");
+
+        let p = point(px(40.), px(80.));
+        editor.update_in(cx, |ed, window, cx| ed.right_click_table_row(2, p, window, cx));
+
+        let (pos, ctx) = *raised.borrow().last().expect("the menu opened");
+        assert_eq!(pos, p, "the menu opens where the press landed");
+        assert!(ctx.in_table, "the menu knows it is in a table: {ctx:?}");
+        assert!(menu_ids(ctx).contains(&"table_delete_row"), "{:?}", menu_ids(ctx));
+        let line = cx.update(|_, app| {
+            let ed = editor.read(app);
+            ed.core.buffer.line_of_byte(ed.core.selection.head)
+        });
+        assert!(
+            (2..=4).contains(&line),
+            "the caret moved into the table so the commands can act: {line}"
+        );
     }
 
     /// A right-click inside an existing selection keeps it. Collapsing
@@ -6771,6 +7068,71 @@ mod tests {
         }
     }
 
+    /// After deleting a row the caret must land somewhere you can
+    /// type. The delimiter is not such a place: one keystroke there
+    /// turns the table into a paragraph of pipes.
+    #[gpui::test]
+    fn delete_row_never_parks_the_caret_in_the_delimiter(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "t.md", doc);
+        editor.update_in(cx, |ed, _, _| ed.core.set_cursor(doc.find('1').unwrap()));
+        cx.dispatch_action(TableDeleteRow);
+        cx.simulate_input("z");
+        let text = buffer_text(&editor, cx);
+        assert!(!text.contains("z---"), "the caret was in the delimiter: {text:?}");
+        assert_eq!(
+            crate::editor::blocks::blocks(&text)
+                .iter()
+                .filter(|b| matches!(b.kind, crate::editor::blocks::BlockKind::Table))
+                .count(),
+            1,
+            "still one table: {text:?}"
+        );
+    }
+
+    /// A command that declines tells the user why. Silence is
+    /// indistinguishable from a broken command.
+    #[gpui::test]
+    fn deleting_the_header_row_says_why_it_refused(cx: &mut TestAppContext) {
+        let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "t.md", doc);
+        let refusals = command_error_sink(cx, &editor);
+        editor.update_in(cx, |ed, _, _| ed.core.set_cursor(2));
+        cx.dispatch_action(TableDeleteRow);
+        assert_eq!(buffer_text(&editor, cx), doc, "unchanged");
+        assert!(!refusals.borrow().is_empty(), "the refusal reached the user");
+    }
+
+    /// The same for the other three refusals: a table shortcut pressed
+    /// outside a table, and the last column of a one-column table.
+    #[gpui::test]
+    fn the_other_table_refusals_reach_the_user_too(cx: &mut TestAppContext) {
+        let doc = "a paragraph\n\n| a |\n| --- |\n| 1 |\n";
+        let (_fx, editor, cx) = open_editor(cx, "one.md", doc);
+        let refusals = command_error_sink(cx, &editor);
+
+        // Caret in the paragraph: all four commands decline out loud.
+        editor.update_in(cx, |ed, _, _| ed.core.set_cursor(3));
+        cx.dispatch_action(TableInsertRow);
+        cx.dispatch_action(TableDeleteRow);
+        cx.dispatch_action(TableInsertColumn);
+        cx.dispatch_action(TableDeleteColumn);
+        assert_eq!(buffer_text(&editor, cx), doc, "and change nothing");
+        assert_eq!(
+            *refusals.borrow(),
+            vec![Editor::NOT_IN_A_TABLE.to_string(); 4],
+            "every one of them said so"
+        );
+
+        // And the last column of a one-column table.
+        editor.update_in(cx, |ed, _, _| ed.core.set_cursor(doc.find('1').unwrap()));
+        cx.dispatch_action(TableDeleteColumn);
+        assert_eq!(buffer_text(&editor, cx), doc, "still a table");
+        let said = refusals.borrow();
+        assert_eq!(said.len(), 5, "{said:?}");
+        assert!(said[4].contains("column"), "{said:?}");
+    }
+
     #[gpui::test]
     fn table_command_on_a_pipe_line_in_a_code_file_is_a_no_op(cx: &mut TestAppContext) {
         // rustfmt's own style puts a leading `|` on an or-pattern arm —
@@ -7167,6 +7529,89 @@ mod tests {
         cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(click, MouseButton::Left, Modifiers::none());
         assert_eq!(buffer_text(&editor, cx), "- [x] milk\n- [ ] eggs\n");
+    }
+
+    /// `---` hidden and nothing drawn is a blank line, which is worse
+    /// than the faded hyphens it replaced. The divider is the other half
+    /// of hiding the source: present while the caret is away, centred
+    /// on the line and as thick as the reading view's rule, and gone the
+    /// moment the caret lands on the line and the hyphens come back.
+    #[gpui::test]
+    fn a_thematic_break_draws_a_divider_until_the_caret_lands(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "rule.md", "before\n\n---\n\nafter\n");
+        cx.dispatch_action(DocEnd);
+        cx.run_until_parked();
+
+        let rule = cx.debug_bounds("rule-line-2").expect("a divider is drawn on the break");
+        let (origin, line_height) = cx.update(|_, app| {
+            let entry = editor.read(app).layout_cache.get(&2).expect("rule line painted");
+            (entry.origin, entry.line_height)
+        });
+        let (thick, _) = crate::view::rule_style(&crate::theme::Theme::dark());
+        assert_eq!(rule.size.height, px(thick), "as thick as the reading view's rule");
+        // Layout rounds to whole pixels, so centred means within one.
+        let off = (rule.origin.y + rule.size.height / 2.) - (origin.y + line_height / 2.);
+        assert!(off.abs() <= px(1.), "centred on the line, off by {off:?}");
+        assert!(rule.size.width > px(100.), "spans the column, got {:?}", rule.size.width);
+        assert_eq!(cx.debug_bounds("rule-line-0"), None, "prose lines draw no divider");
+
+        // Caret onto the break: the source returns, and the line the
+        // shell paints no longer asks for a divider.
+        editor.update(cx, |ed, cx| {
+            ed.core.set_cursor(9);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let (shown, divider) = cx.update(|_, app| {
+            let ed = editor.read(app);
+            let entry = ed.layout_cache.get(&2).unwrap();
+            (entry.display.text.clone(), display::draws_rule(&entry.display, ed.view_spans()))
+        });
+        assert_eq!(shown, "---");
+        assert!(!divider, "revealed source has no rule over it");
+    }
+
+    /// The absence half through a real paint. gpui's debug-bounds map
+    /// is never cleared between frames, so a divider that disappears
+    /// cannot be observed going; a caret that starts on the break (the
+    /// editor opens with it at offset 0) means one was never drawn.
+    #[gpui::test]
+    fn a_thematic_break_under_the_caret_draws_no_divider(cx: &mut TestAppContext) {
+        let (_fx, editor, cx) = open_editor(cx, "rule.md", "---\n\nafter\n");
+        cx.run_until_parked();
+        assert_eq!(head(&editor, cx), 0);
+        assert_eq!(cx.debug_bounds("rule-line-0"), None, "revealed source has no rule over it");
+        let shown = cx.update(|_, app| {
+            editor.read(app).layout_cache.get(&0).unwrap().display.text.clone()
+        });
+        assert_eq!(shown, "---");
+    }
+
+    /// The editor shows metadata the way the reading view does: small
+    /// muted mono, never a heading line, and absent from the outline.
+    #[gpui::test]
+    fn frontmatter_lines_are_small_muted_mono_and_not_outlined(cx: &mut TestAppContext) {
+        let src = "---\ntitle: x\ntags: [a]\n---\n\n# Real\n";
+        let (_fx, editor, cx) = open_editor(cx, "fm.md", src);
+        cx.dispatch_action(DocEnd);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let t = crate::theme::Theme::dark();
+            let style = crate::view::frontmatter_style(&t);
+            for ix in 0..4 {
+                let (size, weight, family, _) = ed.line_typography(ix, &t);
+                assert_eq!(size, style.size, "line {ix} at the metadata size");
+                assert_eq!(family, style.family, "line {ix} in mono");
+                assert_eq!(weight, FontWeight::NORMAL, "line {ix} not bold");
+                let (_, attrs) = ed.line_attrs(ix, &t);
+                assert!(attrs.iter().all(|a| a.color == style.ink), "line {ix} in muted ink");
+            }
+            let (size, ..) = ed.line_typography(5, &t);
+            assert_eq!(size, t.heading_size(1), "the real heading is untouched");
+            let outline: Vec<_> = ed.heading_lines().into_iter().map(|(l, s, _)| (l, s)).collect();
+            assert_eq!(outline, vec![(1, "Real".to_string())]);
+        });
     }
 
     // ── widget interactions ────────────────────────────────────────────
@@ -7702,6 +8147,45 @@ mod tests {
         editor.update_in(cx, |ed, _, cx| ed.exit_diff(cx));
         cx.run_until_parked();
         cx.update(|_, app| assert!(!editor.read(app).diff_active()));
+    }
+
+    /// Diff mode hides every marker, so a changed `---` shows only its
+    /// divider -- and the diff wash is painted per character, on
+    /// characters that are no longer drawn. The divider itself has to
+    /// carry the change, or a section break added or removed is
+    /// invisible to the person reviewing it.
+    #[gpui::test]
+    fn a_changed_rule_carries_its_diff_colour_in_the_diff_view(cx: &mut TestAppContext) {
+        let repo = tempfile::tempdir().unwrap();
+        sh_git(repo.path(), &["init", "-q"]);
+        let file = repo.path().join("note.md");
+        std::fs::write(&file, "a\n\n---\n\nb\n\nkeep\n\n___\n\nc\n").unwrap();
+        commit_all(repo.path());
+        std::fs::write(&file, "a\n\nb\n\nkeep\n\n___\n\nc\n\n***\n\nd\n").unwrap();
+
+        let (_bk, editor, cx) = open_editor_path(cx, &file);
+        let t = crate::theme::Theme::dark();
+        let (_, plain) = crate::view::rule_style(&t);
+        editor.update_in(cx, |ed, _, cx| {
+            let langs = crate::highlight::languages(cx);
+            ed.enter_diff(&langs, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let merged = ed.view_buffer().text();
+            let line_of = |needle: &str| merged.split('\n').position(|l| l == needle).unwrap();
+            assert_eq!(ed.rule_color(line_of("---"), &t), t.diff_deleted_fg, "a removed break");
+            assert_eq!(ed.rule_color(line_of("***"), &t), t.diff_added_fg, "an added break");
+            assert_eq!(ed.rule_color(line_of("___"), &t), plain, "an unchanged break");
+        });
+        editor.update_in(cx, |ed, _, cx| ed.exit_diff(cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            let line = ed.core.buffer.text().split('\n').position(|l| l == "***").unwrap();
+            assert_eq!(ed.rule_color(line, &t), plain, "outside diff mode, the plain rule");
+        });
     }
 
     #[gpui::test]

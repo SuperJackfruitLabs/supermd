@@ -28,6 +28,21 @@ pub struct Settings {
     /// remembered forever -- a prompt that comes back is worse than no
     /// prompt.
     pub default_handler_asked: bool,
+    /// Which appearance the app uses. `System` follows the OS, which is
+    /// what SuperMD did before this existed.
+    pub appearance: Appearance,
+}
+
+/// Which appearance the app uses. An explicit `Light` or `Dark` beats
+/// both flux's night override and the OS appearance -- see
+/// `theme::ThemeState::resolve`.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
@@ -72,6 +87,7 @@ impl Default for Settings {
             plugin_grants: Default::default(),
             flux: FluxSettings::default(),
             default_handler_asked: false,
+            appearance: Appearance::System,
         }
     }
 }
@@ -374,6 +390,23 @@ mod tests {
         // workspace_bookmarks key.
         let s: Settings = toml::from_str("reopen_last = true\n").unwrap();
         assert!(s.workspace_bookmarks.is_empty());
+    }
+
+    /// A settings file written before this field existed still loads,
+    /// and gets the behaviour it had before.
+    #[test]
+    fn settings_without_appearance_default_to_system() {
+        let s: Settings = toml::from_str("light_theme = \"Nord\"\n").expect("loads");
+        assert_eq!(s.appearance, Appearance::System);
+    }
+
+    #[test]
+    fn appearance_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        s.appearance = Appearance::Dark;
+        save(dir.path(), &s).unwrap();
+        assert_eq!(load(dir.path()).appearance, Appearance::Dark);
     }
 
     #[test]

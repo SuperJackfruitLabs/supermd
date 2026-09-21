@@ -3,7 +3,9 @@
 //! reproduce exactly.
 
 use crate::knowledge::Index;
+use gpui::Hsla;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct GraphNode {
@@ -762,6 +764,48 @@ pub fn with_ghosts(
     }
 }
 
+/// A fingerprint of a built graph: what a cached layout has to agree
+/// with before it can be shown again.
+///
+/// Node count alone is not a description of a vault. Two real cases
+/// slip past it: a link added or removed between notes that both
+/// already exist moves no dots at all, and a delete plus a create
+/// outside the app cancel out — the restored layout then draws
+/// connectivity that is not on disk, or a dot for a note that is gone
+/// and none for the note that arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Shape {
+    pub nodes: usize,
+    pub edges: usize,
+    /// An order-independent fold of the node paths. Order-independent
+    /// because node order is an artefact of the index walk, not of the
+    /// vault: two identical vaults enumerated differently describe the
+    /// same graph and must compare equal. Summed rather than xored —
+    /// xor cancels a repeated path against itself, so a pair of
+    /// duplicates would be indistinguishable from neither being there.
+    pub paths: u64,
+}
+
+/// Fingerprint a built graph. One pass over the nodes and one length:
+/// unmeasurable beside the layout it guards, so nothing caches it.
+pub fn shape(nodes: &[GraphNode], edges: &[Edge]) -> Shape {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut paths: u64 = 0;
+    for node in nodes {
+        // Only ever compared against another fingerprint taken in the
+        // same process, so a hasher with no cross-version guarantee is
+        // fine and nothing is persisted.
+        let mut h = DefaultHasher::new();
+        node.path.hash(&mut h);
+        // A deleted note that something still links to comes back as a
+        // ghost at the same path. Same name, different thing — and the
+        // graph draws it differently — so the flag is part of the key.
+        node.ghost.hash(&mut h);
+        paths = paths.wrapping_add(h.finish());
+    }
+    Shape { nodes: nodes.len(), edges: edges.len(), paths }
+}
+
 /// Which nodes the view is showing.
 ///
 /// A filter never removes nodes from the simulation — the layout would
@@ -909,6 +953,137 @@ pub fn label_opacity(zoom: f32) -> f32 {
         return 1.0;
     }
     (zoom - LABEL_FADE_START) / (LABEL_FULL - LABEL_FADE_START)
+}
+
+/// A node's drawn radius in board pixels. The painter, the hit-tester
+/// and the arrowhead inset all read this one function: a hit-test that
+/// disagrees with the paint by a pixel opens the wrong note.
+pub fn node_radius(degree: usize, zoom: f32) -> f32 {
+    (5.0 + (degree as f32).sqrt() * 3.0) * zoom.sqrt()
+}
+
+/// Below this, an arrowhead is sub-pixel and costs a tessellated path
+/// per edge for nothing. Deliberately the same threshold labels use, so
+/// detail arrives all at once instead of in two unexplained stages.
+pub const ARROWHEAD_MIN_ZOOM: f32 = LABEL_FADE_START;
+
+/// What the renderer draws at a given zoom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lod {
+    pub arrowheads: bool,
+    pub labels: bool,
+}
+
+pub fn lod(zoom: f32) -> Lod {
+    Lod {
+        arrowheads: zoom >= ARROWHEAD_MIN_ZOOM,
+        labels: label_opacity(zoom) > 0.0,
+    }
+}
+
+/// How much of its alpha an unlinked note keeps.
+pub const ORPHAN_ALPHA: f32 = 0.45;
+
+/// An unlinked note recedes rather than disappearing. Multiplying
+/// rather than assigning keeps this composable with the filter's own
+/// fade: an orphan that also fails the filter must not end up brighter
+/// than a linked node that failed it.
+pub fn orphan_dim(color: Hsla, degree: usize) -> Hsla {
+    if degree > 0 {
+        return color;
+    }
+    Hsla { a: color.a * ORPHAN_ALPHA, ..color }
+}
+
+/// Resolves a board position to a node, replacing the per-node gpui
+/// hit-boxes the graph used to build. One element now covers the whole
+/// board, so the pointer has to be matched against the dots by hand.
+///
+/// A linear scan is deliberate: 2,500 float comparisons per mouse-move
+/// is microseconds, while a spatial index is more code and more state
+/// to invalidate for no measurable gain at this size.
+pub struct Picker {
+    /// (x, y, radius) in board pixels, in paint order.
+    dots: Vec<(f32, f32, f32)>,
+}
+
+impl Picker {
+    pub fn build(dots: Vec<(f32, f32, f32)>) -> Self {
+        Self { dots }
+    }
+
+    pub fn len(&self) -> usize {
+        self.dots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dots.is_empty()
+    }
+
+    /// The topmost dot containing the point, or `None`. Back to front,
+    /// because gpui paints later siblings over earlier ones and this
+    /// has to resolve a crowded cluster the same way gpui did.
+    pub fn pick(&self, x: f32, y: f32) -> Option<usize> {
+        self.dots.iter().enumerate().rev().find_map(|(ix, &(dx, dy, r))| {
+            let (ox, oy) = (x - dx, y - dy);
+            (ox * ox + oy * oy <= r * r).then_some(ix)
+        })
+    }
+}
+
+/// How long the pointer must rest on a node before its card appears.
+/// Long enough that sweeping across a cluster fires nothing, short
+/// enough that stopping feels answered.
+///
+/// The same decision as a link's hover preview, so it is the same
+/// constant: two independent 400ms literals are two things to drift.
+/// Only the delay is shared — `Hover` keeps its own `Lit` state, which
+/// `preview::HoverState` has no equivalent of.
+pub const CARD_DWELL: Duration = crate::preview::DWELL;
+
+/// What the pointer is currently doing to a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hovering {
+    /// Nothing under the pointer.
+    Idle,
+    /// Pointed at: this node and its neighbours show their names.
+    Lit(usize),
+    /// Rested on: the card is up as well.
+    Carded(usize),
+}
+
+/// The dwell timer behind the hover card. Time is injected rather than
+/// read, so the delay is testable without a window and without
+/// sleeping -- the arrangement `autosave.rs` uses for its policy.
+#[derive(Debug, Default)]
+pub struct Hover {
+    /// The node under the pointer and when it arrived there.
+    since: Option<(usize, Instant)>,
+}
+
+impl Hover {
+    pub fn at(&mut self, node: Option<usize>, now: Instant) -> Hovering {
+        let Some(ix) = node else {
+            self.since = None;
+            return Hovering::Idle;
+        };
+        match self.since {
+            // Still on the same node: the card is owed once the dwell
+            // has elapsed.
+            Some((prev, since)) if prev == ix => {
+                if now.duration_since(since) >= CARD_DWELL {
+                    Hovering::Carded(ix)
+                } else {
+                    Hovering::Lit(ix)
+                }
+            }
+            // A different node, or the first one: start its own clock.
+            _ => {
+                self.since = Some((ix, now));
+                Hovering::Lit(ix)
+            }
+        }
+    }
 }
 
 /// The bounding box of a layout, as (min_x, min_y, max_x, max_y).
@@ -1222,6 +1397,44 @@ mod tests {
         assert!(mutual.both, "a mutual pair is marked reciprocated");
     }
 
+    /// The fingerprint that decides whether a cached layout may be
+    /// shown again. Node order is an artefact of the index walk, so a
+    /// reordered vault is the same vault; a different link set, a
+    /// different path set, or a note turning into a ghost is not.
+    #[test]
+    fn a_shape_ignores_order_and_nothing_else() {
+        let (_d, index) = fixture();
+        let (nodes, edges) = build(&index);
+        let base = shape(&nodes, &edges);
+        assert_eq!(base.nodes, nodes.len());
+        assert_eq!(base.edges, edges.len());
+
+        let mut shuffled = nodes.clone();
+        shuffled.reverse();
+        assert_eq!(shape(&shuffled, &edges), base, "node order is not the vault");
+
+        let mut fewer = edges.clone();
+        fewer.pop().expect("the fixture links something");
+        assert_ne!(shape(&nodes, &fewer), base, "a link removed is a different graph");
+
+        let mut renamed = nodes.clone();
+        renamed[0].path = PathBuf::from("somewhere/else.md");
+        assert_ne!(shape(&renamed, &edges), base, "a path that moved is noticed");
+
+        // One out, one in: the counts say nothing happened.
+        let mut swapped = nodes.clone();
+        swapped[0].path = PathBuf::from("brand/new.md");
+        assert_ne!(shape(&swapped, &edges), base, "and so is a swap");
+
+        // Summed, not xored: duplicates must not cancel each other.
+        let dup = vec![nodes[0].clone(), nodes[0].clone()];
+        assert_ne!(shape(&dup, &[]).paths, 0, "a repeated path does not vanish");
+
+        let mut ghosted = nodes.clone();
+        ghosted[0].ghost = true;
+        assert_ne!(shape(&ghosted, &edges), base, "a note that became a ghost too");
+    }
+
     /// A pair that links both ways is one edge with two arrowheads, not
     /// two lines drawn over each other.
     #[test]
@@ -1489,6 +1702,159 @@ mod tests {
             assert!(o >= last, "opacity went backwards at zoom {}", i as f32 / 20.0);
             last = o;
         }
+    }
+
+    /// The painter and the hit-tester must agree to the float. This
+    /// expression used to be written twice in `render_graph`, which is
+    /// exactly the arrangement that drifts.
+    #[test]
+    fn radius_grows_with_degree_and_zoom() {
+        let base = node_radius(0, 1.0);
+        assert!((base - 5.0).abs() < 1e-4, "an orphan is the bare dot: {base}");
+        assert!(node_radius(9, 1.0) > node_radius(1, 1.0), "degree widens it");
+        // Zoom scales by its square root, so a graph zoomed 4x has dots
+        // twice the size rather than four times -- the board gets
+        // denser as you zoom out without the dots vanishing.
+        let (near, far) = (node_radius(4, 4.0), node_radius(4, 1.0));
+        assert!((near / far - 2.0).abs() < 1e-3, "{near} vs {far}");
+    }
+
+    /// Arrowheads are one or two extra tessellated paths per edge and
+    /// are sub-pixel below half zoom -- which is the whole-vault view,
+    /// where nothing can be culled because everything is on screen.
+    #[test]
+    fn arrowheads_and_labels_switch_on_with_zoom() {
+        assert!(!lod(0.3).arrowheads, "whole vault: lines only");
+        assert!(!lod(0.3).labels);
+        assert!(lod(0.9).arrowheads, "close in: direction is readable");
+        assert!(lod(0.9).labels);
+        // The boundary is the same one labels already used, so the two
+        // appear together rather than at two unexplained zooms.
+        assert_eq!(ARROWHEAD_MIN_ZOOM, LABEL_FADE_START);
+        assert!(lod(ARROWHEAD_MIN_ZOOM).arrowheads, "inclusive at the edge");
+    }
+
+    /// An unlinked note is still a note: it shows, dimmed, rather than
+    /// being hidden behind a toggle nobody finds. Hue and lightness are
+    /// untouched so a dimmed orphan still reads as its colour group.
+    #[test]
+    fn an_orphan_is_dimmer_but_still_itself() {
+        let c = Hsla { h: 0.5, s: 0.6, l: 0.6, a: 1.0 };
+        let linked = orphan_dim(c, 3);
+        let orphan = orphan_dim(c, 0);
+        assert_eq!(linked, c, "a linked node is untouched");
+        assert!(orphan.a < c.a, "the orphan recedes");
+        assert_eq!((orphan.h, orphan.s, orphan.l), (c.h, c.s, c.l), "only alpha moves");
+        // Dim enough to recede, not so dim it reads as absent.
+        assert!(orphan.a > 0.3, "still visible: {}", orphan.a);
+    }
+
+    /// Dimming multiplies whatever alpha the caller already chose --
+    /// the filter fades non-matching nodes to 0.25, and an orphan that
+    /// also fails the filter must not come back brighter than a linked
+    /// one that failed it.
+    #[test]
+    fn dimming_composes_with_an_already_faded_colour() {
+        let faded = Hsla { h: 0.5, s: 0.6, l: 0.6, a: 0.25 };
+        assert!(orphan_dim(faded, 0).a < faded.a);
+    }
+
+    /// The dot you click is the dot you get. Board pixels in, node
+    /// index out.
+    #[test]
+    fn pick_finds_the_dot_under_the_point() {
+        let p = Picker::build(vec![(10.0, 10.0, 5.0), (100.0, 100.0, 8.0)]);
+        assert_eq!(p.pick(10.0, 10.0), Some(0), "dead centre");
+        assert_eq!(p.pick(13.0, 13.0), Some(0), "inside the radius");
+        assert_eq!(p.pick(100.0, 104.0), Some(1), "the bigger dot");
+        assert_eq!(p.pick(50.0, 50.0), None, "empty board is not a node");
+    }
+
+    /// gpui paints later siblings over earlier ones, so where dots
+    /// overlap the last drawn is the one the pointer was hitting. This
+    /// replaces gpui's own hit-testing and has to agree with it, or
+    /// clicking a crowded cluster opens the wrong note.
+    #[test]
+    fn overlapping_dots_resolve_to_the_topmost() {
+        let p = Picker::build(vec![(10.0, 10.0, 6.0), (12.0, 10.0, 6.0)]);
+        assert_eq!(p.pick(11.0, 10.0), Some(1), "the later dot is on top");
+    }
+
+    /// A miss just outside the edge must not round into a hit: at the
+    /// whole-vault zoom dots are a few pixels across and sit close
+    /// together, so a generous radius would open a neighbour.
+    #[test]
+    fn a_near_miss_is_a_miss() {
+        let p = Picker::build(vec![(0.0, 0.0, 5.0)]);
+        assert_eq!(p.pick(4.9, 0.0), Some(0));
+        assert_eq!(p.pick(5.1, 0.0), None);
+    }
+
+    /// Built from real nodes, the picker's radii are the painter's --
+    /// one rule, so a click cannot drift from the dot it looks at.
+    #[test]
+    fn picker_radii_match_the_painter() {
+        let mut nodes = chain(3);
+        nodes.0[0].x = 0.0;
+        nodes.0[0].y = 0.0;
+        // chain() lays its notes out in the unit square while radii are
+        // board pixels, so the other two dots would swallow the origin.
+        // Park them off the board; this test is about one dot's edge.
+        for n in nodes.0.iter_mut().skip(1) {
+            n.x = 500.0;
+            n.y = 500.0;
+        }
+        let zoom = 2.0;
+        let dots: Vec<(f32, f32, f32)> = nodes
+            .0
+            .iter()
+            .map(|n| (n.x, n.y, node_radius(n.degree, zoom)))
+            .collect();
+        let r = dots[0].2;
+        let p = Picker::build(dots);
+        assert_eq!(p.pick(0.0, r * 0.9), Some(0), "just inside the painted edge");
+        assert_eq!(p.pick(0.0, r * 1.1), None, "just outside it");
+    }
+
+    /// Names appear the instant you point at something; the card waits
+    /// until you have actually stopped. Sweeping the pointer across a
+    /// dense cluster should not fire a dozen cards and a dozen file
+    /// reads behind them.
+    #[test]
+    fn the_card_waits_for_a_dwell_but_the_name_does_not() {
+        let t0 = Instant::now();
+        let mut h = Hover::default();
+        assert_eq!(h.at(Some(4), t0), Hovering::Lit(4), "lit immediately");
+        assert_eq!(h.at(Some(4), t0 + Duration::from_millis(399)), Hovering::Lit(4));
+        assert_eq!(h.at(Some(4), t0 + CARD_DWELL), Hovering::Carded(4), "settled");
+    }
+
+    /// Moving to another node restarts the wait: the card belongs to
+    /// the node you are on, and inheriting the previous node's elapsed
+    /// time would flash a card the moment the pointer crossed one.
+    #[test]
+    fn moving_to_another_node_restarts_the_dwell() {
+        let t0 = Instant::now();
+        let mut h = Hover::default();
+        h.at(Some(1), t0);
+        assert_eq!(h.at(Some(2), t0 + Duration::from_millis(390)), Hovering::Lit(2));
+        assert_eq!(h.at(Some(2), t0 + Duration::from_millis(390) + CARD_DWELL), Hovering::Carded(2));
+    }
+
+    /// Leaving the board clears everything, and the next hover starts
+    /// its own clock rather than resuming the old one.
+    #[test]
+    fn leaving_resets_the_clock() {
+        let t0 = Instant::now();
+        let mut h = Hover::default();
+        h.at(Some(1), t0);
+        assert_eq!(h.at(None, t0 + Duration::from_millis(100)), Hovering::Idle);
+        assert_eq!(h.at(Some(1), t0 + Duration::from_millis(200)), Hovering::Lit(1));
+        assert_eq!(
+            h.at(Some(1), t0 + Duration::from_millis(200) + CARD_DWELL),
+            Hovering::Carded(1),
+            "the clock restarted on re-entry"
+        );
     }
 
     #[test]

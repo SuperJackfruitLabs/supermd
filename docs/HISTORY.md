@@ -32,10 +32,6 @@ The phase-by-phase build record that used to live in WELCOME.md.
 
 ## Release notes
 
-**0.0.16** — Multiple windows (⌘⇧N, and Open Folder in New Window). Each
-window is its own workspace: its own tabs, knowledge index, graph, and
-plugin sandbox root, so two vaults open at once never show each other's
-notes. Plugin authors: `workspace-read` is now per window, and is no
-longer available to `render_inline` (whose results are cached across
-every window) — inline calls from a plugin declaring it fail with a
-named error instead of silently seeing an empty `/workspace`.
+Per-release notes live in [CHANGELOG.md](../CHANGELOG.md) at the root of
+the repository, where the release flow can read them. This page is the
+phase record only.

@@ -13,6 +13,7 @@ use gpui::{
     StyledText, Subscription, Window,
 };
 
+use crate::elevation::Elevated as _;
 use crate::input::TextInput;
 use crate::search::{self, SearchMatch, SEARCH_CAP};
 use crate::theme::theme;
@@ -294,17 +295,26 @@ impl Render for SearchOverlay {
                             .into_any_element()
                     })
                     .collect();
+                // The padding sits OUTSIDE the clip. gpui clips to the
+                // element's square bounds, padding included, so with both on
+                // one element the highlighted hit line -- often the last one
+                // shown -- painted over the overlay's rounded bottom corner.
                 div()
                     .size_full()
-                    .overflow_hidden()
-                    .py_2()
-                    .font_family(t.mono_family.clone())
-                    .text_size(px(11.))
-                    .line_height(gpui::relative(1.45))
-                    .text_color(t.fg_muted)
-                    .flex()
-                    .flex_col()
-                    .children(lines)
+                    .pt_2()
+                    .pb(crate::elevation::corner_inset(crate::elevation::Overlay::Search))
+                    .child(
+                        div()
+                            .size_full()
+                            .overflow_hidden()
+                            .font_family(t.mono_family.clone())
+                            .text_size(px(11.))
+                            .line_height(gpui::relative(1.45))
+                            .text_color(t.fg_muted)
+                            .flex()
+                            .flex_col()
+                            .children(lines),
+                    )
                     .into_any_element()
             }
             None => div()
@@ -428,13 +438,11 @@ impl Render for SearchOverlay {
             .on_action(cx.listener(Self::dismiss))
             .w(px(680.))
             .max_w(gpui::relative(0.9))
-            .h(px(440.))
+            .h(px(448.))
             .flex_none()
-            .bg(t.panel_bg)
             .border_1()
             .border_color(t.border)
-            .rounded_lg()
-            .shadow_lg()
+            .elevated(crate::elevation::Overlay::Search, &t)
             .overflow_hidden()
             .flex()
             .flex_row()

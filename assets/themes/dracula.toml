@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: Dracula by clach04 (https://github.com/clach04)
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/dracula.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "Dracula"
+appearance = "dark"
+
+[colors]
+bg = "#20222c"                # derived
+page_bg = "#282a36"           # base00
+panel_bg = "#1d1e27"          # derived
+floating_bg = "#2c2e3a"       # derived
+hover_bg = "#32343f"          # derived
+selected_bg = "#40424c"       # derived
+border = "#444550"            # derived
+code_bg = "#363843"           # derived
+code_fg = "#f8f8f2"           # base05
+fg = "#f8f8f2"                # base05
+fg_strong = "#ffffff"         # base07
+fg_muted = "#8894b8"          # derived
+accent = "#bd93f9"            # base0D
+link = "#bd93f9"              # base0D
+find_match_bg = "#707811"     # derived
+find_active_bg = "#9ba718"    # derived
+shadow = "#14151b57"          # derived, translucent
+diff_added_bg = "#2f4f42"     # derived
+diff_added_fg = "#50fa7b"     # base0B
+diff_deleted_bg = "#4f323c"   # derived
+diff_deleted_fg = "#ff7d7d"   # derived
+
+[syntax]
+keyword = "#ff79c6"           # base0E
+function = "#bd93f9"          # base0D
+type = "#f1fa8c"              # base0A
+string = "#50fa7b"            # base0B
+comment = "#6272a4"           # base03
+constant = "#ffb86c"          # base09
+property = "#ff5555"          # base08
+operator = "#f8f8f2"          # base05
+tag = "#ff5555"               # base08
+attribute = "#f1fa8c"         # base0A

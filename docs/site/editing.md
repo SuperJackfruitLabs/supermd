@@ -9,15 +9,18 @@ Click inside a **bold phrase** and the `**` markers appear around it; click away
 - Headings show their `#` marks while your cursor is on the line.
 - Links display as their text; touch one and the `[text](url)` form opens for editing. Links between notes — `[[wiki links]]` included — get completion, backlinks, and a graph: see [Links, Tags & Graph](knowledge.md).
 - Blockquotes, lists, and inline code all reveal their markers on contact.
+- A horizontal rule (`---`, `***` or `___`) draws as a line; put your cursor on it and the characters come back.
 
 You always edit real Markdown — SuperMD never rewrites your file behind your back. What lands on disk is exactly the plain CommonMark you typed.
 
 ## Checkboxes, tables, and code
 
-- **Task lists** — click a checkbox to toggle it. `- [ ]` becomes `- [x]`, one undo step.
+- **Task lists** — click a checkbox to toggle it, in the editor or the rendered preview (⌘E). `- [ ]` becomes `- [x]`, one undo step.
 - **Tables** — rendered as proper tables. Click a row and the whole table dissolves into editable pipe syntax; click away and it re-renders.
 - **Code fences** — syntax highlighting for 78+ languages, live as you type. The ``` fence delimiters hide while you're outside the block.
 - **Images** — display inline; click one to edit its `![alt](path)` source.
+- **Frontmatter** — a `---` metadata block at the very top of a note shows as small, quiet text and stays out of the outline. It must close with `---` (or `...`); anywhere else, `---` is a horizontal rule.
+- **HTML** — SuperMD doesn't render raw HTML. An HTML block shows as its literal source in both views, so nothing you paste disappears. `<!-- comments -->` stay hidden in the preview, as in any Markdown renderer.
 
 Diagrams work the same way — see [Diagrams](diagrams.md).
 

@@ -2,18 +2,33 @@ name = "Nord"
 appearance = "dark"
 
 [colors]
-bg = "#2e3440"
+bg = "#272c36"
 fg = "#d8dee9"
 fg_strong = "#eceff4"
-fg_muted = "#616e88"
+# nord3-bright (#616e88) never reached 3:1 against any Nord background;
+# this is the same blue-grey carried far enough up the ramp to be read
+# on all five surfaces muted ink lands on -- the binding one is
+# selected_bg, the top of the Polar Night ladder, where #748199 was
+# 2.49:1. Code comments keep #616e88, which sits on the lighter fence.
+fg_muted = "#8492ad"
 accent = "#bf616a"
 link = "#88c0d0"
 code_bg = "#3b4252"
 code_fg = "#d8dee9"
 border = "#434c5e"
-panel_bg = "#292e39"
-hover_bg = "#3b4252"
-selected_bg = "#434c5e"
+# nord0 is Nord's background, so nord0 is the page. Polar Night has
+# nothing darker, so the desk is nord0 taken down one step -- same hue,
+# no warming. Nord is cold on purpose.
+page_bg = "#2e3440"
+# A blue-black rather than black, so the shadow deepens the ground's
+# hue instead of draining it.
+shadow = "#10141c57"
+# Overlays float above the page, so they are never darker than it.
+# Halfway from nord0 to hover_bg: a step up, and a hovered row still reads.
+floating_bg = "#313744"
+panel_bg = "#22262f"
+hover_bg = "#343a48"
+selected_bg = "#3c4454"
 find_match_bg = "#665c22"
 find_active_bg = "#8a7d33"
 

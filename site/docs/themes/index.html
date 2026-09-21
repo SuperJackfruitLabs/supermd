@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Themes — SuperMD Docs</title>
-<meta name="description" content="⌘ T opens the theme picker. SuperMD follows your system's light/dark setting, with a theme for each: pick your light theme and your dark theme once, and the app switches with your OS.">
+<meta name="description" content="⌘ T opens the theme picker. It holds two things: a Light / Dark / System control at the top, and every installed theme below it, each row marked Light or Dark.">
 <link rel="canonical" href="https://supermd.app/docs/themes/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23c9821c'/%3E%3Cpath d='M25 72V32l14 22 11-17 11 17 14-22v40' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
@@ -149,6 +149,7 @@
 <li><a href="/docs/diagrams/">Diagrams</a></li>
 <li><a href="/docs/workspace/">Working with a Folder</a></li>
 <li><a href="/docs/knowledge/">Links, Tags & Graph</a></li>
+<li><a href="/docs/graph/">The Graph</a></li>
 <li class="current"><a href="/docs/themes/">Themes</a></li>
 </ul>
 <h4>Extending SuperMD</h4>
@@ -162,8 +163,18 @@
 </aside>
 <main class="doc">
 <h1>Themes</h1>
-<p><strong>⌘ T</strong> opens the theme picker. SuperMD follows your system's light/dark setting, with a theme for each: pick your light theme and your dark theme once, and the app switches with your OS.</p>
-<p>Eight themes ship built in: <strong>Jackfruit Light</strong> and <strong>Jackfruit Dark</strong> (the defaults), <strong>Paper</strong>, <strong>Graphite</strong>, <strong>Nord</strong>, <strong>Gruvbox Dark</strong>, and <strong>Solarized</strong> in both light and dark. Diagrams, code highlighting, and the whole interface follow the active theme.</p>
+<p><strong>⌘ T</strong> opens the theme picker. It holds two things: a <strong>Light / Dark / System</strong> control at the top, and every installed theme below it, each row marked Light or Dark.</p>
+<p>SuperMD keeps one light theme and one dark theme, and the control at the top decides which of the two is in force. On <strong>System</strong> — the default — it follows your OS, so the app switches when your Mac or PC does. <strong>Light</strong> and <strong>Dark</strong> pin it, and a pinned choice outranks both the system setting and <a href="#flux-themes-that-follow-the-sun">flux</a>'s night switch: set Light and the app stays light at midnight.</p>
+<p>Choosing an appearance applies at once, and survives closing the dialog with Escape. Picking a <em>theme</em> previews as you move through the list, and Enter keeps it — the theme you watched is the theme you get.</p>
+<p>That last part needs one rule, because the list holds both kinds. Confirm a theme whose appearance <strong>matches</strong> the one in force and only its slot is written: if you were on System you stay on System, and the OS and flux keep switching you as before. Confirm a theme of the <strong>other</strong> appearance — a light theme while it is dark out — and the control moves to match it, because that is what the preview showed you. Doing that takes you off System, so the OS and flux stop switching until you set it back to System yourself. Escape before Enter puts the theme back and changes nothing.</p>
+<p>The choice is written to <code>~/.supermd/settings.toml</code>, and you can set it there directly:</p>
+<pre><code class="language-toml">appearance = "system"   # or "light" / "dark"
+light_theme = "Jackfruit Light"
+dark_theme = "Jackfruit Dark"
+</code></pre>
+<p>Twenty-eight themes ship built in — nine light, nineteen dark. Diagrams, code highlighting, and the whole interface follow the active theme.</p>
+<p>Eight are written by hand: <strong>Jackfruit Light</strong> and <strong>Jackfruit Dark</strong> (the defaults), <strong>Paper</strong>, <strong>Graphite</strong>, <strong>Nord</strong>, <strong>Gruvbox Dark</strong>, and <strong>Solarized</strong> in both light and dark.</p>
+<p>The other twenty are converted from <a href="#where-the-other-twenty-come-from">base16</a> palettes: the four <strong>Catppuccin</strong> flavours, <strong>Rosé Pine</strong> with Moon and Dawn, <strong>Tokyo Night</strong> in Dark, Storm and Light, <strong>Dracula</strong>, <strong>Everforest</strong>, <strong>Kanagawa</strong>, <strong>OneDark</strong>, <strong>One Light</strong>, <strong>Monokai</strong>, <strong>Ayu Light</strong> and <strong>Ayu Dark</strong>, <strong>Github</strong> and <strong>Zenburn</strong>.</p>
 <h2>Flux: themes that follow the sun</h2>
 <p>Like f.lux, but for your editor's own palette: as evening falls, SuperMD can fade to your dark theme and gently warm every color toward candle-light — then fade back at dawn. Enable it from the command palette (<strong>⌘ ⇧ P</strong> → <em>Flux: Enable Adaptive Theme</em>) or in <code>~/.supermd/settings.toml</code>:</p>
 <pre><code class="language-toml">[flux]
@@ -176,6 +187,15 @@ night_kelvin = 3400     # how warm the night gets (6500 = no shift)
 transition_minutes = 40 # fade length around sunrise and sunset
 </code></pre>
 <p>With coordinates set, sunrise and sunset are computed <strong>offline</strong> with the NOAA solar equations — no location permission, no network, nothing leaves your machine. Without them, a fixed 7:00–19:00 day window applies (as it does under a polar sun). Both halves are independent: keep <code>auto_dark</code> and drop <code>warm_shift</code> for a hard theme schedule, or the reverse to stay on your system theme but lose the blue light at night.</p>
+<h2>Where the other twenty come from</h2>
+<p><a href="https://github.com/tinted-theming/schemes"><code>tinted-theming/schemes</code></a> publishes 340 colour schemes in one machine-readable format — sixteen slots, <code>base00</code>–<code>base07</code> running background to foreground and <code>base08</code>–<code>base0F</code> holding the accents, with a <code>variant</code> saying light or dark. Twenty of them ship with SuperMD, converted rather than copied: one tested mapping turns a palette into the tokens below, so every theme gets the same surface ladder, the same readable secondary text, and the same shadow behaviour instead of twenty separate opinions.</p>
+<p>The scheme files are vendored under <code>assets/base16/</code>, unmodified, with upstream's MIT <code>LICENSE</code> and a note recording the commit they were taken at — so the build is reproducible offline and the attribution is honest. Each theme file says at the top which scheme it came from, who wrote it, and, colour by colour, which base16 slot supplied it or whether the converter derived it.</p>
+<p>Regenerating, after changing the mapping or refreshing the vendored schemes:</p>
+<pre><code class="language-sh">cargo run --example import_base16
+</code></pre>
+<p>It rewrites <code>assets/themes/*.toml</code>, which are committed; a test fails if a committed file has drifted from its scheme. Nothing converts at runtime.</p>
+<p>Faithfulness has one limit, and it is measured rather than waved at: every theme must clear SuperMD's contrast floors — body text on all six surfaces it is painted on, secondary text on those six plus the code fence, diff ink on its own wash, and every background token against what it sits on. A palette that cannot is not quietly repaired and the floor is not lowered for it; it ships with a recorded exception carrying its measured number. Of the twenty, exactly one needed one: Ayu Light's own foreground on its own selection colour is 4.22:1 where 4.5:1 is the floor.</p>
+<p>The four hand-written themes have base16 equivalents too, and they are not replaced by them — they are what the converter is <em>tested against</em>. Where the mapping cannot reproduce a choice a human made, that difference is the mapping telling on itself.</p>
 <h2>Custom themes</h2>
 <p>A theme is a single TOML file dropped into your themes folder:</p>
 <ul>
@@ -188,18 +208,22 @@ transition_minutes = 40 # fade length around sunrise and sunset
 appearance = "dark"   # or "light" — decides which system mode it offers in
 
 [colors]
-bg = "#2e3440"          # page background
+bg = "#272c36"          # the desk the page rests on
+page_bg = "#2e3440"     # the document itself — where the reading happens
 fg = "#d8dee9"          # body text
 fg_strong = "#eceff4"   # headings, emphasis
-fg_muted = "#616e88"    # secondary text
+fg_muted = "#8492ad"    # secondary text
 accent = "#bf616a"      # highlights, links in chrome
 link = "#88c0d0"        # links in documents
 code_bg = "#3b4252"     # code block background
 code_fg = "#d8dee9"     # code text
 border = "#434c5e"
-panel_bg = "#292e39"    # sidebar, overlays
-hover_bg = "#3b4252"
-selected_bg = "#434c5e"
+border_subtle = "#434c5e8c"  # hairlines — table rules and the like
+shadow = "#10141c57"    # the page's drop shadow: tint + strength
+floating_bg = "#313744" # the finder, palette, menus and dialogs
+panel_bg = "#22262f"    # table headers, the knowledge panel, banners
+hover_bg = "#343a48"
+selected_bg = "#3c4454"
 find_match_bg = "#665c22"
 find_active_bg = "#8a7d33"
 
@@ -211,10 +235,24 @@ string = "#a3be8c"
 comment = "#616e88"
 constant = "#b48ead"
 </code></pre>
-<p>Optionally, <code>diff_added_bg</code>, <code>diff_added_fg</code>, <code>diff_deleted_bg</code>, and <code>diff_deleted_fg</code> under <code>[colors]</code> tune the git diff view; sensible defaults are used otherwise.</p>
+<p>Optionally, <code>diff_added_bg</code>, <code>diff_added_fg</code>, <code>diff_deleted_bg</code>, and <code>diff_deleted_fg</code> under <code>[colors]</code> tune the git diff view; sensible defaults are used otherwise. Set them as a pair: the <code>_fg</code> is written <em>on</em> its own <code>_bg</code> — in Show Changes, in the strip that reports a refused command, and on a diagram that failed to draw — so a saturated accent on a pale wash of itself is the one mistake to avoid here.</p>
+<h3>The page and the desk</h3>
+<p>The document sits on its own surface. <code>page_bg</code> is that surface — the one a reader actually looks at — and <code>bg</code> is the desk behind and beneath it, which the sidebar, tab strip, outline and status bar share. If your theme predates this split, or you simply leave the four newer keys out, they are derived from the colors you did give: <code>page_bg</code> steps one notch away from <code>bg</code>, <code>border_subtle</code> is <code>border</code> at reduced alpha, <code>shadow</code> is picked to suit your <code>appearance</code>, and <code>floating_bg</code> is worked out as described below. Your theme keeps working; setting them by hand is how you take control of the relationship.</p>
+<p>Two things are worth checking by eye once you set <code>page_bg</code> yourself, because both are drawn <em>on the page</em> rather than on the desk:</p>
+<ul>
+<li><strong><code>code_bg</code></strong> — a fence tuned against the old single background can vanish against a brighter page.</li>
+<li><strong><code>panel_bg</code> and <code>hover_bg</code></strong> — a table's header row is <code>panel_bg</code> and a hovered table row is <code>hover_bg</code>, both painted on the page. If either matches <code>page_bg</code>, that feedback disappears. <code>hover_bg</code> also highlights an inactive tab, and the active tab carries <code>page_bg</code>, so a collision there makes every hovered tab look active.</li>
+</ul>
+<h3>Things that float</h3>
+<p><code>floating_bg</code> is the surface of everything that floats above the page: the finder, the command palette, workspace search, the theme picker, menus, link previews, the selection toolbar, and dialogs. The rule it follows is simple — <strong>a surface that floats above the page is never darker than the page</strong>. A shadow can only darken what is beside a surface, so an overlay darker than the page under it reads as a hole with a recess wall rather than as a card lifted off it.</p>
+<p>In a dark theme that means a step lighter than <code>page_bg</code>. Left out, it is derived halfway between <code>page_bg</code> and <code>hover_bg</code>, which keeps it a visible step up while a hovered or selected row painted on it still stands out. If you set it yourself, keep it below <code>hover_bg</code> for the same reason. In a light theme the page is usually at or near white, with no brighter step to take, so the derived <code>floating_bg</code> is <code>page_bg</code> itself and the shadow does the separating. It should be opaque: an overlay is drawn over whatever is beneath it.</p>
+<p>And one that catches nearly every theme by surprise: <strong><code>fg_muted</code> is painted on seven backgrounds</strong> — the six body text uses (the desk, the page, <code>panel_bg</code>, <code>floating_bg</code>, <code>hover_bg</code> and <code>selected_bg</code>) and the code fence on top of them, where it draws a comment. The sidebar's chevrons and folder icons are muted on whatever the row is painted with, and the finder's directory hints, the palette's plugin names, the search results' line numbers and the <code>[[</code> completion popup's path hints are all muted text on a <em>selected</em> row. <code>selected_bg</code> is the far end of that ramp, so it is the one that decides: a <code>fg_muted</code> picked to look right on the page will usually be a step too faint there.</p>
+<h3>Colors with alpha</h3>
+<p>A color is <code>#rrggbb</code>, or <code>#rrggbbaa</code> when it needs to be translucent — the last pair of digits is the alpha, <code>00</code> transparent through <code>ff</code> opaque.</p>
+<p><code>shadow</code> really wants the second form. It is a tint <em>and</em> a strength: SuperMD scales that alpha across the shadow's layers, so a six-digit <code>shadow = "#000000"</code> means fully opaque black and would paint a hard band around the page instead of a falloff. Write <code>#00000057</code> — black at about a third — or pick a near-black in your theme's own hue so the shadow deepens the desk rather than draining it. Anything stronger than 50% alpha is capped at load, so a mistake here dims rather than disfigures.</p>
 <p>Restart SuperMD and your theme appears in the picker alongside the built-ins. A theme file that doesn't parse is skipped with a message in the terminal — it never breaks the app.</p>
 
-<div class="pager"><a class="prev-link" href="/docs/knowledge/">&larr; Links, Tags & Graph</a><span class="pager-gap"></span><a class="next-link" href="/docs/plugins/">Plugins &rarr;</a></div>
+<div class="pager"><a class="prev-link" href="/docs/graph/">&larr; The Graph</a><span class="pager-gap"></span><a class="next-link" href="/docs/plugins/">Plugins &rarr;</a></div>
 </main>
 </div>
 <footer>© 2026 SuperJackfruitLabs · Apache-2.0</footer>

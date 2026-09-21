@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::catalog::CatalogEntry;
+use crate::elevation::Elevated as _;
 use crate::theme::theme;
 
 actions!(install_ui, [InstallUp, InstallDown, InstallConfirm, InstallDismiss]);
@@ -203,11 +204,9 @@ impl Render for InstallOverlay {
             .max_w(gpui::relative(0.9))
             .h(px(440.))
             .flex_none()
-            .bg(t.panel_bg)
             .border_1()
             .border_color(t.border)
-            .rounded_lg()
-            .shadow_lg()
+            .elevated(crate::elevation::Overlay::InstallFlow, &t)
             .overflow_hidden()
             .flex()
             .flex_col()

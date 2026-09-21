@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: Zenburn by elnawe
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/zenburn.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "Zenburn"
+appearance = "dark"
+
+[colors]
+bg = "#2f2f2f"                # derived
+page_bg = "#383838"           # base00
+panel_bg = "#2b2b2b"          # derived
+floating_bg = "#3c3c3c"       # derived
+hover_bg = "#424242"          # derived
+selected_bg = "#4f4f4f"       # derived
+border = "#535353"            # derived
+code_bg = "#454545"           # derived
+code_fg = "#dcdccc"           # base05
+fg = "#dcdccc"                # base05
+fg_strong = "#ffffff"         # base07
+fg_muted = "#a0a099"          # derived
+accent = "#7cb8bb"            # base0D
+link = "#7cb8bb"              # base0D
+find_match_bg = "#756126"     # derived
+find_active_bg = "#9e8233"    # derived
+shadow = "#1c1c1c57"          # derived, translucent
+diff_added_bg = "#3f453f"     # derived
+diff_added_fg = "#a7b9a7"     # derived
+diff_deleted_bg = "#564b4b"   # derived
+diff_deleted_fg = "#e5b8b8"   # derived
+
+[syntax]
+keyword = "#dc8cc3"           # base0E
+function = "#7cb8bb"          # base0D
+type = "#e0cf9f"              # base0A
+string = "#5f7f5f"            # base0B
+comment = "#747474"           # derived
+constant = "#dfaf8f"          # base09
+property = "#dca3a3"          # base08
+operator = "#dcdccc"          # base05
+tag = "#dca3a3"               # base08
+attribute = "#e0cf9f"         # base0A

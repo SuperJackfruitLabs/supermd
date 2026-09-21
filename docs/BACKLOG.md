@@ -4,7 +4,7 @@ Everything consciously deferred, cut from a spec's scope, or discussed and
 parked — with why, so future planning starts from decisions instead of
 archaeology. Living document: prune what ships, add what gets cut.
 
-_Last groomed: 2026-08-31, after the Mac App Store pass._
+_Last groomed: 2026-09-21, after the graph-view render pass._
 
 ## Knowledge features (deferred from M1–M4)
 
@@ -17,9 +17,55 @@ _Last groomed: 2026-08-31, after the Mac App Store pass._
 | Unlinked mentions | Backlinks panel shows explicit links only; Obsidian-style "this note's name appears un-linked in 4 files" is a separate index pass |
 | Embeds / transclusion | `![[note]]` rendering a note inline — needs a block-projection surface decision |
 | Note aliases / frontmatter | YAML frontmatter is currently plain text; aliases would feed resolution and completion |
-| Graph: tag nodes & ghosts | Tags and unresolved targets as first-class graph nodes; color clusters by folder/tag |
-| Graph: live physics | Layout is computed once at open (150 iterations); a running simulation with drag-a-node would feel alive |
+| Graph: tag nodes | Unresolved targets are graph nodes now (drawn hollow) and colour clusters by folder or tag; **tags themselves** as nodes you can link through is the part still outstanding |
 | Index scaling | Full synchronous scan at workspace-open and per-event re-read; fine to ~thousands of notes, wants a background/incremental pass for huge vaults |
+
+## Graph view (deferred from the 2026-09-21 render pass)
+
+### `graph.rs` carries two subjects and wants splitting at the seam
+
+The file is ~2,000 lines: the force simulation on one side, the
+view-model rules on the other — radius, level of detail, dimming, the
+picker, the dwell timer, the fit maths — and the tests for both. The
+split was deliberately deferred so the render pass stayed reviewable as
+one change rather than arriving mixed with a file move.
+
+The seam is already visible in the file: `Simulation` and `layout` know
+nothing about zoom, and everything below `node_radius` knows nothing
+about forces. A `graph/sim.rs` and a `graph/view.rs` would fall out
+along that line with no logic moved, which is exactly why it can wait —
+and exactly why it should not wait indefinitely.
+
+### The simulation still steps on the UI thread
+
+`graph_tick` steps the layout inside `this.update`, on the foreground,
+once every 16ms while the graph has motion in it. The render pass made
+the frame much cheaper — the board is one canvas now instead of an
+element per node — so on the vaults measured the step is no longer what
+you feel.
+
+If measurement ever shows step time dominating a frame again, the next
+move is the background executor with a positions snapshot: step off
+thread, hand the render a plain `Vec<(f32, f32)>`, and keep pins and
+drags as messages into the simulation rather than mutations of it. Not
+done now because it trades a measurable win for real complexity —
+pointer interaction has to stay correct against a layout that is one
+frame behind — and the measurement does not currently ask for it.
+
+### The arrowhead detector cannot see the painter
+
+`arrowheads_drawn` is derived from the `head_to`/`head_from` flags baked
+into `edge_px`, not from what `paint_path` was actually called with. So
+it catches the level-of-detail gate disappearing — the thing that was
+regressed and fixed — but it would stay green if the paint closure
+started ignoring the gate's output: delete the `if *head_to` guards
+inside the closure and the test still passes.
+
+Pinning it properly needs a paint-recording harness that GPUI does not
+offer today: something that captures the primitives a frame actually
+submitted so a test can count them. Left as is because the failure mode
+is bounded — a silent performance regression at low zoom, never a wrong
+picture — and a fake harness would cost more confidence than it bought.
 
 ## Writing ergonomics (deferred from the v0.0.11 batch)
 
@@ -43,6 +89,22 @@ _Last groomed: 2026-08-31, after the Mac App Store pass._
 | Computed tables | Spreadsheet-style formulas in markdown tables |
 | Third-party registry | Catalog is org-pinned by design; a community registry plus a plugin starter-repo extraction of `plugins/template/` |
 
+### The emoji plugin reads a table alignment row as a shortcode
+
+Opening `examples/vault/Guide/Tables.md` logs `supermd: inline render
+failed (emoji): unknown shortcode :-----:` and raises a red error strip
+over the status bar. The delimiter row of an aligned table (`:---:`,
+`:-----:`) is valid CommonMark, and the emoji plugin's inline pass reads
+the colons as shortcode delimiters.
+
+So the shipped example vault greets a first-time user with an error on
+one of the six guide pages. Found by right-clicking a table in the
+running app while verifying #35.
+
+Two candidate fixes: have the emoji plugin refuse a shortcode that is
+all hyphens, or suppress inline replacement inside a table delimiter row
+the way `spans.rs` already suppresses it inside frontmatter and code.
+
 ## Themes / flux
 
 | Item | Notes |
@@ -50,6 +112,116 @@ _Last groomed: 2026-08-31, after the Mac App Store pass._
 | Wake-time preference | f.lux's "keep night mode until my morning" — stay warm past midnight |
 | System location (opt-in) | Manual coordinates only today, by design; CoreLocation could be an explicit opt-in later |
 | Per-theme flux pairing | One global light/dark pair today; themes could declare their own day/night partners |
+
+### One row builder, so contrast can be enumerated instead of grepped
+
+Tuning the themes for the page surface turned up the same defect four
+times in a row, and each time it was found by a reviewer rather than by
+a test: a colour token painted on a background nobody had measured it
+against. `code_bg` on the page; `hover_bg` and `panel_bg` on the page;
+`fg_muted` on `hover_bg` and `selected_bg`; `fg` on `selected_bg`. The
+contrast tests now assert a **hand-maintained list of (ink, surface)
+pairs**. Nothing makes that list complete, and nothing fails when a new
+render site paints an existing token on a new surface — which is how the
+list grew from one pair to sixteen, one review at a time.
+
+Every violation so far has had one shape: **a selectable list row with a
+muted-or-body-ink child.** The sidebar, the tab strip, the finder, the
+palette, the search overlay, the install list and the `[[` completion
+popup each hand-roll their own `.when(is_selected, |d| d.bg(...))` plus
+a `.hover(|s| s.bg(t.hover_bg))`, and each then paints `fg` and
+`fg_muted` children onto whichever of those it chose. `RowState`,
+`RowStyle` and `sidebar_row_style` in `workspace.rs` are the bones of the
+shared abstraction — one of the seven uses them.
+
+The work: put all seven row builders behind one helper that owns the
+`resting / hovered / keyboard-selected / active` background choice and
+the ink slots that ride on it, then have the contrast test walk *that*
+one place to enumerate the pairs rather than carrying a list someone has
+to remember to extend. That closes the observed failure shape at a
+fraction of the cost of the general fix.
+
+The general fix — surface-typed colour handles, so painting ink on a
+surface is one typed operation rather than two independent `.bg()` and
+`.text_color()` calls — stays the fallback, and is only worth its cost
+if a violation ever shows up somewhere that is *not* a selectable row.
+
+### The theme picker previews without flux, and commits with it
+
+`theme_picker_apply` previews by setting `ActiveTheme` directly, while
+`theme_picker_confirm` goes through `ThemeState::resolve()`, which
+applies flux's kelvin warming. With flux on at night, the theme you
+arrow onto and the theme you get on Enter differ by the warm shift — the
+preview is the cold theme, the result is the warmed one.
+
+Invisible with flux off, which is the default, and invisible in daylight
+even with it on. It surfaced while narrowing a different picker defect
+(confirming a theme used to pin the appearance outright, which disabled
+flux's night switch) and was deliberately left outside that fix's scope.
+
+The fix is to preview through the same `resolve()` path the commit uses
+rather than reaching for `ActiveTheme` directly — the same "one
+function, two callers" shape 0.0.17 applied to `is_whole_line`,
+`resolve_image` and the table style.
+
+## Editor performance
+
+### `fence_window` still scans the document prefix, and that is the cheaper trade
+
+`fence_window` (`src/editor/lists.rs`) bounds the fence scan that
+Enter-continuation and renumber run before they touch an ordered list.
+It finds the first line in the whole document that *could* be a fence
+delimiter and starts the window there, so a note whose first fence sits
+above the list re-parses from that fence on every Enter — close to the
+whole-document cost #45 set out to remove. The ticket's stated case,
+prose then a list, is fixed, and the window never regresses past pre-fix
+behaviour; this is the remaining tail.
+
+Parked, not deferred for want of time: tightening it means reimplementing
+fence parity outside `blocks.rs`, which owns fences in this codebase. The
+win is narrower than the cost of two places deciding what a fence is —
+the one piece of logic the architecture says must live in one place.
+Worth revisiting only if fence parity ever becomes shareable, at which
+point this falls out of that work rather than justifying it.
+
+Worth recording that the windowing is strictly better than what it
+replaced in one respect nobody was aiming at: on a document past
+`MAX_STYLED_BYTES` (>1 MB) `blocks()` bails, so renumber used to rewrite
+numbers *inside* fences up there. The window keeps fence detection alive
+above that ceiling.
+
+### The `mas` suite fails in parallel and passes serially
+
+`workspace::tests::confirming_a_theme_that_already_matches_leaves_the_appearance_alone`
+fails under `cargo test --bin supermd --no-default-features --features mas`
+with `cannot save settings: No such file or directory`, and the
+assertion that nothing was pinned on disk. Measured on 2026-09-21 at
+`2798b06` and again at `da2f094`:
+
+| run | result |
+| --- | --- |
+| `--features mas`, default parallelism | 1122 passed, **1 failed** |
+| `--features mas`, `--test-threads=1` | **1123 passed, 0 failed**, no save errors |
+| default features, either way | passes |
+| the test alone | passes |
+
+So it is a test-isolation race, not a defect in the App Store build: the
+`mas` feature gates only `install`, `update` and `bookmarks`, and touches
+nothing on the settings path. `settings::save` already does
+`create_dir_all`, and `platform::home_dir` reads `$HOME` fresh with no
+caching — so the ENOENT means the directory went away between the
+`create_dir_all` and the write.
+
+The shape to look for: `temp_home()` sets `$HOME` process-wide and holds
+`HOME_LOCK` for the test's lifetime, but a test that writes settings
+*without* taking that lock reads whatever `$HOME` happens to be at that
+instant — which may be another test's temp directory, about to be
+deleted. The `mas` build compiles a different set of tests, which is why
+changing the feature flag changes whether the race is hit.
+
+The fix is to make every test that reaches `persist_setting` or
+`record_recent` hold `HOME_LOCK`, most simply by taking `temp_home()`.
+There are ~25 call sites to audit.
 
 ## Distribution & platform
 

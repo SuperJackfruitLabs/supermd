@@ -88,6 +88,11 @@ fn runs_for(inline: &InlineText, base: BaseStyle, t: &Theme) -> Vec<TextRun> {
 /// Called when a link is clicked in the rendered view.
 pub type Follow = std::rc::Rc<dyn Fn(&str, &mut gpui::Window, &mut gpui::App)>;
 
+/// Called with a task's number (`ListItem::task`) when its checkbox is
+/// clicked in the rendered view. `None` where the rendered text is not
+/// a file that could take the edit, and the checkbox stays decoration.
+pub type ToggleTask = std::rc::Rc<dyn Fn(usize, &mut gpui::Window, &mut gpui::App)>;
+
 /// Builds a hover preview for a link destination in the rendered view.
 /// Returns None when there is nothing worth showing.
 pub type Describe =
@@ -362,8 +367,7 @@ fn quote(
     t: &Theme,
     cx: &mut gpui::App,
     path: &str,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
+    links: Links,
 ) -> AnyElement {
     div()
         .flex()
@@ -382,7 +386,7 @@ fn quote(
                     blocks
                         .iter()
                         .enumerate()
-                        .map(|(i, b)| block(b, t, cx, &format!("{path}q{i}"), follow, describe))
+                        .map(|(i, b)| block(b, t, cx, &format!("{path}q{i}"), links))
                         .collect::<Vec<_>>(),
                 ),
         )
@@ -395,16 +399,32 @@ fn list(
     t: &Theme,
     cx: &mut gpui::App,
     path: &str,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
+    links: Links,
 ) -> AnyElement {
     let rows = items.iter().enumerate().map(|(index, item)| {
         let marker: AnyElement = match (item.checked, start) {
-            (Some(done), _) => div()
-                .text_size(px(t.body_size))
-                .text_color(if done { t.accent } else { t.fg_muted })
-                .child(if done { "✓" } else { "○" })
-                .into_any_element(),
+            (Some(done), _) => {
+                let glyph = div()
+                    .text_size(px(t.body_size))
+                    .text_color(if done { t.accent } else { t.fg_muted })
+                    .child(if done { "✓" } else { "○" });
+                // The same glyph the editor toggles on click. The task's
+                // document-wide number is its id and its payload, so the
+                // element stays unique across nested lists and the edit
+                // lands on the box that was drawn.
+                match (links.toggle, item.task) {
+                    (Some(toggle), Some(task)) => {
+                        let toggle = toggle.clone();
+                        glyph
+                            .id(gpui::ElementId::Name(format!("task-{task}").into()))
+                            .debug_selector(move || format!("task-{task}"))
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| toggle(task, window, cx))
+                            .into_any_element()
+                    }
+                    _ => glyph.into_any_element(),
+                }
+            }
             (None, Some(first)) => div()
                 .text_size(px(t.body_size))
                 .text_color(t.fg_muted)
@@ -439,7 +459,7 @@ fn list(
                         item.blocks
                             .iter()
                             .enumerate()
-                            .map(|(i, b)| block(b, t, cx, &format!("{path}l{index}b{i}"), follow, describe))
+                            .map(|(i, b)| block(b, t, cx, &format!("{path}l{index}b{i}"), links))
                             .collect::<Vec<_>>(),
                     ),
             )
@@ -448,16 +468,57 @@ fn list(
     div().flex().flex_col().gap_1().children(rows).into_any_element()
 }
 
+/// How a table is drawn. Outer and header rules keep weight, rows get a
+/// hairline, and interior verticals are gone -- they are what made a
+/// table read as a spreadsheet rather than part of the document. One
+/// pure rule shared by the reading view (`table`, below) and the
+/// editor's table widget (`editor::render_table`) so the two cannot
+/// drift apart.
+///
+/// It was `TableBorders` and carried the rules only, which is exactly
+/// how far the two renderers stayed together: they drew the same lines
+/// around a header painted `panel_bg` in the editor and `code_bg` in the
+/// reading view. In a theme where those differ on purpose, the same
+/// construct had two surfaces depending on which view you were in, and
+/// nothing failed because the contrast harness happened to measure both
+/// pairs. The header's fill is part of how a table is drawn, so it lives
+/// in here with the rules -- `panel_bg`, which is what `theme.rs`'s
+/// background matrix and the theme docs both already called the table
+/// header.
+pub struct TableStyle {
+    pub outer: Hsla,
+    pub header: Hsla,
+    pub header_bg: Hsla,
+    pub row: Hsla,
+    // Always `None` -- there is no interior vertical rule to paint, so
+    // neither renderer reads this outside the test that pins it. Kept
+    // as a field rather than dropped so the struct states the absence
+    // explicitly instead of by omission.
+    #[allow(dead_code)]
+    pub column: Option<Hsla>,
+}
+
+pub fn table_style(t: &Theme) -> TableStyle {
+    TableStyle {
+        outer: t.border,
+        header: t.border,
+        header_bg: t.panel_bg,
+        row: t.border_subtle,
+        column: None,
+    }
+}
+
 fn table(
     head: &[InlineText],
     rows: &[Vec<InlineText>],
     t: &Theme,
     path: &str,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
+    links: Links,
 ) -> AnyElement {
+    let Links { follow, describe, .. } = links;
     let cell_base = BaseStyle { weight: FontWeight::NORMAL, color: t.fg };
     let head_base = BaseStyle { weight: FontWeight::SEMIBOLD, color: t.fg_strong };
+    let style = table_style(t);
 
     // Cells get the same link handling as prose. They were rendered
     // with `inline_text`, so a link in a table was coloured and
@@ -490,36 +551,155 @@ fn table(
     div()
         .rounded_lg()
         .border_1()
-        .border_color(t.border)
+        .border_color(style.outer)
         .flex()
         .flex_col()
-        .child(render_row(head, head_base, t, "h").bg(t.code_bg).rounded_t_lg())
+        .child(
+            render_row(head, head_base, t, "h")
+                .bg(style.header_bg)
+                .rounded_t_lg()
+                .border_b_1()
+                .border_color(style.header),
+        )
         .children(
             rows.iter()
                 .enumerate()
                 .map(|(i, row)| {
                     render_row(row, cell_base, t, &i.to_string())
-                        .border_t_1()
-                        .border_color(t.border)
+                        .when(i > 0, |d| d.border_t_1().border_color(style.row))
                 }),
         )
         .into_any_element()
 }
 
+/// How a thematic break is drawn: thickness in px and colour. One rule
+/// shared by the reading view (`rule`, below) and the editor, which
+/// draws the same divider over a hidden `---` line, so the two views
+/// cannot drift apart.
+pub fn rule_style(t: &Theme) -> (f32, Hsla) {
+    (1., t.border)
+}
+
 fn rule(t: &Theme) -> AnyElement {
-    div().my_2().h(px(1.)).w_full().bg(t.border).into_any_element()
+    let (thickness, color) = rule_style(t);
+    div().my_2().h(px(thickness)).w_full().bg(color).into_any_element()
+}
+
+/// A whole-line image, drawn as the picture it is.
+///
+/// The reading view used to answer `🖼 ` and the alt text here while
+/// the editor drew the image: the same document, two answers (#57).
+/// The destination resolves through `markdown::resolve_image`, the one
+/// the editor calls, so a path that works in one view works in both.
+///
+/// The width is the page measure -- `list_item` hands every block a
+/// column, and the picture belongs inside it, not inside the window.
+/// The corner radius sits on the `img` itself: gpui's `ContentMask` is
+/// bounds with no radii, so a child's fill paints straight through a
+/// parent's corner arcs, and only the element that actually paints can
+/// round itself.
+fn image_block(alt: &str, dest: &str, t: &Theme, base: Option<&std::path::Path>) -> AnyElement {
+    let radius = crate::elevation::radius(crate::elevation::Surface::Page);
+    let source = crate::markdown::resolve_image(dest, base);
+    let image = match source {
+        crate::markdown::ImageSource::Remote(url) => gpui::img(url),
+        crate::markdown::ImageSource::Local(path) => gpui::img(path),
+        // A broken link has to look deliberate. Drawing nothing reads
+        // as a broken app rather than a broken link, so this says the
+        // same thing the editor says, in the same words.
+        crate::markdown::ImageSource::Missing(_) => {
+            return div()
+                .my_2()
+                .font_family(t.mono_family.clone())
+                .text_size(px(t.code_size))
+                .text_color(Hsla { a: 0.8, ..t.accent })
+                .child(SharedString::from(format!("![{alt}]({dest}) — file not found")))
+                .into_any_element();
+        }
+    };
+    div()
+        .my_2()
+        .w_full()
+        .child(image.w_full().max_h(px(420.)).rounded(radius))
+        .into_any_element()
+}
+
+/// How a literal block looks -- source shown as written, on the code
+/// surface with a hairline outline. Two kinds use it:
+///
+/// - frontmatter (`frontmatter_style`): quiet, readable, obviously not
+///   prose -- small mono in muted ink. The editor's frontmatter lines
+///   take the ink, family and size from here too, so the two views
+///   cannot drift. The editor paints no surface or outline: its lines
+///   sit on the page like every other source line.
+/// - HTML blocks (`html_style`): not rendered, never erased -- mono in
+///   code ink at code size, the same as a fence's text.
+pub struct LiteralBlockStyle {
+    pub bg: Hsla,
+    pub outline: Hsla,
+    pub ink: Hsla,
+    pub family: SharedString,
+    pub size: f32,
+}
+
+pub fn frontmatter_style(t: &Theme) -> LiteralBlockStyle {
+    LiteralBlockStyle {
+        bg: t.code_bg,
+        outline: t.border_subtle,
+        ink: t.fg_muted,
+        family: t.mono_family.clone(),
+        size: t.ui_size,
+    }
+}
+
+pub fn html_style(t: &Theme) -> LiteralBlockStyle {
+    LiteralBlockStyle {
+        bg: t.code_bg,
+        outline: t.border_subtle,
+        ink: t.code_fg,
+        family: t.mono_family.clone(),
+        size: t.code_size,
+    }
+}
+
+/// Source text as written in a literal block. One container carrying
+/// both the fill and the outline, with no filled child: a square child
+/// fill would paint over the rounded corners (gpui's content mask has
+/// no radii).
+fn literal_block(text: &str, s: LiteralBlockStyle, selector: &'static str) -> AnyElement {
+    div()
+        .debug_selector(move || selector.into())
+        .rounded_md()
+        .bg(s.bg)
+        .border_1()
+        .border_color(s.outline)
+        .px_3()
+        .py_2()
+        .font_family(s.family)
+        .text_size(px(s.size))
+        .line_height(relative(1.5))
+        .text_color(s.ink)
+        .child(SharedString::from(text.to_string()))
+        .into_any_element()
+}
+
+/// The rendered view's interactive handlers, passed down together.
+#[derive(Clone, Copy, Default)]
+pub struct Links<'a> {
+    pub follow: Option<&'a Follow>,
+    pub describe: Option<&'a Describe>,
+    pub toggle: Option<&'a ToggleTask>,
+    /// The file this document was read from, so a relative image
+    /// destination resolves against its directory -- the same anchor
+    /// the editor uses. None when the document has no file behind it
+    /// (a plugin's output), and then only remote images can render.
+    pub base: Option<&'a std::path::Path>,
 }
 
 /// `path` uniquely identifies a block within the document, including
 /// nested ones, so every `InteractiveText` gets a stable distinct id.
-fn block(
-    b: &Block,
-    t: &Theme,
-    cx: &mut gpui::App,
-    path: &str,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
-) -> AnyElement {
+fn block(b: &Block, t: &Theme, cx: &mut gpui::App, path: &str, links: Links) -> AnyElement {
+    let Links { follow, describe, .. } = links;
     match b {
         Block::Paragraph(inline) => {
             paragraph(inline, t, gpui::SharedString::from(format!("p-{path}")), follow, describe)
@@ -533,10 +713,13 @@ fn block(
             describe,
         ),
         Block::Code { lang, code, spans } => code_block(lang.as_deref(), code, spans, t, cx),
-        Block::Quote(blocks) => quote(blocks, t, cx, path, follow, describe),
-        Block::List { start, items } => list(*start, items, t, cx, path, follow, describe),
-        Block::Table { head, rows } => table(head, rows, t, path, follow, describe),
+        Block::Quote(blocks) => quote(blocks, t, cx, path, links),
+        Block::List { start, items } => list(*start, items, t, cx, path, links),
+        Block::Table { head, rows } => table(head, rows, t, path, links),
         Block::Rule => rule(t),
+        Block::FrontMatter(text) => literal_block(text, frontmatter_style(t), "frontmatter"),
+        Block::Html(text) => literal_block(text, html_style(t), "html-block"),
+        Block::Image { alt, dest } => image_block(alt, dest, t, links.base),
     }
 }
 
@@ -546,8 +729,7 @@ pub fn list_item(
     ix: usize,
     t: &Theme,
     cx: &mut gpui::App,
-    follow: Option<&Follow>,
-    describe: Option<&Describe>,
+    links: Links,
 ) -> AnyElement {
     let Some(b) = doc.blocks.get(ix) else {
         return div().into_any_element();
@@ -566,7 +748,7 @@ pub fn list_item(
                 .px(px(48.))
                 .when(first, |d| d.pt(px(40.)))
                 .pb(if last { px(96.) } else { px(12.) })
-                .child(block(b, t, cx, &ix.to_string(), follow, describe)),
+                .child(block(b, t, cx, &ix.to_string(), links)),
         )
         .into_any_element()
 }
@@ -981,10 +1163,54 @@ no language
             // First, middle, and last positions all build; the loop walks every
             // branch of `block` (headings, code, quote, lists, table, rule).
             for ix in 0..doc.blocks.len() {
-                let _ = list_item(&doc, ix, &t, cx, None, None);
+                let _ = list_item(&doc, ix, &t, cx, Links::default());
             }
             // Out-of-range index degrades to an empty element instead of panicking.
-            let _ = list_item(&doc, doc.blocks.len(), &t, cx, None, None);
+            let _ = list_item(&doc, doc.blocks.len(), &t, cx, Links::default());
+        });
+    }
+
+    /// Every branch of `image_block` builds: a picture that is there, a
+    /// remote one, and a destination with nothing behind it.
+    ///
+    /// What cannot be asserted here is what the pixels do. gpui exposes
+    /// no paint introspection -- `debug_selector` and `debug_bounds`
+    /// give laid-out bounds and nothing about fills, radii or the
+    /// loaded image -- so that the picture is bounded by the page
+    /// measure and its corners are actually rounded was checked on
+    /// screen, not here.
+    #[gpui::test]
+    fn an_image_block_renders_present_remote_and_missing(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(Theme::dark())));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("there.png"), b"not really a png").unwrap();
+        let base = dir.path().join("note.md");
+        let doc = markdown::parse(
+            "![there](there.png)\n\n![gone](gone.png)\n\n![remote](https://example.com/r.png)\n",
+        );
+        assert_eq!(
+            doc.blocks.len(),
+            3,
+            "expected three image blocks, got {:?}",
+            doc.blocks
+        );
+        let t = Theme::dark();
+        cx.update(|cx| {
+            for ix in 0..doc.blocks.len() {
+                let _ = list_item(
+                    &doc,
+                    ix,
+                    &t,
+                    cx,
+                    Links { base: Some(&base), ..Default::default() },
+                );
+            }
+            // No file behind the document at all: a relative
+            // destination has nothing to resolve against and falls to
+            // the same visible "not found", never a blank block.
+            let _ = list_item(&doc, 0, &t, cx, Links::default());
         });
     }
 
@@ -1001,7 +1227,7 @@ no language
 
         // First render: cache miss → pending placeholder, render job spawned.
         cx.update(|cx| {
-            let _ = list_item(&doc, 0, &t, cx, None, None);
+            let _ = list_item(&doc, 0, &t, cx, Links::default());
             assert!(matches!(
                 crate::diagram::diagram_state(&code, 664.0, cx),
                 crate::diagram::DiagramState::Pending
@@ -1014,7 +1240,7 @@ no language
                 crate::diagram::diagram_state(&code, 664.0, cx),
                 crate::diagram::DiagramState::Ready { .. }
             ));
-            let _ = list_item(&doc, 0, &t, cx, None, None);
+            let _ = list_item(&doc, 0, &t, cx, Links::default());
         });
     }
 
@@ -1029,14 +1255,148 @@ no language
         let code = code.clone();
 
         cx.update(|cx| {
-            let _ = list_item(&doc, 0, &t, cx, None, None); // spawns the render, shows pending
+            let _ = list_item(&doc, 0, &t, cx, Links::default()); // spawns the render, shows pending
         });
         cx.run_until_parked();
         cx.update(|cx| {
             let state = crate::diagram::diagram_state(&code, 664.0, cx);
             let crate::diagram::DiagramState::Failed(msg) = state else { panic!("expected failure") };
             assert!(!msg.is_empty());
-            let _ = list_item(&doc, 0, &t, cx, None, None); // error strip + plain code branch
+            let _ = list_item(&doc, 0, &t, cx, Links::default()); // error strip + plain code branch
         });
+    }
+
+    // ── frontmatter ──────────────────────────────────────────────────
+
+    /// Metadata is quiet: small mono in muted ink on the code surface,
+    /// outlined with a hairline. One style for the reading view and the
+    /// editor, which reads its ink and size from here too.
+    #[test]
+    fn frontmatter_style_is_small_muted_mono() {
+        let t = Theme::light();
+        let s = frontmatter_style(&t);
+        assert_eq!(s.bg, t.code_bg);
+        assert_eq!(s.outline, t.border_subtle);
+        assert_eq!(s.ink, t.fg_muted);
+        assert_eq!(s.family, t.mono_family);
+        assert_eq!(s.size, t.ui_size);
+        assert!(s.size < t.body_size, "smaller than prose");
+    }
+
+    /// Rendered through a real reader: the block is there, it is small,
+    /// and the first heading below it is the only large text. It used to
+    /// be a level-two heading five lines tall.
+    #[gpui::test]
+    fn frontmatter_renders_as_a_compact_block(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(Theme::dark())));
+        });
+        let langs = crate::highlight::Languages::new();
+        let src = "---\ntitle: Weekly Review\ntags: [planning]\nstatus: draft\n---\n\n# Real\n";
+        let (_reader, cx) = cx.add_window_view(|_, cx| {
+            crate::reader::Reader::from_source("fm".into(), src, &langs, cx)
+        });
+        cx.run_until_parked();
+        let block = cx.debug_bounds("frontmatter").expect("the metadata block drew");
+        let t = Theme::dark();
+        // Three lines of ui-size text plus the block's padding and
+        // outline. A heading-sized block of the same text is well over.
+        let most = 3. * t.ui_size * 1.5 + 2. * 8. + 2. + 1.;
+        assert!(
+            block.size.height <= px(most),
+            "compact: {:?} for three lines, at most {most}",
+            block.size.height
+        );
+        assert!(block.size.height >= px(3. * t.ui_size), "all three lines are there");
+    }
+
+    // ── HTML blocks ─────────────────────────────────────────────────
+
+    /// HTML is shown as the code it is: literal mono in code ink on the
+    /// code surface, outlined -- visibly not prose, visibly not lost.
+    #[test]
+    fn html_block_style_is_literal_code() {
+        let t = Theme::dark();
+        let s = html_style(&t);
+        assert_eq!(s.bg, t.code_bg);
+        assert_eq!(s.outline, t.border_subtle);
+        assert_eq!(s.ink, t.code_fg);
+        assert_eq!(s.family, t.mono_family);
+        assert_eq!(s.size, t.code_size);
+    }
+
+    /// Through a real reader: the snippet occupies space on the page.
+    /// It used to parse to nothing and render as nothing.
+    #[gpui::test]
+    fn an_html_block_renders_its_source(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::ActiveTheme(Arc::new(Theme::dark())));
+        });
+        let langs = crate::highlight::Languages::new();
+        let src = "before\n\n<div align=\"center\">\n  <img src=\"x.png\">\n</div>\n\nafter\n";
+        let (_reader, cx) = cx.add_window_view(|_, cx| {
+            crate::reader::Reader::from_source("html".into(), src, &langs, cx)
+        });
+        cx.run_until_parked();
+        let block = cx.debug_bounds("html-block").expect("the HTML block drew");
+        let t = Theme::dark();
+        assert!(
+            block.size.height >= px(3. * t.code_size),
+            "all three source lines take space: {:?}",
+            block.size.height
+        );
+    }
+
+    // ── table_style ──────────────────────────────────────────────────
+
+    /// A table is a document element, not a spreadsheet. Vertical
+    /// rules between every cell are what made it read as one.
+    ///
+    /// The header's fill is in here with the rules because leaving it
+    /// out is what let the two renderers drift: they drew identical
+    /// borders around a `panel_bg` header in the editor and a `code_bg`
+    /// one in the reading view.
+    #[test]
+    fn table_style_is_outer_and_horizontal_rules_on_a_panel_header() {
+        let t = Theme::light();
+        let b = table_style(&t);
+        assert_eq!(b.outer, t.border, "the outer boundary keeps weight");
+        assert_eq!(b.header, t.border, "so does the rule under the header");
+        assert_eq!(b.header_bg, t.panel_bg, "the header row is the panel surface");
+        assert_eq!(b.row, t.border_subtle, "rows separate with a hairline");
+        assert!(b.column.is_none(), "no interior vertical rules");
+    }
+
+    /// Both renderers read the header's fill from `table_style`, and
+    /// neither names a theme token itself. That is the whole point of
+    /// the struct, and a `.bg(t.something)` inside either function is
+    /// the drift it replaced -- drift that is invisible on screen in any
+    /// theme where the two surfaces happen to be close, which is why it
+    /// survived a review. Scanned per function rather than per file:
+    /// both files paint `code_bg` and `panel_bg` legitimately elsewhere.
+    #[test]
+    fn neither_table_renderer_names_its_own_header_surface() {
+        for (file, src, from, to) in [
+            ("view.rs", include_str!("view.rs"), "fn table(", "pub fn rule_style("),
+            ("editor/mod.rs", include_str!("editor/mod.rs"), "fn render_table(", "fn render_image("),
+        ] {
+            let start = src.find(from).unwrap_or_else(|| panic!("{file}: {from} moved"));
+            let end = src[start..]
+                .find(to)
+                .unwrap_or_else(|| panic!("{file}: {to} moved"));
+            let body = &src[start..start + end];
+            assert!(body.contains("header_bg"), "{file}: {from} does not read header_bg");
+            for line in body.lines() {
+                // The two surfaces the drift was between. A row's own
+                // hover fill stays a call-site choice: it is a row
+                // state, not the table's construction, and both
+                // renderers already agree on it.
+                assert!(
+                    !line.contains(".bg(t.panel_bg)") && !line.contains(".bg(t.code_bg)"),
+                    "{file}: {from} picks its own header surface -- `table_style` owns it ({})",
+                    line.trim()
+                );
+            }
+        }
     }
 }

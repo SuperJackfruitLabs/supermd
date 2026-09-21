@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: Github by Tinted Theming (https://github.com/tinted-theming)
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/github.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "Github"
+appearance = "light"
+
+[colors]
+bg = "#f6f6f6"                # derived
+page_bg = "#ffffff"           # base00
+panel_bg = "#f0f0f0"          # derived
+floating_bg = "#ffffff"       # base00
+hover_bg = "#e7e7e7"          # derived
+selected_bg = "#d7d7d7"       # derived
+border = "#d5d5d5"            # derived
+code_bg = "#f4f4f4"           # derived
+code_fg = "#424a53"           # base05
+fg = "#424a53"                # base05
+fg_strong = "#1f2328"         # base07
+fg_muted = "#6e7781"          # base04
+accent = "#8250df"            # base0D
+link = "#8250df"              # base0D
+find_match_bg = "#f4e1b3"     # derived
+find_active_bg = "#e9c163"    # derived
+shadow = "#372f2f2e"          # derived, translucent
+diff_added_bg = "#d4e3d8"     # derived
+diff_added_fg = "#116329"     # base0C
+diff_deleted_bg = "#ecdbd1"   # derived
+diff_deleted_fg = "#953800"   # base08
+
+[syntax]
+keyword = "#cf222e"           # base0E
+function = "#8250df"          # base0D
+type = "#bf8700"              # base0A
+string = "#0a3069"            # base0B
+comment = "#8c959f"           # base03
+constant = "#0550ae"          # base09
+property = "#953800"          # base08
+operator = "#424a53"          # base05
+tag = "#953800"               # base08
+attribute = "#bf8700"         # base0A

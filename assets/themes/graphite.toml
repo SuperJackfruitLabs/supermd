@@ -2,7 +2,7 @@ name = "Graphite"
 appearance = "dark"
 
 [colors]
-bg = "#1f1f1e"
+bg = "#161615"
 fg = "#d6d4cf"
 fg_strong = "#f1efec"
 fg_muted = "#8b8984"
@@ -11,9 +11,26 @@ link = "#e25d5f"
 code_bg = "#2a2a28"
 code_fg = "#ccc9c2"
 border = "#343432"
-panel_bg = "#262624"
-hover_bg = "#30302e"
-selected_bg = "#3a3a37"
+# #1f1f1e is what Graphite means by "graphite", so it goes on the page,
+# where the reading happens; the desk is the same neutral one step
+# beneath. The code fence keeps its old relation to it and so stays a
+# visible lift rather than collapsing into the surface underneath.
+page_bg = "#1f1f1e"
+# Neutral through and through: Graphite has no hue to protect, so the
+# page casts a plain black shadow.
+shadow = "#00000057"
+# Overlays -- the finder, palette, menus, dialogs -- float above the page,
+# so they are never darker than it. Halfway from the page to hover_bg: a
+# step up, and a hovered row painted on it still reads.
+floating_bg = "#232322"
+# panel_bg is not only the sidebar: the table projector paints the
+# header row with it, on the page. At #1d1d1b that band was 1.023:1
+# against the page -- two levels out of 255, invisible. Dropped one step
+# towards the desk, which reads as a recess in the sheet and leaves the
+# sidebar still a hair above the ground.
+panel_bg = "#1a1a19"
+hover_bg = "#272725"
+selected_bg = "#31312e"
 find_match_bg = "#51431a"
 find_active_bg = "#7a6220"
 

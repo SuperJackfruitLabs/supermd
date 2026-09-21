@@ -97,6 +97,19 @@ jobs:
       # bridge it, exactly as the `macos` job does.
       HAVE_CERT: ${{ secrets.MAS_CERT_P12 != '' }}
     steps:
+      # Every step below is gated on the secrets being present, and they
+      # never have been, so 0.0.15 and 0.0.16 both reported a green App
+      # Store build having imported no certificate, built no plugins,
+      # bundled nothing and uploaded nothing. First step in the job, so
+      # a tag fails in seconds rather than after a pointless build.
+      - name: Refuse to pass silently on a release tag
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && env.HAVE_CERT != 'true' }}
+        run: |
+          echo "::error::MAS signing secrets are absent, so no App Store package was built."
+          echo "Set MAS_CERT_P12, MAS_CERT_PASSWORD, MAS_INSTALLER_P12,"
+          echo "MAS_INSTALLER_PASSWORD and MAS_PROFILE, or build locally and"
+          echo "acknowledge that this job produces nothing."
+          exit 1
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

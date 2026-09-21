@@ -2,18 +2,30 @@ name = "Jackfruit Dark"
 appearance = "dark"
 
 [colors]
-bg = "#211f1a"
-fg = "#d9d4c8"
-fg_strong = "#f2ede2"
-fg_muted = "#8f897a"
+bg = "#171612"
+fg = "#dad3c8"
+fg_strong = "#f2ece3"
+fg_muted = "#968973"
 accent = "#e5a63b"
 link = "#e5a63b"
 code_bg = "#2b2822"
 code_fg = "#cfc9ba"
 border = "#383428"
-panel_bg = "#262420"
-hover_bg = "#2f2c25"
-selected_bg = "#3a362c"
+# The warm charcoal the theme is named for belongs on the page; the
+# desk is the same hue one step down. Ink matches `Theme::dark()`
+# exactly -- this file is what a user actually sees, and the Rust
+# default is only a fallback nothing reaches.
+page_bg = "#211f1a"
+# Warm, to match the ground it falls on.
+shadow = "#100d0857"
+# Overlays float above the page, so they are never darker than it: one
+# rung above the page and one below hover_bg.
+floating_bg = "#24221c"
+panel_bg = "#1c1b18"
+# hover_bg was #25231d, 1.048:1 from the page -- no room for the floating
+# surface between them. Raised to leave a rung for it.
+hover_bg = "#282620"
+selected_bg = "#302d24"
 find_match_bg = "#574a1c"
 find_active_bg = "#7d6a24"
 

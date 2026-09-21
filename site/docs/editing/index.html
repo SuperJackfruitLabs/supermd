@@ -149,6 +149,7 @@
 <li><a href="/docs/diagrams/">Diagrams</a></li>
 <li><a href="/docs/workspace/">Working with a Folder</a></li>
 <li><a href="/docs/knowledge/">Links, Tags & Graph</a></li>
+<li><a href="/docs/graph/">The Graph</a></li>
 <li><a href="/docs/themes/">Themes</a></li>
 </ul>
 <h4>Extending SuperMD</h4>
@@ -169,14 +170,17 @@
 <li>Headings show their <code>#</code> marks while your cursor is on the line.</li>
 <li>Links display as their text; touch one and the <code>[text](url)</code> form opens for editing. Links between notes — <code>[[wiki links]]</code> included — get completion, backlinks, and a graph: see <a href="/docs/knowledge/">Links, Tags &amp; Graph</a>.</li>
 <li>Blockquotes, lists, and inline code all reveal their markers on contact.</li>
+<li>A horizontal rule (<code>---</code>, <code>***</code> or <code>___</code>) draws as a line; put your cursor on it and the characters come back.</li>
 </ul>
 <p>You always edit real Markdown — SuperMD never rewrites your file behind your back. What lands on disk is exactly the plain CommonMark you typed.</p>
 <h2>Checkboxes, tables, and code</h2>
 <ul>
-<li><strong>Task lists</strong> — click a checkbox to toggle it. <code>- [ ]</code> becomes <code>- [x]</code>, one undo step.</li>
+<li><strong>Task lists</strong> — click a checkbox to toggle it, in the editor or the rendered preview (⌘E). <code>- [ ]</code> becomes <code>- [x]</code>, one undo step.</li>
 <li><strong>Tables</strong> — rendered as proper tables. Click a row and the whole table dissolves into editable pipe syntax; click away and it re-renders.</li>
 <li><strong>Code fences</strong> — syntax highlighting for 78+ languages, live as you type. The ``` fence delimiters hide while you're outside the block.</li>
 <li><strong>Images</strong> — display inline; click one to edit its <code>![alt](path)</code> source.</li>
+<li><strong>Frontmatter</strong> — a <code>---</code> metadata block at the very top of a note shows as small, quiet text and stays out of the outline. It must close with <code>---</code> (or <code>...</code>); anywhere else, <code>---</code> is a horizontal rule.</li>
+<li><strong>HTML</strong> — SuperMD doesn't render raw HTML. An HTML block shows as its literal source in both views, so nothing you paste disappears. <code>&lt;!-- comments --&gt;</code> stay hidden in the preview, as in any Markdown renderer.</li>
 </ul>
 <p>Diagrams work the same way — see <a href="/docs/diagrams/">Diagrams</a>.</p>
 <h2>Lists that keep up</h2>

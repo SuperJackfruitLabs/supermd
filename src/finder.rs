@@ -10,6 +10,7 @@ use gpui::{
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
+use crate::elevation::Elevated as _;
 use crate::input::TextInput;
 use crate::theme::theme;
 
@@ -364,11 +365,9 @@ impl Render for Finder {
             .max_w(gpui::relative(0.9))
             .h(px(440.))
             .flex_none()
-            .bg(t.panel_bg)
             .border_1()
             .border_color(t.border)
-            .rounded_lg()
-            .shadow_lg()
+            .elevated(crate::elevation::Overlay::Finder, &t)
             .overflow_hidden()
             .flex()
             .flex_row()
@@ -389,7 +388,16 @@ impl Render for Finder {
                             .border_color(t.border)
                             .child(self.input.clone()),
                     )
-                    .child(div().flex_1().min_h_0().child(results)),
+                    // Inset from the rounded bottom edge: gpui clips to a
+                    // square, so a selected last row would otherwise paint
+                    // over the container's corner arc.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .pb(crate::elevation::corner_inset(crate::elevation::Overlay::Finder))
+                            .child(results),
+                    ),
             )
             .child(div().flex_1().min_w_0().h_full().child(preview_pane))
     }

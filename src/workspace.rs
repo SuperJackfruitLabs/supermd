@@ -11,6 +11,7 @@ use gpui::{
 
 use crate::editor::Editor;
 use crate::editor::EditorEvent;
+use crate::elevation::{Elevated as _, Margins};
 use crate::files::FileTree;
 use crate::seti::{self, SetiColor};
 use crate::theme::Theme;
@@ -25,6 +26,8 @@ actions!(
         NewFile,
         NewWindow,
         OpenFolderInNewWindow,
+        Minimize,
+        Zoom,
         OpenDialog,
         CloseTab,
         NextTab,
@@ -475,13 +478,90 @@ pub(crate) fn should_offer_default_handler(markdown_opens_this_session: u32) -> 
 /// a `.gitignore` keeps out of the index -- are listed but recede:
 /// present when you need them, never competing with the notes, and the
 /// only affordance saying "this file is not in your graph".
-pub(crate) fn sidebar_row_color(ignored: bool, is_dir: bool, t: &Theme) -> gpui::Hsla {
-    if ignored {
+///
+/// The dim stops at the row you have open. Receding is a relationship
+/// to the *list* -- "do not compete with the notes" -- and the active
+/// row is not competing with anything, it is the one thing on the
+/// ground marking where you are, with the accent bar and the selection
+/// background to say so. `seti_tint_muted` already draws exactly this
+/// line for the same row's icon (muted at rest, accent when active);
+/// the name simply had not followed it, so an open ignored file showed
+/// an accent icon beside the dimmest name in the sidebar.
+///
+/// Directories are never active -- the active path is a file -- so the
+/// flag only reaches the file arms.
+pub(crate) fn sidebar_row_color(
+    ignored: bool,
+    is_dir: bool,
+    active: bool,
+    t: &Theme,
+) -> gpui::Hsla {
+    if ignored && !active {
         t.fg_muted
     } else if is_dir {
         t.fg_strong
     } else {
         t.fg
+    }
+}
+
+/// How a sidebar row paints. Pure, so "which row is the open one?" is
+/// answerable in a test rather than by reading a render function. This
+/// is separate from `sidebar_row_color` above, which decides text
+/// colour and carries the gitignored dimming -- that one stays as is.
+///
+/// `KeyboardSelected` is the row the keyboard cursor is on, not the row
+/// the mouse pointer is over -- real pointer hover is a separate,
+/// always-on `.hover()` closure applied at the render site on top of
+/// whichever of these three backgrounds is already painted (active
+/// row included). Do not read this variant as "mouse is here".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowState {
+    Resting,
+    KeyboardSelected,
+    Active,
+}
+
+pub(crate) struct RowStyle {
+    pub background: gpui::Hsla,
+    pub leading_bar: Option<gpui::Hsla>,
+}
+
+pub(crate) fn sidebar_row_style(state: RowState, t: &Theme) -> RowStyle {
+    match state {
+        RowState::Resting => RowStyle { background: t.bg, leading_bar: None },
+        RowState::KeyboardSelected => RowStyle { background: t.hover_bg, leading_bar: None },
+        RowState::Active => RowStyle { background: t.selected_bg, leading_bar: Some(t.accent) },
+    }
+}
+
+/// The parts of the chrome. They all share the ground; naming them
+/// keeps "which surface is this?" answerable in a test rather than by
+/// reading four render functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChromePart {
+    Sidebar,
+    Outline,
+    StatusBar,
+    TitleBar,
+}
+
+/// Which logical group a titlebar command belongs to. Apple's guidance
+/// caps a toolbar at three logical groups; SuperMD's chrome only needs
+/// two -- what the current document can do, and which panels are open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolbarGroup {
+    DocumentAction,
+    ViewToggle,
+}
+
+/// The grouping rule for `render_titlebar_chrome`'s buttons, keyed by
+/// the same id each button carries. Kept as a pure function rather than
+/// inlined so the grouping is answerable in a test.
+pub(crate) fn toolbar_group(id: &str) -> ToolbarGroup {
+    match id {
+        "chrome-changes" => ToolbarGroup::DocumentAction,
+        _ => ToolbarGroup::ViewToggle,
     }
 }
 
@@ -501,11 +581,54 @@ pub(crate) fn seti_tint(color: SetiColor, t: &Theme) -> gpui::Hsla {
     }
 }
 
+/// Chrome icons, quiet. The sidebar and tab strip use the theme's
+/// neutrals rather than its syntax palette: syntax colours are tuned
+/// for code legibility -- saturated, cool -- and reading them against
+/// warm chrome is what made the file list clash. The active row/tab
+/// takes the accent instead, which is how you tell it apart at a
+/// glance without the rest of the tree turning into confetti.
+/// Chrome icon muting is deliberately uniform regardless of file type,
+/// so no color parameter is needed.
+pub(crate) fn seti_tint_muted(t: &Theme, active: bool) -> gpui::Hsla {
+    if active { t.accent } else { t.fg_muted }
+}
+
 struct ThemePickerState {
-    /// Theme indices in display order (lights, then darks).
+    /// Theme indices in display order (lights, then darks), narrowed by
+    /// `filter`.
     order: Vec<usize>,
+    /// Selection as a position in `order`, never in the full theme list:
+    /// filtering rewrites `order`, and an index into the full list would
+    /// then preview and commit a different theme than the highlighted row.
     pos: usize,
+    /// What the user has typed. Empty shows every theme.
+    filter: String,
     saved_theme: std::sync::Arc<Theme>,
+    scroll: gpui::UniformListScrollHandle,
+}
+
+/// The rows the theme picker shows for a filter: lights first, then
+/// darks, keeping only names that contain `filter` anywhere,
+/// case-insensitively ("moon" finds Rosé Pine Moon, "cat" every
+/// Catppuccin). The returned values are indices into `themes`, so the
+/// row a user lands on names the theme that gets previewed and
+/// committed however narrow the list is.
+pub(crate) fn theme_picker_rows(themes: &[(String, bool)], filter: &str) -> Vec<usize> {
+    let needle = filter.trim().to_lowercase();
+    let hit = |ix: usize| needle.is_empty() || themes[ix].0.to_lowercase().contains(&needle);
+    let mut rows: Vec<usize> = (0..themes.len()).filter(|&i| !themes[i].1 && hit(i)).collect();
+    rows.extend((0..themes.len()).filter(|&i| themes[i].1 && hit(i)));
+    rows
+}
+
+/// `(name, is_dark)` for every loaded theme, in load order -- the input
+/// `theme_picker_rows` filters.
+fn theme_names(cx: &App) -> Vec<(String, bool)> {
+    cx.global::<crate::theme::ThemeState>()
+        .themes
+        .iter()
+        .map(|t| (t.name.clone(), t.theme.is_dark))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -595,6 +718,9 @@ pub struct Workspace {
     pending_link_opens: Vec<PathBuf>,
     /// Full-workspace graph overlay.
     graph: Option<GraphViewState>,
+    /// The view the last graph was closed with. Opening a note closes
+    /// the overlay; it no longer forgets it.
+    graph_cache: Option<GraphViewState>,
     graph_focus: FocusHandle,
     /// Inline rename / create in progress in the sidebar.
     sidebar_edit: Option<SidebarEdit>,
@@ -634,6 +760,9 @@ struct SidebarEdit {
     error: Option<SharedString>,
 }
 
+/// Width of the peek panel beside the graph.
+const PEEK_W: f32 = 360.0;
+
 /// The full-workspace graph: laid-out nodes plus view transform.
 struct GraphViewState {
     sim: crate::graph::Simulation,
@@ -643,19 +772,57 @@ struct GraphViewState {
     drag: Option<(f32, f32)>,
     /// The node being dragged, and the pointer offset within it.
     node_drag: Option<usize>,
-    /// The pointer actually moved while a node was held. gpui only
-    /// suppresses a click past its drag threshold when a drag listener
-    /// is registered, and this drag is hand-rolled — so without this,
-    /// releasing after moving a node fired `on_click` and opened the
-    /// note, which made dragging impossible.
+    /// The pointer actually moved while a node was held. The board is
+    /// one element, so gpui's click machinery cannot tell a press that
+    /// grabbed a dot from a pan that happens to end over one: the
+    /// release decides for itself, and without this a drag would end by
+    /// opening the note it had just moved.
     node_dragged: bool,
     /// The node under the pointer: it and its neighbours stay lit while
     /// everything else dims.
     hovered: Option<usize>,
+    /// The dots the last render painted, in board pixels. One element
+    /// covers the whole board now, so the pointer is matched against
+    /// this rather than against a hit-box per node.
+    picker: Option<crate::graph::Picker>,
+    /// The dwell timer behind the card.
+    hover: crate::graph::Hover,
+    /// What the pointer is doing to `hovered`, as of the last event.
+    hover_state: crate::graph::Hovering,
+    /// Wakes the card when the pointer has come to rest. `Hover::at` is
+    /// a pure state machine and the board's mouse-move handler is its
+    /// only caller, so the dwell used to be tested only when a move
+    /// arrived: a pointer that stopped never crossed it, and the card
+    /// appeared on the next twitch instead of on the rest. This is the
+    /// one-shot that asks again at the moment the dwell is up.
+    card_timer: Option<gpui::Task<()>>,
+    /// Title and excerpt per note, for the hover card. Read off disk
+    /// when the dwell earns a card and kept, so re-resting on a dot
+    /// costs nothing; cleared wholesale on any fs event, because an
+    /// excerpt is a copy of a file that may have just changed.
+    preview_cache: std::collections::HashMap<PathBuf, (String, String)>,
+    /// How many node labels the last render produced. The graph used to
+    /// build one per node whether or not it was visible; this is what
+    /// holds that shut. Test-only, because nothing in the app reads it
+    /// and a write-only field is a warning.
+    #[cfg(test)]
+    label_count: usize,
+    /// Whether the last render painted arrowheads. Test-only for the
+    /// same reason as `label_count`: below half zoom an arrowhead is
+    /// sub-pixel and costs one or two tessellated paths per edge, and
+    /// without this the render-time gate had no detector -- deleting it
+    /// left the suite green.
+    #[cfg(test)]
+    arrowheads_drawn: bool,
     /// Ticks the layout while it still has motion in it.
     ticker: Option<gpui::Task<()>>,
     /// What node colour means right now.
     color_by: crate::graph::ColorBy,
+    /// The colour groups in this layout, sorted and deduplicated so a
+    /// group's colour is the same on every open rather than depending
+    /// on node order. Held rather than rebuilt per frame: it changes
+    /// only when the nodes or the colour mode do.
+    group_keys: Vec<String>,
     /// How spread out the layout sits.
     spread: crate::graph::Spread,
     /// What the view is narrowed to. Non-matching nodes fade rather
@@ -663,6 +830,9 @@ struct GraphViewState {
     filter: crate::graph::Filter,
     /// True while the query box is taking keystrokes.
     searching: bool,
+    /// The node the panel is describing. Clicking a dot used to open
+    /// its note and destroy the view; it opens this instead.
+    peek: Option<usize>,
 }
 
 impl GraphViewState {
@@ -672,6 +842,24 @@ impl GraphViewState {
 
     fn edges(&self) -> &[crate::graph::Edge] {
         &self.sim.edges
+    }
+
+    /// Recompute `group_keys`. Called where the nodes or the colour
+    /// mode change -- never from the render, which read it 60 times a
+    /// second for data that had not moved.
+    fn rebuild_group_keys(&mut self) {
+        let mut keys: Vec<String> = self
+            .nodes()
+            .iter()
+            .filter_map(|n| match self.color_by {
+                crate::graph::ColorBy::None => None,
+                crate::graph::ColorBy::Folder => n.folder.clone(),
+                crate::graph::ColorBy::Tag => n.tag.clone(),
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        self.group_keys = keys;
     }
 
     /// Nodes one hop from `ix`, plus itself.
@@ -686,6 +874,43 @@ impl GraphViewState {
             }
         }
         set
+    }
+}
+
+/// A node's colour before anything fades it: the open note, a ghost, a
+/// colour group, a linked note, an unlinked one.
+///
+/// Free of the render because the paint list is built outside the
+/// element tree now -- the canvas closure owns its data, so the colour
+/// has to be decided before the closure exists.
+fn node_base_color(
+    node: &crate::graph::GraphNode,
+    color_by: crate::graph::ColorBy,
+    group_keys: &[String],
+    palette: &[Hsla],
+    open_path: Option<&Path>,
+    t: &Theme,
+) -> Hsla {
+    if open_path == Some(node.path.as_path()) {
+        return t.link;
+    }
+    if node.ghost {
+        // Hollow: it is a name, not a note. Clicking it creates the
+        // file, the same as following the link would.
+        return Hsla { a: 0.30, ..t.fg_muted };
+    }
+    let group = match color_by {
+        crate::graph::ColorBy::None => None,
+        crate::graph::ColorBy::Folder => node.folder.as_deref(),
+        crate::graph::ColorBy::Tag => node.tag.as_deref(),
+    };
+    if let Some(slot) = crate::graph::color_slot(group, group_keys, palette.len()) {
+        return palette[slot];
+    }
+    if node.degree > 0 {
+        t.accent
+    } else {
+        t.fg_muted
     }
 }
 
@@ -719,6 +944,8 @@ fn make_editor(
             this.context_menu = Some((*position, crate::menus::Surface::Editor, *ctx));
             cx.notify();
         }
+        // A command that declined; the strip is the workspace's.
+        EditorEvent::CommandError(message) => this.show_command_error(message.clone(), cx),
     })
     .detach();
     editor
@@ -743,15 +970,66 @@ fn make_reader(
         reader.set_knowledge(knowledge);
         reader
     });
-    cx.subscribe(&reader, |this, _reader, event, cx| {
-        let crate::reader::ReaderEvent::Follow(dest) = event;
-        this.follow_from_reader(dest, cx);
+    cx.subscribe(&reader, |this, reader, event, cx| match event {
+        crate::reader::ReaderEvent::Follow(dest) => this.follow_from_reader(dest, cx),
+        crate::reader::ReaderEvent::EditSource { before, range, replacement } => {
+            this.apply_reader_edit(&reader, before, range.clone(), replacement, cx)
+        }
     })
     .detach();
     reader
 }
 
 impl Workspace {
+    /// A checkbox was clicked in a rendered preview. The editor behind
+    /// that preview owns the file, so the edit goes into its buffer and
+    /// out through its save -- the file on disk and the buffer never
+    /// disagree, and one undo takes it back. If the buffer is no longer
+    /// the text the preview showed, the preview's task numbering may
+    /// not match the file's: nothing is written, and the preview
+    /// re-renders from the buffer instead.
+    fn apply_reader_edit(
+        &mut self,
+        reader: &Entity<Reader>,
+        before: &str,
+        range: std::ops::Range<usize>,
+        replacement: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.tabs.iter().find_map(|tab| match tab {
+            Tab::Editor { editor, view: EditorView::Preview(r) } if r == reader => {
+                Some(editor.clone())
+            }
+            _ => None,
+        });
+        let Some(editor) = editor else {
+            return;
+        };
+        let current = editor.read(cx).text();
+        if current == before {
+            editor.update(cx, |editor, cx| editor.replace_and_save(range, replacement, cx));
+        } else {
+            // The reader flipped the glyph and emitted before asking,
+            // so dropping the write silently made the box flip and flip
+            // straight back as the reset below caught it up -- the
+            // failure `show_command_error` was built for, one line away
+            // from the only place that could see it. A refusal nobody
+            // can see is indistinguishable from a broken command.
+            self.show_command_error(
+                "The document changed; the checkbox was not toggled".to_string(),
+                cx,
+            );
+        }
+        // Either way the preview ends on the buffer's text: a stale one
+        // catches up, and a save hook that rewrote the document on this
+        // save is followed -- otherwise the next click would fail the
+        // check above and be dropped.
+        let now = editor.read(cx).text();
+        if reader.read(cx).source() != now {
+            reader.update(cx, |reader, cx| reader.set_source(now, cx));
+        }
+    }
+
     /// A link was clicked in a rendered preview. Same rules as the
     /// editor: only http(s) leaves the app, an anchor stays put, and a
     /// path is resolved inside the workspace or ignored.
@@ -892,6 +1170,7 @@ impl Workspace {
             sidebar_selected: 0,
             pending_link_opens: Vec::new(),
             graph: None,
+            graph_cache: None,
             graph_focus: cx.focus_handle(),
             sidebar_edit: None,
             move_picker: None,
@@ -1018,23 +1297,42 @@ impl Workspace {
     }
 
     fn on_fs_events(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        // Ignore churn from ignored paths (target/, node_modules/, …) so
-        // builds in an open workspace don't hammer the UI. This is only
-        // a whole-batch shortcut for the common case of an irrelevant
-        // batch; it must never stand in for the per-path check below,
-        // or one visible path in a batch would wave through every
-        // ignored path riding alongside it.
+        // Ignore churn from build output (target/, node_modules/, .git)
+        // and from hidden scratch files (.DS_Store, .note.md.swp) so
+        // builds and a Finder visit in an open workspace don't hammer
+        // the UI. This asks *only* that, not "is it gitignored": a
+        // gitignored note is a note, the sidebar draws it dimmed, and an
+        // edit to one has to refresh the tree like any other; so does an
+        // edit to a `.gitignore`, hidden though it is, since its
+        // contents are what decide the dimming. And this is only a
+        // whole-batch shortcut for an irrelevant batch; it must never
+        // stand in for the per-path index check below, or one visible
+        // path in a batch would wave through every ignored path riding
+        // alongside it.
         let root = self.tree.as_ref().map(|tree| tree.root.clone());
-        // One matcher for the batch: it caches the ignore files of each
-        // directory it walks through, and a batch is a snapshot anyway.
-        let mut ignores = root.as_ref().map(|root| crate::files::index_matcher(root));
-        if let Some(ignores) = ignores.as_mut() {
-            if !paths.iter().any(|p| ignores.allows(p)) {
+        if let Some(root) = root.as_ref() {
+            if paths.iter().all(|p| crate::files::is_build_noise(root, p)) {
                 return;
             }
         }
+        // One matcher for the batch: it caches the ignore files of each
+        // directory it walks through, and a batch is a snapshot anyway.
+        let mut ignores = root.as_ref().map(|root| crate::files::index_matcher(root));
+        // And one hardlink guard for the batch, for the same reason: the
+        // walk its rule needs covers the whole workspace, and a vault
+        // inside a `cp -al` backup tree has nlink > 1 on every file, so
+        // asking per path turned one save into one rescan per note.
+        let mut hardlinks = root.as_ref().map(|root| crate::knowledge::HardlinkGuard::new(root));
         if let Some(tree) = &mut self.tree {
             tree.refresh();
+        }
+        // Every hover-card excerpt is a copy of a file on disk, and one
+        // of them may be the file that just changed. Dropped wholesale
+        // rather than per path: the cache holds at most the handful of
+        // dots someone has rested on, and rebuilding an entry is one
+        // small read behind a 400ms dwell.
+        for graph in [self.graph.as_mut(), self.graph_cache.as_mut()].into_iter().flatten() {
+            graph.preview_cache.clear();
         }
         self.refresh_git_status();
         // Keep the knowledge index warm: saves re-index, deletions drop.
@@ -1073,10 +1371,7 @@ impl Workspace {
                 // outside file's bytes under an in-root path. `scan`
                 // drops those after its walk; a hardlink made while the
                 // workspace is open only ever reaches the index here.
-                if root
-                    .as_ref()
-                    .is_some_and(|root| crate::knowledge::escapes_via_hardlink(root, path))
-                {
+                if hardlinks.as_mut().is_some_and(|hardlinks| hardlinks.escapes(path)) {
                     index.remove_file(path);
                     continue;
                 }
@@ -1337,6 +1632,8 @@ impl Workspace {
                 cx.global_mut::<crate::diagram::DiagramCache>().clear();
             }
             *self.knowledge.lock().unwrap() = crate::knowledge::Index::scan(path);
+            // A layout of the folder we just left describes nothing here.
+            self.graph_cache = None;
             self.tree = Some(FileTree::new(path.to_path_buf()));
             self.show_sidebar = true;
             self.setup_watcher(cx);
@@ -1520,6 +1817,19 @@ impl Workspace {
         }
     }
 
+    /// Window > Minimize. Window-scoped (there is nothing to minimize
+    /// with no window), so this is wired only on the focused
+    /// `Workspace`, same as `new_window`'s sibling shortcuts.
+    fn minimize(&mut self, _: &Minimize, window: &mut Window, _cx: &mut Context<Self>) {
+        window.minimize_window();
+    }
+
+    /// Window > Zoom -- the green-button maximize toggle, not the text
+    /// zoom in the View menu (`ZoomIn`/`ZoomOut`/`ZoomReset`).
+    fn zoom(&mut self, _: &Zoom, window: &mut Window, _cx: &mut Context<Self>) {
+        window.zoom_window();
+    }
+
     /// Pick a folder and open it *beside* this window rather than
     /// replacing what is already here.
     fn open_folder_in_new_window(
@@ -1692,10 +2002,11 @@ impl Workspace {
                 // doc comments into paragraphs, reflowed the source, and
                 // made every 4-space-indented block an indented code
                 // block.
-                let source = if matches!(
+                let is_markdown = matches!(
                     path.extension().and_then(|e| e.to_str()),
                     Some("md" | "markdown" | "mdown" | "mdx")
-                ) {
+                );
+                let source = if is_markdown {
                     text
                 } else {
                     let lang = crate::reader::language_for_path(&path);
@@ -1703,6 +2014,11 @@ impl Workspace {
                 };
                 let k = self.knowledge.clone();
                 let reader = make_reader(Some(path.clone()), title, &source, &langs, &k, cx);
+                if is_markdown {
+                    // The preview is the file's own text, so a checkbox
+                    // click can be written back through this editor.
+                    reader.update(cx, |reader, _| reader.allow_task_toggles());
+                }
                 if let Some(Tab::Editor { view, .. }) = self.tabs.get_mut(tab_ix) {
                     *view = EditorView::Preview(reader);
                 }
@@ -2139,6 +2455,22 @@ impl Workspace {
         }
         crate::theme::refresh_active_theme(cx);
         window.refresh();
+        cx.notify();
+    }
+
+    /// Set the explicit appearance, persist it, and re-resolve the
+    /// active theme immediately -- the same persist-then-refresh path
+    /// `toggle_flux` uses, so an explicit choice takes effect without
+    /// waiting for the minute timer.
+    fn set_appearance(&mut self, appearance: crate::settings::Appearance, cx: &mut Context<Self>) {
+        persist_setting(cx, move |s| s.appearance = appearance);
+        crate::theme::refresh_active_theme(cx);
+        // Unlike a theme-row click, this is already committed to disk --
+        // move the picker's escape/cancel baseline forward too, or
+        // Escape would visually revert a choice that outlived it.
+        if let Some(picker) = &mut self.theme_picker {
+            picker.saved_theme = theme(cx);
+        }
         cx.notify();
     }
 
@@ -2807,6 +3139,10 @@ impl Workspace {
         // no longer on disk.
         self.history.rewrite(|entry| crate::fileops::retarget(entry, old, new));
         self.rewrite_knowledge_links(old, new, cx);
+        // Every node in the put-away view is a path, and some of them
+        // just moved. The count would not notice, so the layout goes
+        // rather than describing a vault that no longer exists.
+        self.graph_cache = None;
         cx.notify();
     }
 
@@ -3002,27 +3338,67 @@ impl Workspace {
             self.theme_picker_cancel(&ThemePickerCancel, window, cx);
             return;
         }
+        let order = theme_picker_rows(&theme_names(cx), "");
         let state = cx.global::<crate::theme::ThemeState>();
-        let mut order: Vec<usize> = (0..state.themes.len())
-            .filter(|&i| !state.themes[i].theme.is_dark)
-            .collect();
-        order.extend((0..state.themes.len()).filter(|&i| state.themes[i].theme.is_dark));
         let current = theme(cx);
         let pos = order
             .iter()
             .position(|&i| std::sync::Arc::ptr_eq(&state.themes[i].theme, &current))
             .unwrap_or(0);
-        self.theme_picker = Some(ThemePickerState { order, pos, saved_theme: current });
+        // Twenty-eight rows do not fit: scroll the active theme into
+        // view so the picker opens showing where you already are.
+        let scroll = gpui::UniformListScrollHandle::default();
+        scroll.scroll_to_item(pos, gpui::ScrollStrategy::Center);
+        self.theme_picker = Some(ThemePickerState {
+            order,
+            pos,
+            filter: String::new(),
+            saved_theme: current,
+            scroll,
+        });
         window.focus(&self.theme_picker_focus);
         cx.notify();
+    }
+
+    /// Narrow the list to what the user has typed. Selection follows the
+    /// *theme*, not the row number: a selected theme that survives the
+    /// filter stays selected, otherwise the first match is selected and
+    /// previewed. `saved_theme` is deliberately untouched, so Escape
+    /// still restores the theme that was active when the picker opened.
+    fn theme_picker_set_filter(&mut self, filter: String, cx: &mut Context<Self>) {
+        let names = theme_names(cx);
+        let Some(picker) = &mut self.theme_picker else {
+            return;
+        };
+        let selected_theme = picker.order.get(picker.pos).copied();
+        let order = theme_picker_rows(&names, &filter);
+        let kept = selected_theme.and_then(|ix| order.iter().position(|&i| i == ix));
+        picker.filter = filter;
+        picker.order = order;
+        picker.pos = kept.unwrap_or(0);
+        // Every keystroke repaints, this one included: a filter that
+        // matches nothing previews nothing and commits nothing, so the
+        // frame is the whole of what it does -- without it the emptied
+        // list and its "no themes match" line never reach the screen.
+        cx.notify();
+        match kept {
+            // Same theme, new row: scroll to where it moved to.
+            Some(pos) => picker.scroll.scroll_to_item(pos, gpui::ScrollStrategy::Center),
+            // It did not survive: preview the first match, which
+            // scrolls to it -- and no-ops when nothing matched at all.
+            None => self.theme_picker_apply(0, cx),
+        }
     }
 
     fn theme_picker_apply(&mut self, pos: usize, cx: &mut Context<Self>) {
         let Some(picker) = &mut self.theme_picker else {
             return;
         };
+        let Some(&ix) = picker.order.get(pos) else {
+            return;
+        };
         picker.pos = pos;
-        let ix = picker.order[picker.pos];
+        picker.scroll.scroll_to_item(pos, gpui::ScrollStrategy::Center);
         let theme = cx.global::<crate::theme::ThemeState>().themes[ix].theme.clone();
         cx.set_global(crate::theme::ActiveTheme(theme));
         cx.notify();
@@ -3048,18 +3424,62 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(picker) = self.theme_picker.take() else {
+        let Some(picker) = self.theme_picker.as_ref() else {
             return;
         };
-        let ix = picker.order[picker.pos];
+        // A filter that matches nothing commits nothing, and leaves the
+        // picker open so the filter can be fixed.
+        let Some(&ix) = picker.order.get(picker.pos) else {
+            return;
+        };
+        self.theme_picker = None;
         {
-            let picked = &cx.global::<crate::theme::ThemeState>().themes[ix];
+            let state = cx.global::<crate::theme::ThemeState>();
+            let picked = &state.themes[ix];
             let (name, is_dark) = (picked.name.clone(), picked.theme.is_dark);
+            // The appearance travels with the name ONLY when the picked
+            // theme disagrees with the appearance in force.
+            //
+            // It has to travel at all because the preview already moved
+            // it: `theme_picker_apply` sets `ActiveTheme` to the
+            // highlighted theme directly, whatever its appearance, while
+            // `ThemeState::resolve` reads the slot for the appearance in
+            // force -- so writing only the slot made highlighting
+            // "Paper" under Dark turn the app light and Enter turn it
+            // back. One glance at this dialog showed the
+            // Light/Dark/System control at the top and twenty-eight rows
+            // of both kinds below it, contradicting itself. Filtering
+            // the rows instead costs more than it saves: under Dark it
+            // hides nineteen themes of twenty-eight behind a setting, it
+            // makes each row's Light/Dark badge dead weight, and under
+            // `System` the resolved appearance is the OS's rather than a
+            // choice, so there is nothing explicit to filter by and the
+            // lie would survive.
+            //
+            // But it must travel no further than that. `Light` and
+            // `Dark` short-circuit ahead of `flux.auto_dark` and
+            // `system_dark` in `resolved_dark`, so an unconditional
+            // write pinned every user who ever pressed Enter: a flux
+            // user on the default `System` picking their dark theme at
+            // night got `appearance := Dark` forever, and the next
+            // morning the app no longer came back to light. In that
+            // case the pin bought nothing -- the picked theme already
+            // matches what `resolve` chooses, so the slot write alone
+            // yields the previewed theme -- and cost flux and
+            // OS-following outright. Asking `resolved_dark` keeps
+            // previewed-is-what-you-get without that.
+            let switches_appearance = is_dark != state.resolved_dark();
             persist_setting(cx, move |s| {
                 if is_dark {
                     s.dark_theme = name.clone();
+                    if switches_appearance {
+                        s.appearance = crate::settings::Appearance::Dark;
+                    }
                 } else {
                     s.light_theme = name.clone();
+                    if switches_appearance {
+                        s.appearance = crate::settings::Appearance::Light;
+                    }
                 }
             });
         }
@@ -3086,76 +3506,131 @@ impl Workspace {
         let t = theme(cx);
         let state = cx.global::<crate::theme::ThemeState>();
 
-        let mut rows: Vec<AnyElement> = Vec::new();
-        let mut last_dark: Option<bool> = None;
-        for (pos, &ix) in picker.order.iter().enumerate() {
-            let loaded = &state.themes[ix];
-            let is_dark = loaded.theme.is_dark;
-            if last_dark != Some(is_dark) {
-                last_dark = Some(is_dark);
-                rows.push(
-                    div()
-                        .px_2()
-                        .pt_2()
-                        .pb_1()
-                        .text_size(px(10.))
-                        .text_color(t.fg_muted)
-                        .child(if is_dark { "DARK" } else { "LIGHT" })
-                        .into_any_element(),
-                );
-            }
-            let chosen = if is_dark {
-                state.settings.dark_theme == loaded.name
-            } else {
-                state.settings.light_theme == loaded.name
-            };
-            let selected = pos == picker.pos;
-            rows.push(
-                div()
-                    .id(("theme-row", pos))
-                    .w_full()
-                    .px_2()
-                    .py(px(4.))
-                    .rounded_md()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(t.selected_bg))
-                    .when(!selected, |d| d.hover(|s| s.bg(t.hover_bg)))
-                    .child(
+        // Three-way Light / Dark / System control at the top: an
+        // explicit choice here beats both the system appearance and
+        // flux's night override (see `ThemeState::resolve`).
+        let current_appearance = state.settings.appearance;
+        let appearance_options: Vec<AnyElement> = [
+            (crate::settings::Appearance::Light, "Light"),
+            (crate::settings::Appearance::Dark, "Dark"),
+            (crate::settings::Appearance::System, "System"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ix, (variant, label))| {
+            let selected = current_appearance == variant;
+            div()
+                .id(("appearance-option", ix))
+                .flex_1()
+                .py(px(4.))
+                .rounded_md()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_size(px(t.ui_size))
+                .when(selected, |d| d.bg(t.selected_bg).text_color(t.fg_strong))
+                .when(!selected, |d| d.text_color(t.fg_muted).hover(|s| s.bg(t.hover_bg)))
+                .child(label)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    this.set_appearance(variant, cx);
+                }))
+                .into_any_element()
+        })
+        .collect();
+
+        // One row per theme, each marked Light or Dark: at twenty-eight
+        // themes a grouped list scrolls past the fold, and the rows have
+        // to be uniform for the list to scroll the selection into view.
+        let row_count = picker.order.len();
+        let rows = uniform_list(
+            "theme-picker-rows",
+            row_count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                let t = theme(cx);
+                let state = cx.global::<crate::theme::ThemeState>();
+                let Some(picker) = this.theme_picker.as_ref() else {
+                    return Vec::new();
+                };
+                range
+                    .map(|pos| {
+                        let Some(&ix) = picker.order.get(pos) else {
+                            return div().id(("theme-row", pos)).into_any_element();
+                        };
+                        let loaded = &state.themes[ix];
+                        let is_dark = loaded.theme.is_dark;
+                        let chosen = if is_dark {
+                            state.settings.dark_theme == loaded.name
+                        } else {
+                            state.settings.light_theme == loaded.name
+                        };
+                        let selected = pos == picker.pos;
                         div()
-                            .size(px(14.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(t.border)
-                            .bg(loaded.theme.bg),
-                    )
-                    .child(div().size(px(14.)).rounded_full().bg(loaded.theme.accent))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(t.ui_size))
-                            .text_color(t.fg)
-                            .child(SharedString::from(loaded.name.clone())),
-                    )
-                    .when(chosen, |d| {
-                        d.child(div().text_size(px(11.)).text_color(t.accent).child("✓"))
+                            .id(("theme-row", pos))
+                            .w_full()
+                            .h(px(26.))
+                            .px_2()
+                            .rounded_md()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .cursor_pointer()
+                            .when(selected, |d| d.bg(t.selected_bg))
+                            .when(!selected, |d| d.hover(|s| s.bg(t.hover_bg)))
+                            .child(
+                                div()
+                                    .size(px(14.))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(t.border)
+                                    .bg(loaded.theme.bg),
+                            )
+                            .child(div().size(px(14.)).rounded_full().bg(loaded.theme.accent))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(t.ui_size))
+                                    .text_color(t.fg)
+                                    .child(SharedString::from(loaded.name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(t.fg_muted)
+                                    .child(if is_dark { "Dark" } else { "Light" }),
+                            )
+                            .when(chosen, |d| {
+                                d.child(div().text_size(px(11.)).text_color(t.accent).child("✓"))
+                            })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                this.theme_picker_apply(pos, cx);
+                            }))
+                            .into_any_element()
                     })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                        this.theme_picker_apply(pos, cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(picker.scroll.clone())
+        .h(px((row_count.min(12) as f32) * 26.));
+
+        let filter_line: SharedString = if picker.filter.is_empty() {
+            "Type to filter themes…".into()
+        } else if row_count == 0 {
+            format!("{}  — no themes match", picker.filter).into()
+        } else {
+            picker.filter.clone().into()
+        };
+        let filter_is_empty = picker.filter.is_empty();
 
         Some(
             div()
                 .absolute()
                 .inset_0()
                 .occlude()
-                .bg(gpui::Hsla { h: 0., s: 0., l: 0., a: 0.25 })
+                .when_some(crate::elevation::scrim(crate::elevation::Surface::Modal), |d, c| {
+                    d.bg(c)
+                })
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3172,27 +3647,90 @@ impl Workspace {
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
+                        // Typing narrows the list. The picker's own
+                        // bindings (arrows, enter, escape) carry no
+                        // printable key, so nothing here shadows them.
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                            let Some(picker) = this.theme_picker.as_ref() else {
+                                return;
+                            };
+                            let m = &event.keystroke.modifiers;
+                            if m.platform || m.control || m.function {
+                                return;
+                            }
+                            let mut filter = picker.filter.clone();
+                            if event.keystroke.key == "backspace" {
+                                if filter.pop().is_none() {
+                                    return;
+                                }
+                            } else {
+                                let text = event
+                                    .keystroke
+                                    .key_char
+                                    .as_deref()
+                                    .unwrap_or(event.keystroke.key.as_str());
+                                if text.chars().count() != 1 {
+                                    return;
+                                }
+                                filter.push_str(text);
+                            }
+                            this.theme_picker_set_filter(filter, cx);
+                            cx.stop_propagation();
+                        }))
                         .w(px(340.))
-                        .max_h(px(480.))
                         .id("theme-picker-panel")
-                        .overflow_y_scroll()
-                        .bg(t.panel_bg)
                         .border_1()
                         .border_color(t.border)
-                        .rounded_lg()
-                        .shadow_lg()
+                        .elevated(crate::elevation::Overlay::ThemePicker, &t)
                         .p_2()
                         .flex()
                         .flex_col()
                         .child(
                             div()
                                 .px_2()
-                                .py_1()
-                                .text_size(px(13.))
-                                .text_color(t.fg_strong)
-                                .child("Theme    ↑↓ preview · ⏎ apply · esc cancel"),
+                                .pt_1()
+                                .pb_2()
+                                .mb_1()
+                                .border_b_1()
+                                .border_color(t.border)
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .children(appearance_options),
                         )
-                        .children(rows),
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(13.))
+                                        .when(filter_is_empty, |d| d.text_color(t.fg_muted))
+                                        .when(!filter_is_empty, |d| d.text_color(t.fg_strong))
+                                        .child(filter_line),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(t.fg_muted)
+                                        .child("↑↓ preview · ⏎ apply · esc cancel"),
+                                ),
+                        )
+                        // Inset from the rounded bottom edge: gpui clips
+                        // to a square, so a selected last row would paint
+                        // over the panel's corner arc.
+                        .child(
+                            div()
+                                .pb(crate::elevation::corner_inset(
+                                    crate::elevation::Overlay::ThemePicker,
+                                ))
+                                .child(rows),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -3325,11 +3863,9 @@ impl Workspace {
                             cx.stop_propagation();
                         })
                         .w(px(320.))
-                        .bg(t.panel_bg)
                         .border_1()
                         .border_color(t.border)
-                        .rounded_lg()
-                        .shadow_lg()
+                        .elevated(crate::elevation::Overlay::About, &t)
                         .p_5()
                         .flex()
                         .flex_col()
@@ -3463,11 +3999,9 @@ impl Workspace {
                             div()
                                 .id("ctx-menu")
                                 .w(px(220.))
-                                .bg(t.panel_bg)
                                 .border_1()
                                 .border_color(t.border)
-                                .rounded_lg()
-                                .shadow_lg()
+                                .elevated(crate::elevation::Overlay::ContextMenu, &t)
                                 .overflow_hidden()
                                 .flex()
                                 .flex_col()
@@ -3534,7 +4068,9 @@ impl Workspace {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .bg(gpui::Hsla { h: 0., s: 0., l: 0., a: 0.35 })
+                .when_some(crate::elevation::scrim(crate::elevation::Surface::Modal), |d, c| {
+                    d.bg(c)
+                })
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3556,11 +4092,9 @@ impl Workspace {
                         .max_h(px(620.))
                         .id("shortcuts-panel")
                         .overflow_y_scroll()
-                        .bg(t.panel_bg)
                         .border_1()
                         .border_color(t.border)
-                        .rounded_lg()
-                        .shadow_lg()
+                        .elevated(crate::elevation::Overlay::Shortcuts, &t)
                         .p_4()
                         .flex()
                         .flex_col()
@@ -3629,6 +4163,20 @@ impl Workspace {
                 let is_dir = entry.is_dir;
                 let expanded = is_dir && self.tree.as_ref().is_some_and(|t| t.is_expanded(&path));
                 let is_modified = !is_dir && git_modified.contains(&entry.path);
+                // The open file is the one thing marking "where you are"
+                // on a ground with no dividers -- it gets the accent
+                // bar. Keyboard selection is a value step like pointer
+                // hover, not a mark of its own -- the `.hover()` below
+                // is the real pointer-hover state and layers on top of
+                // whichever of these backgrounds is already painted.
+                let row_state = if is_active {
+                    RowState::Active
+                } else if is_kb_selected {
+                    RowState::KeyboardSelected
+                } else {
+                    RowState::Resting
+                };
+                let row_style = sidebar_row_style(row_state, t);
 
                 div()
                     .id(id)
@@ -3641,9 +4189,11 @@ impl Workspace {
                     .ml(px(depth as f32 * 12.))
                     .rounded_md()
                     .cursor_pointer()
+                    .bg(row_style.background)
                     .hover(|s| s.bg(t.hover_bg))
-                    .when(is_kb_selected, |d| d.bg(t.hover_bg))
-                    .when(is_active, |d| d.bg(t.selected_bg))
+                    .when_some(row_style.leading_bar, |d, bar| {
+                        d.border_l_2().border_color(bar)
+                    })
                     .child(
                         // Fixed chevron slot on every row so icons align in a
                         // column whether or not the row is a directory.
@@ -3658,8 +4208,8 @@ impl Workspace {
                         let (icon_path, tint) = if is_dir {
                             (crate::ui_icons::path("folder"), t.fg_muted)
                         } else {
-                            let (icon, color) = seti::icon_for(&entry.name);
-                            (format!("icons/seti/{icon}.svg"), seti_tint(color, &t))
+                            let (icon, _) = seti::icon_for(&entry.name);
+                            (format!("icons/seti/{icon}.svg"), seti_tint_muted(&t, is_active))
                         };
                         // Seti glyphs carry ~30% internal padding, so the box
                         // runs larger than the text for a matched visual size.
@@ -3670,7 +4220,7 @@ impl Workspace {
                             .text_color(tint)
                     })
                     .child({
-                        let row_color = sidebar_row_color(entry.ignored, is_dir, &t);
+                        let row_color = sidebar_row_color(entry.ignored, is_dir, is_active, &t);
                         div()
                             .text_size(px(t.ui_size))
                             .text_color(row_color)
@@ -3721,12 +4271,33 @@ impl Workspace {
                     .into_any_element()
     }
 
+    /// Sidebar, outline, status bar and title bar all share the ground.
+    /// `_part` is unused today -- every chrome surface paints the same
+    /// colour -- but keeping the parameter is what makes "does every
+    /// part share the ground?" a loop over an enum in a test, rather
+    /// than four separate assertions that can drift independently.
+    pub(crate) fn chrome_background(&self, _part: ChromePart, t: &Theme) -> gpui::Hsla {
+        t.bg
+    }
+
+    /// Whether `part` draws a divider against whatever it borders.
+    /// Always `false` today -- the page's own edge is what separates
+    /// chrome from document -- but this is the one place that decides
+    /// it: the sidebar, outline and status bar render sites all call
+    /// this before drawing a border rather than drawing one outright,
+    /// so flipping the answer here is what actually puts a divider
+    /// back, not just a declared rule nothing consults.
+    pub(crate) fn chrome_has_divider(&self, _part: ChromePart) -> bool {
+        false
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_sidebar {
             return None;
         }
         let active_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
         let t = theme(cx);
+        let sidebar_bg = self.chrome_background(ChromePart::Sidebar, &t);
         let Some(tree) = self.tree.as_mut() else {
             // Empty workspace: no listing, just a way to open one.
             return Some(
@@ -3734,9 +4305,10 @@ impl Workspace {
                     .w(px(240.))
                     .h_full()
                     .flex_none()
-                    .bg(t.panel_bg)
-                    .border_r_1()
-                    .border_color(t.border)
+                    .bg(sidebar_bg)
+                    .when(self.chrome_has_divider(ChromePart::Sidebar), |d| {
+                        d.border_r_1().border_color(t.border)
+                    })
                     .flex()
                     .flex_col()
                     .child(
@@ -3919,9 +4491,10 @@ impl Workspace {
                 .w(px(240.))
                 .h_full()
                 .flex_none()
-                .bg(t.panel_bg)
-                .border_r_1()
-                .border_color(t.border)
+                .bg(sidebar_bg)
+                .when(self.chrome_has_divider(ChromePart::Sidebar), |d| {
+                    d.border_r_1().border_color(t.border)
+                })
                 .key_context("Sidebar")
                 .track_focus(&self.sidebar_focus)
                 .on_action(cx.listener(Self::sidebar_up))
@@ -4113,9 +4686,10 @@ impl Workspace {
                 .h(px(22.))
                 .w_full()
                 .flex_none()
-                .bg(t.panel_bg)
-                .border_t_1()
-                .border_color(t.border)
+                .bg(self.chrome_background(ChromePart::StatusBar, &t))
+                .when(self.chrome_has_divider(ChromePart::StatusBar), |d| {
+                    d.border_t_1().border_color(t.border)
+                })
                 .flex()
                 .flex_row()
                 .items_center()
@@ -4178,6 +4752,42 @@ impl Workspace {
             .get(self.active)
             .and_then(|tab| tab.path(cx))
             .is_some_and(|p| self.git_modified.contains(&p));
+        // Two logical groups (Apple's guidance caps a toolbar at three):
+        // what the current document can do, and which panels are open.
+        // `toolbar_group` decides placement directly -- each candidate
+        // is partitioned by calling it, rather than hand-placed into a
+        // div and asserted afterwards, so a button with the wrong id
+        // for its intended group lands in the wrong group instead of
+        // merely failing an assert nothing runs. Spacing separates the
+        // groups, not a container -- a boxed group would imply
+        // elevation, and nothing here lifts.
+        type Action = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
+        let candidates: [(&'static str, &'static str, bool, Action); 4] = [
+            ("chrome-changes", "changes", false, |t, w, c| {
+                t.show_changes(&ShowChanges, w, c)
+            }),
+            ("chrome-sidebar", "sidebar", self.show_sidebar, |t, w, c| {
+                t.toggle_sidebar(&ToggleSidebar, w, c)
+            }),
+            ("chrome-outline", "outline", self.show_outline, |t, w, c| {
+                t.toggle_outline(&ToggleOutline, w, c)
+            }),
+            ("chrome-knowledge", "knowledge", self.show_knowledge, |t, w, c| {
+                t.toggle_knowledge(&ToggleKnowledge, w, c)
+            }),
+        ];
+        let mut document_actions = Vec::new();
+        let mut view_toggles = Vec::new();
+        for (id, icon, on, act) in candidates {
+            if id == "chrome-changes" && !modified {
+                continue;
+            }
+            let el = button(id, icon, on, cx, act).into_any_element();
+            match toolbar_group(id) {
+                ToolbarGroup::DocumentAction => document_actions.push(el),
+                ToolbarGroup::ViewToggle => view_toggles.push(el),
+            }
+        }
         Some(
             div()
                 .flex()
@@ -4185,34 +4795,33 @@ impl Workspace {
                 .flex_none()
                 .h_full()
                 .items_center()
-                .children(modified.then(|| {
-                    button("chrome-changes", "changes", false, cx, |t, w, c| {
-                        t.show_changes(&ShowChanges, w, c)
-                    })
-                }))
-                .child(button(
-                    "chrome-sidebar",
-                    "sidebar",
-                    self.show_sidebar,
-                    cx,
-                    |t, w, c| t.toggle_sidebar(&ToggleSidebar, w, c),
-                ))
-                .child(button(
-                    "chrome-outline",
-                    "outline",
-                    self.show_outline,
-                    cx,
-                    |t, w, c| t.toggle_outline(&ToggleOutline, w, c),
-                ))
-                .child(button(
-                    "chrome-knowledge",
-                    "knowledge",
-                    self.show_knowledge,
-                    cx,
-                    |t, w, c| t.toggle_knowledge(&ToggleKnowledge, w, c),
-                ))
+                .gap_3()
+                .when(!document_actions.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .children(document_actions),
+                    )
+                })
+                .when(!view_toggles.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .children(view_toggles),
+                    )
+                })
                 .into_any_element(),
         )
+    }
+
+    /// Which surface a tab sits on. The active tab is the page's own
+    /// edge; every other tab is chrome, sitting on the ground.
+    pub(crate) fn tab_background(&self, ix: usize, t: &Theme) -> gpui::Hsla {
+        if ix == self.active { t.page_bg } else { t.bg }
     }
 
     fn render_titlebar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -4226,10 +4835,11 @@ impl Workspace {
             let is_preview = matches!(tab, Tab::Editor { view: EditorView::Preview(_), .. });
             let is_transient = preview_tab == Some(ix);
             let is_active = ix == active;
-            let (icon, color) = seti::icon_for(&title);
-            let tint = seti_tint(color, &t);
+            let (icon, _) = seti::icon_for(&title);
+            let tint = seti_tint_muted(&t, is_active);
             div()
                 .id(SharedString::from(format!("tab-{ix}")))
+                .debug_selector(move || format!("tab-{ix}"))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -4239,7 +4849,18 @@ impl Workspace {
                 .border_r_1()
                 .border_color(t.border)
                 .cursor_pointer()
-                .when(is_active, |d| d.bg(t.bg))
+                .bg(self.tab_background(ix, &t))
+                // The active tab is the page's own top edge: rounded to
+                // match, and square on the bottom so it meets the page
+                // with no seam. Every other tab keeps the divider that
+                // separates chrome from whatever surface sits below it
+                // -- the titlebar's own border no longer draws one,
+                // since that single line would cut straight across the
+                // active tab too and put the seam back.
+                .when(is_active, |d| {
+                    d.rounded_t(crate::elevation::radius(crate::elevation::Surface::Page))
+                })
+                .when(!is_active, |d| d.border_b_1().border_color(t.border))
                 .when(!is_active, |d| d.hover(|s| s.bg(t.hover_bg)))
                 .child(
                     gpui::svg()
@@ -4303,8 +4924,11 @@ impl Workspace {
             .h(px(34.))
             .flex_none()
             .w_full()
-            .bg(t.panel_bg)
-            .when(!self.focus_mode, |d| d.border_b_1().border_color(t.border))
+            .bg(self.chrome_background(ChromePart::TitleBar, &t))
+            // No border of its own: a single line here would draw
+            // straight across the active tab and put back the seam
+            // Task 5 removes. Each tab carries its own bottom border
+            // instead -- see the tab closure above.
             .flex()
             .flex_row()
             .overflow_hidden()
@@ -4397,6 +5021,35 @@ impl Workspace {
             (n, e)
         };
         let _ = &mut edges;
+        // The view you left, if the vault still describes the one it
+        // was laid out from. Counted nodes alone did not: a link added
+        // between two notes that both exist moves no dots, and an
+        // outside-the-app delete plus create cancel out. The
+        // fingerprint is node count, edge count and an
+        // order-independent fold of the paths, and all three have to
+        // agree -- anything else re-simulates, because a layout that
+        // does not describe the vault is worse than starting over.
+        //
+        // Deliberately checked here and not on every fs event: an edit
+        // made while the graph is away would otherwise throw the view
+        // out, which is the thing this cache exists to avoid.
+        let fresh = crate::graph::shape(&nodes, &edges);
+        if let Some(mut cached) = self.graph_cache.take() {
+            if crate::graph::shape(cached.nodes(), cached.edges()) == fresh {
+                // Its ticker is a task from the previous open; the
+                // layout is picked up again below, from settled or not.
+                cached.ticker = None;
+                // And its card timer belongs to a pointer that has been
+                // somewhere else since: waking it now would card a node
+                // nobody is pointing at.
+                cached.card_timer = None;
+                self.graph = Some(cached);
+                window.focus(&self.graph_focus);
+                self.graph_tick(cx);
+                cx.notify();
+                return;
+            }
+        }
         // Seed with a short run so the first frame is already sensible,
         // then let the ticker carry it the rest of the way on screen —
         // the graph settles in front of you instead of appearing done.
@@ -4410,12 +5063,26 @@ impl Workspace {
             node_drag: None,
             node_dragged: false,
             hovered: None,
+            picker: None,
+            hover: Default::default(),
+            hover_state: crate::graph::Hovering::Idle,
+            card_timer: None,
+            preview_cache: Default::default(),
+            #[cfg(test)]
+            label_count: 0,
+            #[cfg(test)]
+            arrowheads_drawn: false,
             ticker: None,
             color_by: crate::graph::ColorBy::Folder,
+            group_keys: Vec::new(),
             spread: crate::graph::Spread::Normal,
             filter: crate::graph::Filter::default(),
             searching: false,
+            peek: None,
         });
+        if let Some(graph) = self.graph.as_mut() {
+            graph.rebuild_group_keys();
+        }
         window.focus(&self.graph_focus);
         // The layout is unbounded, so frame it before the first paint —
         // otherwise a large vault opens somewhere off screen.
@@ -4453,13 +5120,12 @@ impl Workspace {
     /// Frame the whole graph in the window. There was no way back from
     /// a pan before this short of closing and reopening the view.
     fn graph_fit(&mut self, _: &GraphFit, window: &mut Window, cx: &mut Context<Self>) {
-        let viewport = window.viewport_size();
+        // The board, not the window: with the panel open the right
+        // 360px is not board, and fitting the vault into the window
+        // would tuck part of it behind the panel.
+        let board = (self.graph_board_width(window), f32::from(window.viewport_size().height));
         let Some(graph) = self.graph.as_mut() else { return };
-        let (zoom, pan_x, pan_y) = crate::graph::fit_to(
-            graph.sim.nodes.as_slice(),
-            (f32::from(viewport.width), f32::from(viewport.height)),
-            80.0,
-        );
+        let (zoom, pan_x, pan_y) = crate::graph::fit_to(graph.sim.nodes.as_slice(), board, 80.0);
         graph.zoom = zoom;
         graph.pan = (pan_x, pan_y);
         cx.notify();
@@ -4474,6 +5140,7 @@ impl Workspace {
             ColorBy::Tag => ColorBy::None,
             ColorBy::None => ColorBy::Folder,
         };
+        graph.rebuild_group_keys();
         let what = match graph.color_by {
             ColorBy::Folder => "folder",
             ColorBy::Tag => "tag",
@@ -4592,8 +5259,15 @@ impl Workspace {
     }
 
     fn graph_dismiss(&mut self, _: &GraphDismiss, window: &mut Window, cx: &mut Context<Self>) {
-        // A live filter is what Escape clears first.
+        // The panel is the most recent thing opened, so it is what
+        // Escape closes first -- escaping a peek must not also throw
+        // away the view you were exploring. A live filter is next, and
+        // the graph itself only once nothing is open over it.
         if let Some(graph) = self.graph.as_mut() {
+            if graph.peek.take().is_some() {
+                cx.notify();
+                return;
+            }
             if graph.searching || !graph.filter.is_empty() {
                 graph.searching = false;
                 graph.filter = crate::graph::Filter::default();
@@ -4618,7 +5292,10 @@ impl Workspace {
         let Some(node) = self.graph.as_ref().and_then(|g| g.nodes().get(ix)).cloned() else {
             return;
         };
-        self.graph = None;
+        // The view is put away, not thrown away: coming back lands where
+        // you left rather than re-simulating a layout you had already
+        // arranged.
+        self.graph_cache = self.graph.take();
         if node.ghost {
             let Some(source) = node.ghost_source else { return };
             let Some(dir) = source.parent() else { return };
@@ -4649,13 +5326,184 @@ impl Workspace {
         self.open_path(&node.path, window, cx);
     }
 
-    fn render_graph(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Open the panel on a node without leaving the graph. The click
+    /// that used to open a tab and destroy the view now does this.
+    fn graph_peek(&mut self, ix: usize, window: &Window, cx: &mut Context<Self>) {
+        if self.graph.as_ref().is_none_or(|g| ix >= g.nodes().len()) {
+            return;
+        }
+        if let Some(graph) = self.graph.as_mut() {
+            graph.peek = Some(ix);
+        }
+        // The board has just narrowed by the panel's width, which may
+        // have put the node behind it -- including the one just clicked.
+        self.graph_reveal(ix, window);
+        cx.notify();
+    }
+
+    /// Board width, less the panel when it is open. A dot behind the
+    /// panel is a dot you cannot click, so the board stops where the
+    /// panel starts and the render, the fit and the label culling all
+    /// ask this rather than the window.
+    fn graph_board_width(&self, window: &Window) -> f32 {
+        let full = f32::from(window.viewport_size().width);
+        match self.graph.as_ref().and_then(|g| g.peek) {
+            Some(_) => full - PEEK_W,
+            None => full,
+        }
+    }
+
+    /// Pan until node `ix` sits inside the board, if it does not
+    /// already. The zoom is left alone: walking a backlink must not
+    /// re-frame the whole vault under you.
+    fn graph_reveal(&mut self, ix: usize, window: &Window) {
+        /// How far inside the board edge a node has to be to count as
+        /// visible -- a dot half under the panel is not revealed.
+        const MARGIN: f32 = 48.0;
+        let board_w = self.graph_board_width(window);
+        let board_h = f32::from(window.viewport_size().height);
+        let Some(graph) = self.graph.as_mut() else { return };
+        let Some(node) = graph.nodes().get(ix) else { return };
+        let (nx, ny) = (node.x, node.y);
+        let base = 900.0 * graph.zoom;
+        let (x, y) = (graph.pan.0 + nx * base + 60.0, graph.pan.1 + ny * base + 60.0);
+        let inside = x > MARGIN && x < board_w - MARGIN && y > MARGIN && y < board_h - MARGIN;
+        if inside {
+            return;
+        }
+        graph.pan = (board_w / 2.0 - nx * base - 60.0, board_h / 2.0 - ny * base - 60.0);
+    }
+
+    /// The notes linking to a node, as (node index, name), for the
+    /// panel's backlink rows. An index rather than a path: a row peeks
+    /// that node rather than opening a file.
+    fn graph_peek_backlinks(&self, ix: usize) -> Vec<(usize, String)> {
+        let Some(graph) = self.graph.as_ref() else { return Vec::new() };
+        let Some(node) = graph.nodes().get(ix) else { return Vec::new() };
+        let at = |path: &Path| {
+            let stem = path.file_stem()?.to_string_lossy().into_owned();
+            Some((graph.nodes().iter().position(|n| n.path == *path)?, stem))
+        };
+        // A ghost is not in the index, so it has no backlinks there --
+        // but the note that named it is exactly the one link it has.
+        if node.ghost {
+            return node.ghost_source.as_deref().and_then(at).into_iter().collect();
+        }
+        let sources = self.knowledge.lock().unwrap().backlinks(&node.path);
+        let mut rows: Vec<(usize, String)> =
+            sources.iter().filter_map(|(path, _)| at(path)).collect();
+        rows.sort_by(|a, b| a.1.cmp(&b.1));
+        rows
+    }
+
+    /// Title, excerpt and counts for a node's card. Pure enough to
+    /// test: the element around it is layout.
+    ///
+    /// The excerpt is read synchronously, the way the editor's link
+    /// preview reads one. The dwell gate is what makes that acceptable
+    /// -- a sweep across a cluster earns no card and reads nothing --
+    /// and the cache keeps a second rest on the same dot free.
+    fn graph_card_text(&mut self, ix: usize) -> String {
+        let Some(node) = self.graph.as_ref().and_then(|g| g.nodes().get(ix)).cloned() else {
+            return String::new();
+        };
+        let name = node
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if node.ghost {
+            // A ghost is a name, not a note: there is no file to read.
+            return format!("{name}\nThis note does not exist yet");
+        }
+        let cached = self.graph.as_ref().and_then(|g| g.preview_cache.get(&node.path).cloned());
+        let (title, body) = match cached {
+            Some(hit) => hit,
+            None => {
+                // Deleted between indexing and hovering. Said on the
+                // card rather than in the error strip: hovering is not
+                // a command anyone issued.
+                let Ok(text) = std::fs::read_to_string(&node.path) else {
+                    return format!("{name}\nThis note could not be read");
+                };
+                let pair = (
+                    crate::preview::title_of(&text, &node.path),
+                    crate::preview::excerpt(&text, 3),
+                );
+                if let Some(g) = self.graph.as_mut() {
+                    g.preview_cache.insert(node.path.clone(), pair.clone());
+                }
+                pair
+            }
+        };
+        let (out, inn) = self.graph_link_counts(ix);
+        let mut card = title;
+        // An empty note would otherwise spend a line saying nothing.
+        if !body.is_empty() {
+            card.push('\n');
+            card.push_str(&body);
+        }
+        card.push_str(&format!("\n{out} out \u{00b7} {inn} in"));
+        card
+    }
+
+    /// Links out of and into a node.
+    ///
+    /// A reciprocated pair is ONE edge with `both` set -- that is how
+    /// `graph::build` stores it, so it draws one line with two
+    /// arrowheads. Counting only `from`/`to` would therefore report a
+    /// mutual link as one-directional at each end.
+    fn graph_link_counts(&self, ix: usize) -> (usize, usize) {
+        let Some(graph) = self.graph.as_ref() else { return (0, 0) };
+        let mut out = 0;
+        let mut inn = 0;
+        for e in graph.edges() {
+            if e.from == ix {
+                out += 1;
+                inn += usize::from(e.both);
+            } else if e.to == ix {
+                inn += 1;
+                out += usize::from(e.both);
+            }
+        }
+        (out, inn)
+    }
+
+    /// How many node labels the last render produced. The graph used to
+    /// build one per node whether or not it was visible; this is what
+    /// holds that shut.
+    #[cfg(test)]
+    fn graph_label_count(&self) -> usize {
+        self.graph.as_ref().map_or(0, |g| g.label_count)
+    }
+
+    fn render_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         /// Width of a node's label box. Fixed, and centred on the node,
         /// so label length never displaces the dot.
         const LABEL_W: f32 = 160.0;
+        /// How far a label's box reaches below its dot. Culling reads
+        /// it, so a name whose dot sits just above the top edge is
+        /// still drawn.
+        const LABEL_ROW: f32 = 20.0;
+        /// Width of the hover card.
+        const CARD_W: f32 = 260.0;
+        /// Roughly how tall a card gets. Used only to keep it on
+        /// screen: the card sizes itself to its text, and a card whose
+        /// bottom is past the window edge is a card you cannot read.
+        const CARD_H: f32 = 86.0;
+        /// How far the card sits from the dot it describes, so the dot
+        /// stays visible beside it.
+        const CARD_GAP: f32 = 12.0;
         // Which note is open, so its node can be marked. Read before
         // borrowing the graph state.
         let open_path = self.tabs.get(self.active).and_then(|tab| tab.path(cx));
+        // Labels are culled against this: a name for a dot that is not
+        // on screen is an element shaped for nothing.
+        // The board, not the window: with the panel open the right
+        // 360px belongs to it, and a label or a card out there is drawn
+        // underneath something opaque.
+        let view_w = self.graph_board_width(window);
+        let view_h = f32::from(window.viewport_size().height);
         let state = self.graph.as_ref()?;
         let t = theme(cx);
         // World transform: unit square → an 900px board, panned/zoomed.
@@ -4677,29 +5525,18 @@ impl Workspace {
             t.syntax.tag,
             t.syntax.property,
         ];
-        // Sorted and deduplicated, so a group's colour is the same on
-        // every open rather than depending on node order.
-        let group_keys: Vec<String> = {
-            let mut keys: Vec<String> = state
-                .nodes()
-                .iter()
-                .filter_map(|n| match state.color_by {
-                    crate::graph::ColorBy::None => None,
-                    crate::graph::ColorBy::Folder => n.folder.clone(),
-                    crate::graph::ColorBy::Tag => n.tag.clone(),
-                })
-                .collect();
-            keys.sort();
-            keys.dedup();
-            keys
-        };
+        // Held on the state, not rebuilt here: cloning, sorting and
+        // deduplicating every node's folder or tag is work for a change
+        // of nodes or colour mode, not for a frame.
+        let group_keys = &state.group_keys;
         let label_alpha = crate::graph::label_opacity(state.zoom);
+        // What this zoom is worth drawing at all.
+        let lod = crate::graph::lod(state.zoom);
         // (from, to, lit, reciprocated, radius at each end) — the radii
         // let the arrowhead stop short of the node it points at.
-        let node_r = |n: &crate::graph::GraphNode| {
-            (5.0 + (n.degree as f32).sqrt() * 3.0) * state.zoom.sqrt()
-        };
-        let edge_px: Vec<((f32, f32), (f32, f32), bool, bool, f32, f32)> = state
+        let node_r =
+            |n: &crate::graph::GraphNode| crate::graph::node_radius(n.degree, state.zoom);
+        let edge_px: Vec<((f32, f32), (f32, f32), bool, f32, f32, bool, bool)> = state
             .edges()
             .iter()
             .map(|e| {
@@ -4709,15 +5546,35 @@ impl Workspace {
                     .is_none_or(|l| l.contains(&e.from) && l.contains(&e.to))
                     && state.filter.matches_at(e.from, a)
                     && state.filter.matches_at(e.to, b);
-                (at(a), at(b), on, e.both, node_r(a), node_r(b))
+                // Below half zoom an arrowhead is sub-pixel, and it is
+                // one or two tessellated paths per edge at exactly the
+                // zoom where the whole vault is on screen and nothing
+                // can be culled. So the decision is made here, in the
+                // data the painter consumes, rather than inside the
+                // paint closure: `arrowheads_drawn` reads it back, and a
+                // gate the painter decided for itself would have no
+                // detector.
+                (
+                    at(a),
+                    at(b),
+                    on,
+                    node_r(a),
+                    node_r(b),
+                    lod.arrowheads,
+                    lod.arrowheads && e.both,
+                )
             })
             .collect();
+        // What the painter was handed, which is the only honest answer to
+        // "were arrowheads drawn".
+        #[cfg(test)]
+        let arrowheads = edge_px.iter().any(|&(.., to, from)| to || from);
         let edge_color = Hsla { a: 0.35, ..t.fg_muted };
         let dim_edge = Hsla { a: 0.08, ..t.fg_muted };
         let edges_canvas = gpui::canvas(
             move |bounds, _, _| bounds,
             move |bounds, _, window, _| {
-                for (a, b, on, both, ra, rb) in &edge_px {
+                for (a, b, on, ra, rb, head_to, head_from) in &edge_px {
                     let pa = point(bounds.origin.x + px(a.0), bounds.origin.y + px(a.1));
                     let pb = point(bounds.origin.x + px(b.0), bounds.origin.y + px(b.1));
                     // Edges outside the hovered neighbourhood fade back
@@ -4727,16 +5584,13 @@ impl Workspace {
                     window.paint_path(crate::graph::line_path(pa, pb, 1.5), color);
                     // Which way the link points. A pair that links both
                     // ways gets an arrowhead at each end rather than two
-                    // lines drawn over each other.
-                    window.paint_path(
-                        crate::graph::arrow_path(pa, pb, rb + 2.0, 7.0),
-                        color,
-                    );
-                    if *both {
-                        window.paint_path(
-                            crate::graph::arrow_path(pb, pa, ra + 2.0, 7.0),
-                            color,
-                        );
+                    // lines drawn over each other. Whether either is
+                    // worth drawing at this zoom was decided above.
+                    if *head_to {
+                        window.paint_path(crate::graph::arrow_path(pa, pb, rb + 2.0, 7.0), color);
+                    }
+                    if *head_from {
+                        window.paint_path(crate::graph::arrow_path(pb, pa, ra + 2.0, 7.0), color);
                     }
                 }
             },
@@ -4744,131 +5598,132 @@ impl Workspace {
         .absolute()
         .size_full();
 
-        let mut board = div().absolute().inset_0().child(edges_canvas);
-        for (ix, node) in state.nodes().iter().enumerate() {
+        // (centre, radius, colour) in board pixels, in the order gpui
+        // painted the node divs in -- so `Picker`, which reads back to
+        // front, resolves a crowded cluster exactly as gpui's own
+        // hit-testing did.
+        let dots: Vec<((f32, f32), f32, Hsla)> = state
+            .nodes()
+            .iter()
+            .enumerate()
+            .map(|(ix, node)| {
+                // Lit means: inside the hovered neighbourhood, and
+                // matching whatever the view is narrowed to.
+                let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
+                    && state.filter.matches_at(ix, node);
+                // The dot under the pointer is picked out, which is what
+                // the per-node `:hover` used to say.
+                let base = if state.hovered == Some(ix) {
+                    t.link
+                } else {
+                    node_base_color(
+                        node,
+                        state.color_by,
+                        group_keys,
+                        &palette,
+                        open_path.as_deref(),
+                        &t,
+                    )
+                };
+                let faded = if on { base } else { Hsla { a: 0.25, ..base } };
+                (
+                    at(node),
+                    crate::graph::node_radius(node.degree, state.zoom),
+                    crate::graph::orphan_dim(faded, node.degree),
+                )
+            })
+            .collect();
+        // The pointer is matched against exactly what was painted.
+        let picker =
+            crate::graph::Picker::build(dots.iter().map(|&((x, y), r, _)| (x, y, r)).collect());
+        let nodes_canvas = gpui::canvas(
+            move |bounds, _, _| bounds,
+            move |bounds, _, window, _| {
+                for ((x, y), r, color) in &dots {
+                    // A quad with corner radii of half its size is a
+                    // filled circle, and a quad never reaches the path
+                    // tessellator -- which is the whole point: 2,500
+                    // tessellated circles a frame is what made this
+                    // stutter.
+                    let d = px(r * 2.0);
+                    let origin = point(bounds.origin.x + px(x - r), bounds.origin.y + px(y - r));
+                    window.paint_quad(gpui::quad(
+                        gpui::Bounds { origin, size: gpui::size(d, d) },
+                        gpui::Corners::all(px(*r)),
+                        *color,
+                        gpui::Edges::default(),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::default(),
+                    ));
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+
+        // Edges first, then dots: a canvas paints in call order, and a
+        // dot hidden under its own edges is the mistake this order
+        // avoids.
+        let mut board = div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(view_w))
+            // Its own clip, so nothing it holds -- a canvas, a label --
+            // reaches past the board into the panel.
+            .overflow_hidden()
+            .child(edges_canvas)
+            .child(nodes_canvas);
+
+        // Names stay elements rather than canvas text, so they keep the
+        // theme's font stack and the same opacity rule as before. What
+        // changed is how many: at readable zoom, the dots on screen;
+        // below it, only the hovered neighbourhood -- and that one at
+        // full strength, because a dot in a whole-vault view is
+        // otherwise unnameable short of opening it.
+        let (named, name_alpha): (Vec<usize>, f32) = if lod.labels {
+            let on_screen = |ix: usize| {
+                let (x, y) = at(&state.nodes()[ix]);
+                // The label box is LABEL_W wide and centred on the dot,
+                // so half of it may hang past either side edge, and it
+                // sits below the dot.
+                x > -LABEL_W / 2.0
+                    && x < view_w + LABEL_W / 2.0
+                    && y > -LABEL_ROW
+                    && y < view_h
+            };
+            ((0..state.nodes().len()).filter(|&ix| on_screen(ix)).collect(), label_alpha)
+        } else {
+            (lit.as_ref().map(|l| l.iter().copied().collect()).unwrap_or_default(), 1.0)
+        };
+        #[cfg(test)]
+        let label_count = named.len();
+        for ix in named {
+            let node = &state.nodes()[ix];
             let (x, y) = at(node);
-            let r = (5.0 + (node.degree as f32).sqrt() * 3.0) * state.zoom.sqrt();
+            let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
+                && state.filter.matches_at(ix, node);
             let name = node
                 .path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            // Hovering one node lights it and everything it links to,
-            // and fades the rest back — the shape stays legible while
-            // one neighbourhood is picked out.
-            // Lit means: inside the hovered neighbourhood, and matching
-            // whatever the view is narrowed to.
-            let on = lit.as_ref().is_none_or(|l| l.contains(&ix))
-                && state.filter.matches_at(ix, node);
-            let is_open = open_path.as_deref() == Some(node.path.as_path());
-            let is_ghost = node.ghost;
-            let group = match state.color_by {
-                crate::graph::ColorBy::None => None,
-                crate::graph::ColorBy::Folder => node.folder.as_deref(),
-                crate::graph::ColorBy::Tag => node.tag.as_deref(),
-            };
-            let grouped = crate::graph::color_slot(group, &group_keys, palette.len())
-                .map(|slot| palette[slot]);
-            let base_color = if is_open {
-                t.link
-            } else if node.ghost {
-                // Hollow: it is a name, not a note. Clicking it creates
-                // the file, the same as following the link would.
-                Hsla { a: 0.30, ..t.fg_muted }
-            } else if let Some(c) = grouped {
-                c
-            } else if node.degree > 0 {
-                t.accent
-            } else {
-                t.fg_muted
-            };
-            let node_color = if on { base_color } else { Hsla { a: 0.25, ..base_color } };
-            let label_color = Hsla {
-                a: if on { label_alpha } else { label_alpha * 0.25 },
-                ..t.fg
-            };
             board = board.child(
+                // A fixed-width box centred on the node, so the label
+                // grows sideways from the dot rather than moving it.
                 div()
-                    .id(("graph-node", ix))
                     .absolute()
-                    .left(px(x - r))
-                    .top(px(y - r))
-                    // Exactly the dot's size. A flex column sized by its
-                    // widest child let a long label stretch the box, and
-                    // `items_center` then centred the dot inside *that*
-                    // — so nodes with long names sat right of where
-                    // their edges met. The label is positioned below
-                    // without contributing to this box.
-                    .w(px(r * 2.0))
-                    .h(px(r * 2.0))
-                    .cursor_pointer()
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if let Some(graph) = &mut this.graph {
-                            graph.hovered = hovered.then_some(ix);
-                            cx.notify();
-                        }
-                    }))
-                    // Press on a node grabs it rather than panning the
-                    // board, and holds the layout warm so the graph
-                    // keeps reacting while it is dragged around.
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(graph) = &mut this.graph {
-                                graph.node_drag = Some(ix);
-                                graph.node_dragged = false;
-                                graph.sim.hold_warm(true);
-                            }
-                            this.graph_tick(cx);
-                        }),
-                    )
-                    .on_mouse_down(
-                        gpui::MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(graph) = &mut this.graph {
-                                graph.hovered = Some(ix);
-                            }
-                            let surface = if is_ghost {
-                                crate::menus::Surface::GraphGhost
-                            } else {
-                                crate::menus::Surface::GraphNode
-                            };
-                            this.context_menu =
-                                Some((event.position, surface, Default::default()));
-                            cx.notify();
-                        }),
-                    )
-                    .child(
-                        div()
-                            .size(px(r * 2.0))
-                            .rounded_full()
-                            .bg(node_color)
-                            .hover(|s| s.bg(t.link)),
-                    )
-                    .child(
-                        // A fixed-width box centred on the node, so the
-                        // label grows sideways from the dot rather than
-                        // moving it.
-                        div()
-                            .absolute()
-                            .top(px(r * 2.0 + 2.0))
-                            .left(px(r - LABEL_W / 2.0))
-                            .w(px(LABEL_W))
-                            .text_center()
-                            .text_size(px(11.))
-                            .text_color(label_color)
-                            .child(SharedString::from(name)),
-                    )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        // A release that ends a drag is not a click.
-                        if this.graph.as_ref().is_some_and(|g| g.node_dragged) {
-                            return;
-                        }
-                        this.open_graph_node(ix, window, cx);
-                    })),
+                    .left(px(x - LABEL_W / 2.0))
+                    .top(px(y + node_r(node) + 2.0))
+                    .w(px(LABEL_W))
+                    .text_center()
+                    .text_size(px(11.))
+                    .text_color(Hsla {
+                        a: if on { name_alpha } else { name_alpha * 0.25 },
+                        ..t.fg
+                    })
+                    .child(SharedString::from(name)),
             );
         }
 
@@ -4912,6 +5767,168 @@ impl Workspace {
                 .child(SharedString::from(parts.join("  ·  ")))
         });
 
+        // The dots have no elements of their own to carry a cursor, so
+        // the board wears the pointer's while one is under it.
+        let on_a_dot = state.hovered.is_some();
+
+        // The node the dwell has earned a card for, and where its dot
+        // sits. Only the position is read here: the text reads the note
+        // off disk and caches it, which needs the state mutably, so it
+        // waits until after the hand-back below.
+        let carded = match state.hover_state {
+            crate::graph::Hovering::Carded(ix) => state.nodes().get(ix).map(|n| {
+                let (x, y) = at(n);
+                (ix, x, y + crate::graph::node_radius(n.degree, state.zoom))
+            }),
+            crate::graph::Hovering::Idle | crate::graph::Hovering::Lit(_) => None,
+        };
+
+        // Last use of `state`, so the graph can be borrowed mutably to
+        // hand back what this render decided. The pointer has to be
+        // matched against the dots this frame painted, not the ones
+        // before it.
+        if let Some(g) = self.graph.as_mut() {
+            g.picker = Some(picker);
+            #[cfg(test)]
+            {
+                g.label_count = label_count;
+                g.arrowheads_drawn = arrowheads;
+            }
+        }
+
+        // It takes no pointer events -- no `occlude`, no listeners: the
+        // card describes the dot under the pointer, and swallowing the
+        // click that dot is waiting for would be the worst thing it
+        // could do.
+        let card = carded.map(|(ix, x, y)| {
+            let text = self.graph_card_text(ix);
+            let mut lines = text.lines();
+            let title = lines.next().unwrap_or_default().to_string();
+            let rest: Vec<SharedString> =
+                lines.map(|l| SharedString::from(l.to_string())).collect();
+            // Flipped rather than clipped: a card that runs off the
+            // right edge says nothing at all.
+            let left = if x + CARD_GAP + CARD_W > view_w {
+                x - CARD_GAP - CARD_W
+            } else {
+                x + CARD_GAP
+            };
+            div()
+                .absolute()
+                .left(px(left.max(8.0)))
+                .top(px((y + CARD_GAP / 2.0).min((view_h - CARD_H).max(8.0))))
+                .w(px(CARD_W))
+                .p_2()
+                .border_1()
+                .border_color(t.border)
+                .elevated(crate::elevation::Overlay::GraphCard, &t)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(t.ui_size))
+                        .text_color(t.fg_strong)
+                        .child(SharedString::from(title)),
+                )
+                .children(rest.into_iter().map(|line| {
+                    div().text_size(px(11.)).text_color(t.fg_muted).child(line)
+                }))
+        });
+
+        // The panel. It occludes: the board's pointer handlers sit on
+        // the overlay, which still spans the whole window, so without
+        // this a click meant for the Open button would also land on
+        // whatever dot happens to be behind the panel.
+        let peeked = self.graph.as_ref().and_then(|g| g.peek);
+        let peek = peeked.map(|ix| {
+            let text = self.graph_card_text(ix);
+            let rows = self.graph_peek_backlinks(ix);
+            let mut lines = text.lines();
+            let title = lines.next().unwrap_or_default().to_string();
+            let rest: Vec<SharedString> =
+                lines.map(|l| SharedString::from(l.to_string())).collect();
+            let ghost = self
+                .graph
+                .as_ref()
+                .and_then(|g| g.nodes().get(ix))
+                .is_some_and(|n| n.ghost);
+            let mut panel = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(PEEK_W))
+                .occlude()
+                .bg(t.panel_bg)
+                .border_l_1()
+                .border_color(t.border)
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .overflow_hidden()
+                .text_size(px(t.ui_size))
+                .child(
+                    div()
+                        .text_size(px(t.ui_size + 3.))
+                        .text_color(t.fg_strong)
+                        .child(SharedString::from(title)),
+                )
+                .children(rest.into_iter().map(|line| {
+                    div().text_color(t.fg_muted).child(line)
+                }))
+                .child(
+                    div()
+                        .id("graph-peek-open")
+                        .mt_1()
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .bg(t.selected_bg)
+                        .text_color(t.fg)
+                        .text_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.hover_bg))
+                        // A ghost has no file yet; opening one creates
+                        // it, exactly as following the link would.
+                        .child(if ghost { "Create note" } else { "Open" })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_graph_node(ix, window, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .text_size(px(t.ui_size - 1.))
+                        .text_color(t.fg_muted)
+                        .child(if rows.is_empty() {
+                            SharedString::from("Nothing links here yet")
+                        } else {
+                            SharedString::from(format!("{} linking here", rows.len()))
+                        }),
+                );
+            // A row walks the peek rather than opening a tab: following
+            // the vault around is the whole point of the panel.
+            for (row, (at, name)) in rows.into_iter().enumerate() {
+                panel = panel.child(
+                    div()
+                        .id(("graph-peek-backlink", row))
+                        .px_2()
+                        .py(px(4.))
+                        .rounded_md()
+                        .text_color(t.link)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.hover_bg))
+                        .child(SharedString::from(name))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.graph_peek(at, window, cx);
+                        })),
+                );
+            }
+            panel
+        });
+
         Some(
             div()
                 .absolute()
@@ -4919,6 +5936,7 @@ impl Workspace {
                 .occlude()
                 .bg(t.bg)
                 .key_context("GraphView")
+                .when(on_a_dot, |d| d.cursor_pointer())
                 .track_focus(&self.graph_focus)
                 // Typing narrows the view. Only while searching, so the
                 // other single-key shortcuts keep working otherwise.
@@ -4967,19 +5985,110 @@ impl Workspace {
                 .on_action(cx.listener(Self::graph_freeze))
                 .on_action(cx.listener(Self::graph_spread))
                 .overflow_hidden()
+                // One element covers the whole board, so a press either
+                // grabs the dot under it or starts a pan. Grabbing a
+                // node holds the layout warm, so the graph keeps
+                // reacting while it is dragged around.
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                        if let Some(graph) = &mut this.graph {
-                            graph.drag =
-                                Some((f32::from(event.position.x), f32::from(event.position.y)));
-                            cx.notify();
+                        let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                        let Some(graph) = this.graph.as_mut() else { return };
+                        let hit = graph.picker.as_ref().and_then(|p| p.pick(x, y));
+                        match hit {
+                            Some(ix) => {
+                                graph.node_drag = Some(ix);
+                                graph.node_dragged = false;
+                                graph.sim.hold_warm(true);
+                            }
+                            None => graph.drag = Some((x, y)),
                         }
+                        cx.notify();
+                        if hit.is_some() {
+                            // Only a press on a dot is consumed; a press
+                            // on empty board still reaches whatever is
+                            // behind the overlay, as it always did.
+                            cx.stop_propagation();
+                            this.graph_tick(cx);
+                        }
+                    }),
+                )
+                // Right-click raises the node menu. A ghost gets the
+                // menu that offers to create the file.
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                        let Some(graph) = this.graph.as_mut() else { return };
+                        let Some(ix) = graph.picker.as_ref().and_then(|p| p.pick(x, y)) else {
+                            return;
+                        };
+                        graph.hovered = Some(ix);
+                        let surface = if graph.nodes()[ix].ghost {
+                            crate::menus::Surface::GraphGhost
+                        } else {
+                            crate::menus::Surface::GraphNode
+                        };
+                        cx.stop_propagation();
+                        this.context_menu = Some((event.position, surface, Default::default()));
+                        cx.notify();
                     }),
                 )
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                     let Some(graph) = &mut this.graph else { return };
                     let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                    // What the pointer is over, and how long it has
+                    // rested there. This is what the per-node `on_hover`
+                    // used to say, now that there are no per-node
+                    // elements to say it.
+                    let hit = graph.picker.as_ref().and_then(|p| p.pick(x, y));
+                    let now = std::time::Instant::now();
+                    let hovering = graph.hover.at(hit, now);
+                    // Arriving on a dot, as opposed to sliding around on
+                    // one already lit: that is what starts a dwell, and
+                    // what has to be woken from.
+                    let arrived = matches!(hovering, crate::graph::Hovering::Lit(_))
+                        && graph.hover_state != hovering;
+                    if graph.hovered != hit || graph.hover_state != hovering {
+                        graph.hovered = hit;
+                        graph.hover_state = hovering;
+                        cx.notify();
+                    }
+                    match hovering {
+                        // Off the dots. The pending wake goes with the
+                        // pointer: dropping the task cancels it, the way
+                        // `ticker` is cancelled, so no card can arrive
+                        // for a node that has already been left.
+                        crate::graph::Hovering::Idle => graph.card_timer = None,
+                        crate::graph::Hovering::Lit(ix) if arrived => {
+                            // The timer is the clock here, so it hands
+                            // `Hover` the instant it was set to wake
+                            // for rather than the one it woke at: a late
+                            // wake cannot un-earn a card, and the delay
+                            // stays testable without sleeping. The rule
+                            // itself is still `Hover`'s.
+                            let due = now + crate::graph::CARD_DWELL;
+                            graph.card_timer = Some(cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(crate::graph::CARD_DWELL).await;
+                                this.update(cx, |this, cx| {
+                                    // The graph may have been dismissed,
+                                    // or the pointer moved on without a
+                                    // move event this handler saw.
+                                    let Some(graph) = this.graph.as_mut() else { return };
+                                    if graph.hovered != Some(ix) {
+                                        return;
+                                    }
+                                    let rested = graph.hover.at(Some(ix), due);
+                                    if graph.hover_state != rested {
+                                        graph.hover_state = rested;
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                            }));
+                        }
+                        crate::graph::Hovering::Lit(_) | crate::graph::Hovering::Carded(_) => {}
+                    }
                     // Dragging a node: convert the pointer back into
                     // layout space and pin the node there. The rest of
                     // the graph is pushed around by it, live.
@@ -5026,21 +6135,31 @@ impl Workspace {
                 )
                 .on_mouse_up(
                     gpui::MouseButton::Left,
-                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                        if let Some(graph) = &mut this.graph {
-                            graph.drag = None;
-                            // Letting go hands the node back to the
-                            // layout, which pulls it into place instead
-                            // of leaving it stranded where it was
-                            // dropped.
-                            if let Some(ix) = graph.node_drag.take() {
-                                graph.sim.release(ix);
-                                graph.sim.hold_warm(false);
-                                graph.sim.reheat(0.6);
-                            }
-                            cx.notify();
+                    cx.listener(|this, _: &MouseUpEvent, window, cx| {
+                        let Some(graph) = this.graph.as_mut() else { return };
+                        graph.drag = None;
+                        // Letting go hands the node back to the layout,
+                        // which pulls it into place instead of leaving
+                        // it stranded where it was dropped.
+                        let released = graph.node_drag.take();
+                        let moved = std::mem::take(&mut graph.node_dragged);
+                        if let Some(ix) = released {
+                            graph.sim.release(ix);
+                            graph.sim.hold_warm(false);
+                            graph.sim.reheat(0.6);
                         }
+                        cx.notify();
                         this.graph_tick(cx);
+                        // A press that grabbed a dot and did not move it
+                        // is a click on that dot. gpui's own click
+                        // machinery cannot tell that apart from a pan
+                        // that happens to end over a dot, now that one
+                        // element covers the whole board — so the open
+                        // is decided here, from the node the press
+                        // actually grabbed.
+                        if let Some(ix) = released.filter(|_| !moved) {
+                            this.graph_peek(ix, window, cx);
+                        }
                     }),
                 )
                 .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
@@ -5072,6 +6191,8 @@ impl Workspace {
                                 .child("drag to pan · scroll to zoom · esc to close"),
                         ),
                 )
+                .children(peek)
+                .children(card)
                 .into_any_element(),
         )
     }
@@ -5368,9 +6489,10 @@ impl Workspace {
                 .w(px(220.))
                 .h_full()
                 .flex_none()
-                .bg(t.panel_bg)
-                .border_l_1()
-                .border_color(t.border)
+                .bg(self.chrome_background(ChromePart::Outline, &t))
+                .when(self.chrome_has_divider(ChromePart::Outline), |d| {
+                    d.border_l_1().border_color(t.border)
+                })
                 .flex()
                 .flex_col()
                 .child(
@@ -5385,6 +6507,61 @@ impl Workspace {
                 .child(div().flex_1().px_2().pb_4().child(list))
                 .into_any_element(),
         )
+    }
+
+    /// The gap between the page and the window edge. One number, so
+    /// the layout and everything sized against it agree. Nothing reads
+    /// this but `page_margins`: the inset reaches the editor and its
+    /// projectors as a narrower `available` width through the ordinary
+    /// layout, never as a constant they look up.
+    pub(crate) fn page_inset(&self) -> gpui::Pixels {
+        px(10.)
+    }
+
+    /// Which edges of the page meet the ground. Three of them do; the
+    /// top is deliberately flush, because that is where the active tab
+    /// joins the page. Tab and page together are the sheet, the way a
+    /// browser attaches a tab to its document -- a top margin would
+    /// leave a gap the tab cannot cross.
+    pub(crate) fn page_margins(&self) -> gpui::Edges<gpui::Pixels> {
+        let inset = self.page_inset();
+        gpui::Edges { top: px(0.), right: inset, bottom: inset, left: inset }
+    }
+
+    /// Two quarter-discs that re-cut the page's bottom corners on top
+    /// of whatever the document painted there.
+    ///
+    /// GPUI's content mask is `ContentMask { bounds }` -- a rectangle,
+    /// with no radii anywhere in it -- so `overflow_hidden` clips
+    /// children to the page's *box*, not to its rounded outline. Any
+    /// filled descendant that reaches the bottom edge (the editor's
+    /// own background, a fenced-code band on the last line, a table
+    /// widget) paints straight through the arcs and squares them off,
+    /// and because that is pure paint no test can see it happen.
+    ///
+    /// So the page takes its corners back at the end of the frame
+    /// rather than asking every descendant to remember. Each mask is a
+    /// radius-sized square of ground with a page-coloured circle of
+    /// that radius centred on its inner corner -- but neither half is
+    /// quite what it claims. The disc paints flat `page_bg`, which is
+    /// only ever an approximation of whatever the page actually shows
+    /// there: where a code block's `code_bg` would show through, the
+    /// mismatch is invisible in the dark theme (the two colours are
+    /// equal) but up to 22 levels of blue in light. And the square's
+    /// ground is not exactly the ground either -- painting flat `t.bg`
+    /// there also erases the page's own shadow in that sliver, which
+    /// would otherwise blend in at roughly 8-18 RGB levels in the light
+    /// theme, 4-8 in dark.
+    fn page_corner_masks(&self, t: &Theme) -> [AnyElement; 2] {
+        let r = crate::elevation::radius(crate::elevation::Surface::Page);
+        // Diameter 2r, so gpui's radius clamp (min(w, h) / 2) leaves a
+        // true circle rather than a flattened one.
+        let disc = || div().absolute().w(r * 2.).h(r * 2.).rounded_full().bg(t.page_bg);
+        let corner = || div().absolute().bottom_0().w(r).h(r).overflow_hidden().bg(t.bg);
+        [
+            corner().left_0().child(disc().left_0().top(-r)).into_any_element(),
+            corner().right_0().child(disc().right_0().top(-r)).into_any_element(),
+        ]
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -5436,15 +6613,27 @@ impl Render for Workspace {
         let titlebar = self.render_titlebar(window, cx);
         let outline = self.render_outline(cx);
         let knowledge = self.render_knowledge(cx);
-        let content: AnyElement = match self.tabs.get(self.active) {
-            Some(Tab::Reader(reader)) => reader.clone().into_any_element(),
+        // Built here rather than in the chain below because it needs the
+        // window (for the viewport it culls labels against); where it is
+        // *placed* in the chain is what decides its z-order.
+        let graph_view = self.render_graph(window, cx);
+        // Each arm says whether what it renders is a document, because
+        // only a document gets the page. An image is not one -- it
+        // keeps the ground, and a ground-coloured fill inside a page
+        // would wear a shadow and a radius that trace a sheet that is
+        // not there. Neither is the empty state: with no tab there is
+        // nothing for Task 5's tab strip to join, and an empty page
+        // hanging under an empty strip reads as a document failing to
+        // load. Both fall through to the window's own ground.
+        let (content, on_page): (AnyElement, bool) = match self.tabs.get(self.active) {
+            Some(Tab::Reader(reader)) => (reader.clone().into_any_element(), true),
             Some(Tab::Editor { view: EditorView::Preview(preview), .. }) => {
-                preview.clone().into_any_element()
+                (preview.clone().into_any_element(), true)
             }
-            Some(Tab::Editor { editor, .. }) => editor.clone().into_any_element(),
+            Some(Tab::Editor { editor, .. }) => (editor.clone().into_any_element(), true),
             Some(Tab::Image { path, zoom, .. }) => {
                 let zoom = *zoom;
-                if zoom <= 1.0 + f32::EPSILON && zoom >= 1.0 - f32::EPSILON {
+                let el = if zoom <= 1.0 + f32::EPSILON && zoom >= 1.0 - f32::EPSILON {
                     div()
                         .size_full()
                         .bg(t.bg)
@@ -5463,10 +6652,38 @@ impl Render for Workspace {
                         .p(px(32.))
                         .child(gpui::img(path.clone()).w(gpui::relative(zoom)))
                         .into_any_element()
-                }
+                };
+                (el, false)
             }
-            None => self.render_empty(cx),
+            None => (self.render_empty(cx), false),
         };
+        // The document rests on the ground: its own surface, a margin,
+        // a radius and the resting shadow. The inset is part of the
+        // available measure the editor and its projectors lay out
+        // against, so this is not a paint-only wrapper. The margins go
+        // on as one `Edges` -- see `elevation::Margins` for why four
+        // separate calls were not good enough.
+        let page = div()
+            .flex_1()
+            .min_w_0()
+            .debug_selector(|| "page".into())
+            .when(on_page, |d| {
+                d.margins(self.page_margins())
+                    .bg(t.page_bg)
+                    // Bottom corners only. The top edge is flush because
+                    // the active tab joins the page there; a rounded top
+                    // corner would open exactly the seam the tab has to
+                    // cross.
+                    .rounded_b(crate::elevation::radius(crate::elevation::Surface::Page))
+                    .shadow(crate::elevation::shadows(
+                        crate::elevation::Surface::Page,
+                        t.shadow,
+                    ))
+                    .overflow_hidden()
+            })
+            .child(content)
+            // Last, so they sit over the document. See `page_corner_masks`.
+            .when(on_page, |d| d.children(self.page_corner_masks(&t)));
 
         div()
             .size_full()
@@ -5478,6 +6695,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_file))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::open_folder_in_new_window))
+            .on_action(cx.listener(Self::minimize))
+            .on_action(cx.listener(Self::zoom))
             .on_action(cx.listener(Self::open_dialog))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -5699,7 +6918,14 @@ impl Render for Workspace {
                                     .min_w_0()
                                     .flex()
                                     .flex_col()
-                                    .child(div().flex_1().min_h_0().child(content)),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .flex()
+                                            .debug_selector(|| "document-pane".into())
+                                            .child(page),
+                                    ),
                             )
                             .children(outline)
                             .children(knowledge),
@@ -5855,11 +7081,9 @@ impl Render for Workspace {
                                 .top(px(40.))
                                 .left(px(8.))
                                 .w(px(280.))
-                                .bg(t.panel_bg)
                                 .border_1()
                                 .border_color(t.border)
-                                .rounded_lg()
-                                .shadow_lg()
+                                .elevated(crate::elevation::Overlay::AppMenu, &t)
                                 .p_1()
                                 .flex()
                                 .flex_col()
@@ -5896,7 +7120,7 @@ impl Render for Workspace {
                         ),
                 )
             })
-            .children(self.render_graph(cx))
+            .children(graph_view)
             .when_some(self.move_picker.as_ref(), |root, (picker, _)| {
                 let picker = picker.clone();
                 root.child(
@@ -5962,11 +7186,9 @@ impl Render for Workspace {
                             div()
                                 .px_3()
                                 .py(px(8.))
-                                .rounded_md()
-                                .bg(t.panel_bg)
                                 .border_1()
                                 .border_color(t.border)
-                                .shadow_lg()
+                                .elevated(crate::elevation::Overlay::ConsentPrompt, &t)
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -6019,11 +7241,9 @@ impl Render for Workspace {
                             div()
                                 .px_3()
                                 .py(px(8.))
-                                .rounded_md()
-                                .bg(t.panel_bg)
                                 .border_1()
                                 .border_color(t.border)
-                                .shadow_lg()
+                                .elevated(crate::elevation::Overlay::InstallConfirmation, &t)
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -6075,8 +7295,7 @@ impl Render for Workspace {
                             div()
                                 .px_3()
                                 .py(px(6.))
-                                .rounded_md()
-                                .bg(t.diff_deleted_bg)
+                                .elevated(crate::elevation::Overlay::CommandError, &t)
                                 .text_size(px(12.))
                                 .text_color(t.diff_deleted_fg)
                                 .child(msg),
@@ -6284,6 +7503,285 @@ pub(crate) mod tests {
             ws.sidebar_selected = ix;
             cx.notify();
         });
+    }
+
+    /// The document is the one thing that rests on the ground. It gets
+    /// the page surface; the window keeps the ground.
+    #[gpui::test]
+    fn the_document_pane_is_a_page_not_the_window_background(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        std::fs::write(fx.path().join("n.md"), "# Note\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let t = crate::theme::theme(app);
+            assert_ne!(
+                t.page_bg, t.bg,
+                "the page must be its own surface, not the window background"
+            );
+            assert!(
+                f32::from(ws.read(app).page_inset()) > 0.,
+                "the page needs a margin, or it cannot read as resting on anything"
+            );
+            // Three sides meet the ground; the top is where the active
+            // tab joins the page, so it is flush by design.
+            let inset = ws.read(app).page_inset();
+            let m = ws.read(app).page_margins();
+            assert_eq!(m.left, inset, "the page lifts off the sidebar");
+            assert_eq!(m.right, inset, "the page lifts off the outline");
+            assert_eq!(m.bottom, inset, "the page lifts off the status bar");
+            assert_eq!(
+                m.top,
+                px(0.),
+                "the top is flush: the active tab joins the page there, and a \
+                 gap is a seam the tab cannot cross"
+            );
+        });
+    }
+
+    /// The active tab is part of the page, not part of the chrome.
+    /// Inactive tabs stay on the ground.
+    #[gpui::test]
+    fn the_active_tab_takes_the_page_surface(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        std::fs::write(fx.path().join("a.md"), "# A\n").unwrap();
+        std::fs::write(fx.path().join("b.md"), "# B\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let t = crate::theme::theme(app);
+            let w = ws.read(app);
+            assert_eq!(w.tab_background(0, &t), t.page_bg, "active tab is the page");
+            assert_eq!(w.tab_background(1, &t), t.bg, "inactive tabs are ground");
+        });
+    }
+
+    /// The chrome is one surface. Dividers between its parts are what
+    /// made the app read as three panes at the same value.
+    #[gpui::test]
+    fn the_chrome_is_one_continuous_ground(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        std::fs::write(fx.path().join("n.md"), "# N\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let t = crate::theme::theme(app);
+            let w = ws.read(app);
+            for part in [ChromePart::Sidebar, ChromePart::Outline, ChromePart::StatusBar] {
+                assert_eq!(
+                    w.chrome_background(part, &t),
+                    t.bg,
+                    "{part:?} must share the ground"
+                );
+            }
+            assert!(
+                !w.chrome_has_divider(ChromePart::Sidebar),
+                "the ground is continuous; no divider inside it"
+            );
+        });
+    }
+
+    /// The open file is marked by an accent bar on the leading edge,
+    /// not by a background alone -- on a continuous ground a tinted
+    /// row alone is easy to miss.
+    #[test]
+    fn the_active_sidebar_row_carries_an_accent_bar() {
+        let t = Theme::light();
+        let active = sidebar_row_style(RowState::Active, &t);
+        assert_eq!(active.leading_bar, Some(t.accent));
+        assert_ne!(active.background, t.bg, "and a tint behind it");
+
+        let kb_selected = sidebar_row_style(RowState::KeyboardSelected, &t);
+        assert_eq!(kb_selected.leading_bar, None, "keyboard selection is a value step, not a mark");
+        assert_ne!(kb_selected.background, t.bg);
+
+        let resting = sidebar_row_style(RowState::Resting, &t);
+        assert_eq!(resting.background, t.bg, "a resting row is the ground");
+        assert_eq!(resting.leading_bar, None);
+    }
+
+    /// The grouping rule behind the titlebar's four glyphs: what the
+    /// document can do, versus which panels are open. If this ever
+    /// grows a third command, this is the one place that decides where
+    /// it lands rather than the render function guessing at spacing.
+    #[test]
+    fn toolbar_buttons_group_by_what_they_do() {
+        assert_eq!(toolbar_group("chrome-changes"), ToolbarGroup::DocumentAction);
+        for id in ["chrome-sidebar", "chrome-outline", "chrome-knowledge"] {
+            assert_eq!(
+                toolbar_group(id),
+                ToolbarGroup::ViewToggle,
+                "{id} is a view toggle"
+            );
+        }
+    }
+
+    /// `tab_background` is a rule about which colour a tab *should*
+    /// wear; it says nothing about whether the tab it names for the
+    /// page actually touches the page on screen. Open two tabs, make
+    /// the second one active, and measure both: the active tab's own
+    /// bottom edge has to land exactly on the page's top -- the same
+    /// zero `page_margins().top` this file's other page test checks,
+    /// now read off the laid-out tab rather than the rule.
+    #[gpui::test]
+    fn the_active_tab_meets_the_page_with_no_gap(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        let a = fx.path().join("a.md");
+        let b = fx.path().join("b.md");
+        std::fs::write(&a, "# A\n").unwrap();
+        std::fs::write(&b, "# B\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&a, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&b, window, cx));
+        cx.run_until_parked();
+        // The install banner is a separate, unrelated strip that can
+        // land between the tab bar and the page; whether it does
+        // depends on where the test binary happens to run from. Clear
+        // it so this test measures the tab-to-page seam on its own.
+        ws.update_in(cx, |ws, _, cx| {
+            ws.install_banner = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let active = cx.update(|_, app| ws.read(app).active);
+        assert_eq!(active, 1, "opening a second file makes it active");
+
+        let tab = cx.debug_bounds("tab-1").expect("the active tab drew");
+        let page = cx.debug_bounds("page").expect("the page drew");
+        assert_eq!(tab.bottom(), page.origin.y, "no gap between the active tab and the page");
+    }
+
+    /// Only a document gets the page. An image keeps the ground, and
+    /// so does the empty state: a ground-coloured fill inside the page
+    /// wrapper would wear an inset, a radius and a shadow that trace a
+    /// sheet that is not there, and switching tabs would pop the
+    /// page's corners square. Geometry is the half of that a test can
+    /// see, and two `when(on_page, ..)` gates -- one for the page's own
+    /// styling, one for its corner masks -- carry the whole of it.
+    /// Both read the same `on_page` flag today, so they cannot drift
+    /// from each other, but nothing ties them together: a future edit
+    /// to one is free to leave the other's gate behind.
+    #[gpui::test]
+    fn an_image_is_not_a_document_and_does_not_get_the_page(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        let note = fx.path().join("n.md");
+        std::fs::write(&note, "# Note\n").unwrap();
+        let pic = fx.path().join("pic.png");
+        std::fs::write(&pic, b"\x89PNG\r\n\x1a\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.run_until_parked();
+
+        let inset = cx.update(|_, app| ws.read(app).page_inset());
+        let page_narrower_than_pane_by = |cx: &mut gpui::VisualTestContext| {
+            let pane = cx.debug_bounds("document-pane").expect("the document pane drew");
+            let page = cx.debug_bounds("page").expect("the page slot drew");
+            pane.size.width - page.size.width
+        };
+
+        assert_eq!(
+            page_narrower_than_pane_by(cx),
+            px(0.),
+            "with no tab open there is no document, so no page"
+        );
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&note, window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            page_narrower_than_pane_by(cx),
+            inset * 2.,
+            "a document is a page, inset on both sides"
+        );
+
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&pic, window, cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            assert!(matches!(w.tabs.get(w.active), Some(Tab::Image { .. })), "image tab is active");
+        });
+        assert_eq!(
+            page_narrower_than_pane_by(cx),
+            px(0.),
+            "an image fills the pane: no inset, and with it no shadow and no radius"
+        );
+    }
+
+    /// `page_margins` is only a rule until `render` obeys it, and
+    /// `render` obeying it is the part no accessor test can see: the
+    /// four-field rule used to be spelled as three independent margin
+    /// calls, and deleting two of them left this file's other page
+    /// test green. So measure the laid-out page against its parent.
+    #[gpui::test]
+    fn the_page_is_laid_out_inside_every_margin_it_declares(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        let note = fx.path().join("n.md");
+        std::fs::write(&note, "# Note\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&note, window, cx));
+        cx.run_until_parked();
+
+        let m = cx.update(|_, app| ws.read(app).page_margins());
+        let pane = cx.debug_bounds("document-pane").expect("the document pane drew");
+        let page = cx.debug_bounds("page").expect("the page drew");
+        assert_eq!(page.origin.x - pane.origin.x, m.left, "left margin");
+        assert_eq!(pane.right() - page.right(), m.right, "right margin");
+        assert_eq!(pane.bottom() - page.bottom(), m.bottom, "bottom margin");
+        assert_eq!(
+            page.origin.y - pane.origin.y,
+            m.top,
+            "top margin: flush, because the active tab joins the page there"
+        );
+    }
+
+    /// The inset is not paint. It comes out of the measure the editor
+    /// lays its lines out against, and that measure comes from the
+    /// layout rather than from the window -- so it tracks a resize and
+    /// stays one inset narrower than the pane at every size.
+    #[gpui::test]
+    fn the_inset_comes_out_of_the_editors_measure(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        let note = fx.path().join("n.md");
+        std::fs::write(&note, "# Note\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&note, window, cx));
+        cx.run_until_parked();
+
+        let m = cx.update(|_, app| ws.read(app).page_margins());
+        let measure = |cx: &mut gpui::VisualTestContext| {
+            let pane = cx.debug_bounds("document-pane").expect("the document pane drew");
+            let editor = cx.debug_bounds("editor-root").expect("the editor drew");
+            (pane.size.width, editor.size.width)
+        };
+
+        let (pane_w, editor_w) = measure(cx);
+        assert!(f32::from(editor_w) > 0., "the editor has to have been laid out");
+        assert_eq!(
+            editor_w,
+            pane_w - m.left - m.right,
+            "the horizontal inset comes straight out of the editor's width"
+        );
+
+        // And again at another window size: a width derived from the
+        // window rather than from the available space would drift here.
+        let before = cx.update(|window, _| window.viewport_size());
+        cx.simulate_resize(gpui::size(before.width - px(200.), before.height));
+        cx.run_until_parked();
+        let (narrow_pane_w, narrow_editor_w) = measure(cx);
+        assert_eq!(narrow_pane_w, pane_w - px(200.), "the pane took the whole resize");
+        assert_eq!(
+            narrow_editor_w,
+            narrow_pane_w - m.left - m.right,
+            "the editor stays one inset narrower than the pane at any size"
+        );
     }
 
     #[gpui::test]
@@ -6742,6 +8240,50 @@ pub(crate) mod tests {
         });
     }
 
+    /// The app must survive losing its last window. `NewWindow` is an
+    /// application action, not only a `Workspace` one -- with no
+    /// window open there is nothing for a window-scoped handler to
+    /// dispatch to, which is exactly what Apple rejected 0.0.16 for
+    /// (Guideline 4, submission 1626587c-7d6e-4cf7-a955-0cf8061edbe4,
+    /// issue #53).
+    ///
+    /// This calls `crate::app_actions` -- the exact function `main()`
+    /// calls to register the global handler, not a copy of its body --
+    /// so deleting that registration is what makes this fail, not a
+    /// change to this test.
+    ///
+    /// `App::dispatch_action` (`vendor/gpui/src/app.rs`) does exist in
+    /// this gpui version and is called directly: with no
+    /// `active_window()` it falls through to the global action
+    /// listeners, the same path a Dock click or File > New Window
+    /// takes with zero windows open. It has to be driven through the
+    /// `TestAppContext` held in `VisualTestContext::cx` rather than
+    /// through `VisualTestContext::update` itself once the bound
+    /// window is gone: that inherent method re-derefs the (now
+    /// missing) window and panics.
+    #[gpui::test]
+    fn new_window_works_with_no_window_open(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let fx = tempfile::tempdir().unwrap();
+        std::fs::write(fx.path().join("n.md"), "# N\n").unwrap();
+        let (ws, cx) = open_workspace(cx, fx.path());
+        cx.cx.update(crate::app_actions);
+        cx.run_until_parked();
+
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        drop(ws);
+
+        cx.cx.update(|app| {
+            assert!(app.windows().is_empty(), "precondition: no windows");
+            app.dispatch_action(&NewWindow);
+        });
+        cx.run_until_parked();
+        cx.cx.update(|app| {
+            assert_eq!(app.windows().len(), 1, "New Window opened one from nothing");
+        });
+    }
+
     /// Two windows, two folders, two indexes. A process-wide
     /// KnowledgeState meant the second workspace's backlinks and graph
     /// showed the first workspace's notes.
@@ -6915,6 +8457,110 @@ pub(crate) mod tests {
         });
     }
 
+    /// A gitignored note is still a note. The batch gate asked the
+    /// *index* question, so a whole batch carrying only gitignored
+    /// paths was dropped and the sidebar stayed stale -- writing one
+    /// from a terminal showed nothing until something else happened.
+    /// Index admission is a separate question and stays as it was.
+    #[gpui::test]
+    fn the_watcher_wakes_for_a_gitignored_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "drafts/\n").unwrap();
+        std::fs::create_dir(root.path().join("drafts")).unwrap();
+        std::fs::write(root.path().join("drafts/one.md"), "# one\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        // Draw the listing once, so a stale cache would be visible.
+        let drafts = root.path().join("drafts");
+        ws.update_in(cx, |ws, _, _| {
+            let tree = ws.tree.as_mut().expect("a folder workspace");
+            tree.toggle(&drafts);
+            tree.visible();
+        });
+
+        let two = drafts.join("two.md");
+        std::fs::write(&two, "# two\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[two.clone()], cx));
+        cx.run_until_parked();
+
+        let names: Vec<String> = ws.update_in(cx, |ws, _, _| {
+            ws.tree
+                .as_mut()
+                .expect("a folder workspace")
+                .visible()
+                .into_iter()
+                .map(|(_, e)| e.name)
+                .collect()
+        });
+        assert!(names.contains(&"two.md".to_string()), "the sidebar refreshed: {names:?}");
+        // And the index still declines it: that is IndexMatcher's call.
+        cx.update(|_, app| {
+            let index = ws.read(app).knowledge.lock().unwrap();
+            assert!(
+                !index.note_names().iter().any(|(_, p)| p == &two),
+                "a gitignored note stays out of the knowledge index"
+            );
+        });
+    }
+
+    /// Both halves of the hidden-file rule. Finder writes a `.DS_Store`
+    /// on every folder visit and no editor writes one on purpose:
+    /// nothing hidden is drawn in the sidebar or admitted to the index,
+    /// so refreshing for one repaints exactly what is already there. A
+    /// `.gitignore` is hidden too and must still wake the watcher --
+    /// its contents are what decide which rows are dimmed.
+    #[gpui::test]
+    fn a_ds_store_is_noise_but_a_gitignore_edit_wakes_the_watcher(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "\n").unwrap();
+        std::fs::write(root.path().join("one.md"), "# one\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let listing = |ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext| {
+            ws.update_in(cx, |ws, _, _| {
+                ws.tree
+                    .as_mut()
+                    .expect("a folder workspace")
+                    .visible()
+                    .into_iter()
+                    .map(|(_, e)| (e.name, e.ignored))
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Draw the listing once, so a stale cache shows up below.
+        assert!(listing(&ws, cx).iter().any(|(n, _)| n == "one.md"));
+
+        // A note appears on disk, and the only event the watcher hears
+        // is a Finder scratch write. The batch is noise: no refresh.
+        std::fs::write(root.path().join("two.md"), "# two\n").unwrap();
+        let ds_store = root.path().join(".DS_Store");
+        std::fs::write(&ds_store, "junk").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[ds_store], cx));
+        cx.run_until_parked();
+        let names = listing(&ws, cx);
+        assert!(
+            !names.iter().any(|(n, _)| n == "two.md"),
+            "a .DS_Store write refreshes nothing: {names:?}"
+        );
+
+        // An ignore-file edit is not noise: it changes which rows are
+        // dimmed, so the tree has to be walked again.
+        let gitignore = root.path().join(".gitignore");
+        std::fs::write(&gitignore, "one.md\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[gitignore], cx));
+        cx.run_until_parked();
+        let names = listing(&ws, cx);
+        assert!(
+            names.iter().any(|(n, _)| n == "two.md"),
+            "the .gitignore edit woke the watcher: {names:?}"
+        );
+        assert_eq!(
+            names.iter().find(|(n, _)| n == "one.md").map(|(_, ignored)| *ignored),
+            Some(true),
+            "and the row it newly excludes is dimmed: {names:?}"
+        );
+    }
+
     #[gpui::test]
     fn knowledge_panel_lists_backlinks_of_the_active_note(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -7073,6 +8719,799 @@ pub(crate) mod tests {
         });
     }
 
+    /// The regression that started this work: a label element was
+    /// built for every node whether or not it could be seen, and at
+    /// the whole-vault zoom label_opacity is 0 -- so a 2,500-note vault
+    /// shaped 2,500 invisible text elements every frame.
+    #[gpui::test]
+    fn no_label_is_built_when_no_label_is_visible(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..40 {
+            std::fs::write(root.path().join(format!("n{i}.md")), "# n\n").unwrap();
+        }
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_graph_view(window, cx);
+            if let Some(g) = ws.graph.as_mut() {
+                g.zoom = 0.3;
+            }
+        });
+        cx.run_until_parked();
+        let labels = ws.update_in(cx, |ws, _, _| ws.graph_label_count());
+        assert_eq!(labels, 0, "zoomed out, nothing is named");
+    }
+
+    /// Hovering names the node and its neighbours at any zoom -- the
+    /// whole-vault view otherwise has no way to tell you what a dot is
+    /// short of opening it.
+    #[gpui::test]
+    fn hovering_names_the_neighbourhood_even_zoomed_out(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# a\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# b\n").unwrap();
+        std::fs::write(root.path().join("c.md"), "# c\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_graph_view(window, cx);
+            let a = ws
+                .graph
+                .as_ref()
+                .unwrap()
+                .nodes()
+                .iter()
+                .position(|n| n.path.ends_with("a.md"))
+                .expect("a.md is a node");
+            if let Some(g) = ws.graph.as_mut() {
+                g.zoom = 0.3;
+                g.hovered = Some(a);
+                g.hover_state = crate::graph::Hovering::Lit(a);
+            }
+        });
+        cx.run_until_parked();
+        let labels = ws.update_in(cx, |ws, _, _| ws.graph_label_count());
+        assert_eq!(labels, 2, "the hovered note and the one it links to");
+    }
+
+    /// The picker replaces gpui's per-node hit-boxes, so it has to be
+    /// built from the same positions and radii the canvas paints.
+    #[gpui::test]
+    fn the_picker_covers_every_node(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            std::fs::write(root.path().join(format!("n{i}.md")), "# n\n").unwrap();
+        }
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().expect("graph open");
+            let picker = g.picker.as_ref().expect("built during render");
+            assert_eq!(picker.len(), g.nodes().len(), "one dot per node");
+        });
+    }
+
+    /// The board where a node's dot sits, in the transform
+    /// `render_graph` paints with. The press has to land on the dot the
+    /// canvas drew, which is what `Picker` is asked to confirm.
+    #[cfg(test)]
+    fn dot_at(g: &GraphViewState, ix: usize) -> gpui::Point<gpui::Pixels> {
+        let n = &g.nodes()[ix];
+        let base = 900.0 * g.zoom;
+        point(px(g.pan.0 + n.x * base + 60.0), px(g.pan.1 + n.y * base + 60.0))
+    }
+
+    /// One element covers the whole board now, so gpui's own click
+    /// machinery cannot tell a press that grabbed a dot from a pan that
+    /// happens to end over one. What a release peeks is the dot the
+    /// press grabbed -- and only when the pointer never moved.
+    #[gpui::test]
+    fn a_press_and_release_on_a_dot_peeks_it(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# a\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# b\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        // Runs the ticker out, so the layout has settled and the dot is
+        // still where it was painted when the press lands.
+        cx.run_until_parked();
+        let at = ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().expect("graph open");
+            let at = dot_at(g, 0);
+            let hit = g.picker.as_ref().unwrap().pick(f32::from(at.x), f32::from(at.y));
+            assert_eq!(hit, Some(0), "the press lands on the dot that was painted");
+            at
+        });
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let g = w.graph.as_ref().expect("the graph survives a click");
+            let ix = g.peek.expect("the panel is on the dot that was pressed");
+            assert!(
+                g.nodes()[ix].path.ends_with("a.md"),
+                "and it is the one under the pointer"
+            );
+            assert!(w.tabs.is_empty(), "nothing was opened");
+        });
+    }
+
+    /// Releasing after dragging a node is not a click. gpui suppressed
+    /// this for us while every node had its own hit-box; with one
+    /// element it is the board's job.
+    #[gpui::test]
+    fn a_release_that_ends_a_drag_opens_nothing(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# a\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# b\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let at = ws.update_in(cx, |ws, _, _| dot_at(ws.graph.as_ref().unwrap(), 0));
+        let away = point(at.x + px(120.), at.y + px(90.));
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(away, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(away, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(ws.read(app).graph.is_some(), "still on the board");
+        });
+    }
+
+    /// group_keys cloned every node's folder or tag, sorted and
+    /// deduplicated them -- 60 times a second, for data that changes
+    /// only when the index or the colour mode does.
+    #[gpui::test]
+    fn group_keys_are_computed_once_not_per_frame(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/a.md"), "# a\n\nfiled under #planning\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let before = ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().group_keys.clone());
+        assert_eq!(before, vec!["notes".to_string()], "the folder is a group");
+        // A render changes nothing: only a colour-mode or index change
+        // may rebuild this.
+        ws.update_in(cx, |_, _, cx| cx.notify());
+        cx.run_until_parked();
+        let after = ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().group_keys.clone());
+        assert_eq!(before, after, "stable across renders");
+        // The colour mode is one of the two things that does rebuild it,
+        // so hoisting must not mean going stale.
+        ws.update_in(cx, |ws, window, cx| ws.graph_color_by(&GraphColorBy, window, cx));
+        cx.run_until_parked();
+        let by_tag = ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().group_keys.clone());
+        assert_eq!(by_tag, vec!["planning".to_string()], "the tag is the group now");
+    }
+
+    /// Below half zoom an arrowhead is sub-pixel, and it costs one or
+    /// two tessellated paths per edge -- at exactly the zoom where
+    /// nothing can be culled because the whole vault is on screen.
+    ///
+    /// Asserted against what the render decided, not against `lod`: a
+    /// test that only called `lod(0.3)` stayed green with the render's
+    /// own gate deleted, which is no detector at all.
+    #[gpui::test]
+    fn arrowheads_are_skipped_at_whole_vault_zoom(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# a\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# b\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_graph_view(window, cx);
+            if let Some(g) = ws.graph.as_mut() {
+                g.zoom = 0.3;
+            }
+        });
+        cx.run_until_parked();
+        assert!(
+            !ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().arrowheads_drawn),
+            "the whole vault on screen draws none"
+        );
+        // And a readable zoom does draw them, so the assertion above is
+        // about the gate rather than about a flag nothing ever sets.
+        ws.update_in(cx, |ws, _, cx| {
+            ws.graph.as_mut().unwrap().zoom = 1.0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            ws.update_in(cx, |ws, _, _| ws.graph.as_ref().unwrap().arrowheads_drawn),
+            "zoomed in, the direction of a link is worth drawing"
+        );
+    }
+
+    /// The card is what makes a dot legible without opening it. A
+    /// ghost -- a link to a note that does not exist yet -- has no file
+    /// to read, and must say so rather than showing an empty card.
+    #[gpui::test]
+    fn the_card_describes_a_note_and_admits_a_ghost(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nFirst line.\n\n[[missing]]\n")
+            .unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let (real, ghost) = ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            let real = g.nodes().iter().position(|n| !n.ghost).unwrap();
+            let ghost = g.nodes().iter().position(|n| n.ghost).unwrap();
+            (real, ghost)
+        });
+        let card = ws.update_in(cx, |ws, _, _| ws.graph_card_text(real));
+        assert!(card.contains("Alpha"), "the title: {card}");
+        assert!(card.contains("First line"), "the excerpt: {card}");
+        assert!(card.contains("1 out"), "the links it makes: {card}");
+        assert!(card.contains("0 in"), "and the ones it receives: {card}");
+        let card = ws.update_in(cx, |ws, _, _| ws.graph_card_text(ghost));
+        assert!(card.contains("does not exist"), "a ghost says so: {card}");
+    }
+
+    /// A file deleted between indexing and hovering must not raise an
+    /// error strip -- hovering is not a command the user issued.
+    #[gpui::test]
+    fn a_card_for_a_vanished_file_says_so_quietly(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        std::fs::remove_file(root.path().join("a.md")).unwrap();
+        let card = ws.update_in(cx, |ws, _, _| ws.graph_card_text(0));
+        assert!(card.contains("could not be read"), "{card}");
+        ws.update_in(cx, |ws, _, _| assert!(ws.command_error.is_none(), "no error strip"));
+    }
+
+    /// A pair that links both ways is stored as ONE edge with `both`
+    /// set, so counting `from == ix` and `to == ix` alone reports a
+    /// mutual link as one-directional at each end.
+    #[gpui::test]
+    fn a_mutual_link_counts_at_both_ends(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n\n[[a]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.edges().len(), 1, "one edge, reciprocated");
+            assert!(g.edges()[0].both);
+            for ix in 0..g.nodes().len() {
+                assert_eq!(ws.graph_link_counts(ix), (1, 1), "node {ix} links both ways");
+            }
+        });
+    }
+
+    /// The card only exists once the pointer has rested: the file read
+    /// behind it is synchronous, and a sweep across a cluster must not
+    /// turn into one read per dot.
+    #[gpui::test]
+    fn the_card_is_an_element_only_once_the_dwell_has_elapsed(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nBody.\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        // Pointed at, not yet rested: nothing has been read.
+        ws.update_in(cx, |ws, _, cx| {
+            let g = ws.graph.as_mut().unwrap();
+            g.hovered = Some(0);
+            g.hover_state = crate::graph::Hovering::Lit(0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            assert!(
+                ws.graph.as_ref().unwrap().preview_cache.is_empty(),
+                "a sweep reads nothing"
+            );
+        });
+        ws.update_in(cx, |ws, _, cx| {
+            ws.graph.as_mut().unwrap().hover_state = crate::graph::Hovering::Carded(0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            assert_eq!(
+                ws.graph.as_ref().unwrap().preview_cache.len(),
+                1,
+                "resting reads the note once"
+            );
+        });
+        // The pointer leaves, so nothing re-reads behind this.
+        ws.update_in(cx, |ws, _, cx| {
+            let g = ws.graph.as_mut().unwrap();
+            g.hovered = None;
+            g.hover_state = crate::graph::Hovering::Idle;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // An edit anywhere invalidates the excerpt: it was read off disk
+        // and is now a stale copy.
+        let path = root.path().join("a.md");
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[path], cx));
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.as_ref().unwrap().preview_cache.is_empty(), "stale after a save");
+        });
+    }
+
+    /// A card is earned by resting, not by twitching. `Hover::at` is
+    /// only consulted from the board's mouse-move handler, so a pointer
+    /// that arrived and then held still never crossed the dwell: the
+    /// card waited for the next movement that happened to land 400ms
+    /// late, which reads as flakiness rather than as a rule. There is
+    /// deliberately no second mouse event below -- only time passes,
+    /// which is the whole point of the test.
+    #[gpui::test]
+    fn resting_on_a_dot_cards_it_with_no_further_movement(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nBody.\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let at = ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().expect("graph open");
+            let at = dot_at(g, 0);
+            let hit = g.picker.as_ref().unwrap().pick(f32::from(at.x), f32::from(at.y));
+            assert_eq!(hit, Some(0), "the pointer lands on the dot that was painted");
+            at
+        });
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.hover_state, crate::graph::Hovering::Lit(0), "lit on arrival");
+            assert!(g.preview_cache.is_empty(), "no card, and nothing read for one");
+        });
+        // Nothing moves. The dwell elapses on its own.
+        cx.executor()
+            .advance_clock(crate::graph::CARD_DWELL + std::time::Duration::from_millis(1));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.hover_state, crate::graph::Hovering::Carded(0), "carded by resting");
+            assert_eq!(g.preview_cache.len(), 1, "and the card read its note");
+        });
+    }
+
+    /// The wake belongs to the pointer that asked for it. Leaving the
+    /// dot before the dwell is up has to call it off -- otherwise a card
+    /// arrives for a node the pointer is no longer anywhere near -- and
+    /// one still pending when the graph goes away must find nothing and
+    /// do nothing rather than panic.
+    #[gpui::test]
+    fn a_pending_card_dies_with_the_pointer_that_asked_for_it(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nBody.\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let (on, off) = ws.update_in(cx, |ws, window, _| {
+            let board = ws.graph_board_width(window);
+            let height = f32::from(window.viewport_size().height);
+            let g = ws.graph.as_ref().expect("graph open");
+            let on = dot_at(g, 0);
+            let picker = g.picker.as_ref().unwrap();
+            assert_eq!(picker.pick(f32::from(on.x), f32::from(on.y)), Some(0));
+            // Bare board beside the dot. Found rather than assumed: the
+            // layout decides where the dots are, and a point that turns
+            // out to be another dot would test the wrong thing.
+            let off = [(40.0, 40.0), (-40.0, 40.0), (40.0, -40.0), (-40.0, -40.0)]
+                .into_iter()
+                .map(|(dx, dy)| (f32::from(on.x) + dx, f32::from(on.y) + dy))
+                .find(|&(x, y)| {
+                    x > 80.0 && y > 80.0 && x < board - 20.0 && y < height - 20.0
+                        && picker.pick(x, y).is_none()
+                })
+                .expect("somewhere beside the dot is bare board");
+            (on, point(px(off.0), px(off.1)))
+        });
+        // On the dot, then off it again well inside the dwell.
+        cx.simulate_mouse_move(on, None, gpui::Modifiers::none());
+        cx.simulate_mouse_move(off, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            // Also the proof that the leave reached the handler at all.
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.hover_state, crate::graph::Hovering::Idle, "the pointer left");
+        });
+        cx.executor().advance_clock(crate::graph::CARD_DWELL * 2);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.hover_state, crate::graph::Hovering::Idle, "and stays left");
+            assert!(g.preview_cache.is_empty(), "so no card was ever built");
+        });
+        // Back on the dot, then the whole view is dismissed with the
+        // wake still pending: it must find no graph and say nothing.
+        cx.simulate_mouse_move(on, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.graph_dismiss(&GraphDismiss, window, cx));
+        cx.executor()
+            .advance_clock(crate::graph::CARD_DWELL * 2);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph.is_none(), "closed, and still closed"));
+    }
+
+    /// Clicking a node used to replace the whole window. Now it opens
+    /// a panel beside a graph that is still there.
+    #[gpui::test]
+    fn clicking_a_node_peeks_instead_of_leaving(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nBody.\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.is_some(), "the graph survives a click");
+            assert_eq!(ws.graph.as_ref().unwrap().peek, Some(0));
+            assert_eq!(ws.tabs.len(), 0, "and nothing was opened yet");
+        });
+    }
+
+    /// Esc closes the panel first and the graph second, so escaping a
+    /// peek does not also throw away the view you were exploring.
+    #[gpui::test]
+    fn escape_closes_the_panel_before_the_graph(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| {
+            ws.open_graph_view(window, cx);
+            ws.graph_peek(0, window, cx);
+        });
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.graph_dismiss(&GraphDismiss, window, cx));
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.is_some(), "graph stays");
+            assert_eq!(ws.graph.as_ref().unwrap().peek, None, "panel closed");
+        });
+        ws.update_in(cx, |ws, window, cx| ws.graph_dismiss(&GraphDismiss, window, cx));
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph.is_none(), "now the graph"));
+    }
+
+    /// The board narrows so the panel covers no node: a dot hidden
+    /// behind the panel is a dot you cannot click.
+    #[gpui::test]
+    fn the_board_narrows_for_the_panel(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let wide = ws.update_in(cx, |ws, window, _| ws.graph_board_width(window));
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(0, window, cx));
+        let narrow = ws.update_in(cx, |ws, window, _| ws.graph_board_width(window));
+        assert!(narrow < wide, "{narrow} < {wide}");
+        assert!((wide - narrow - PEEK_W).abs() < 1.0, "exactly the panel's width");
+    }
+
+    /// The panel opens over the right-hand side of the board, so a dot
+    /// there -- including the one just clicked -- would end up behind
+    /// it. Peeking brings the node back into what is left of the board.
+    #[gpui::test]
+    fn peeking_a_node_behind_the_panel_brings_it_back(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        // Park the only node where the panel is about to be.
+        let board = ws.update_in(cx, |ws, window, _| ws.graph_board_width(window));
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_mut().unwrap();
+            let base = 900.0 * g.zoom;
+            g.pan.0 = board - 20.0 - g.nodes()[0].x * base - 60.0;
+        });
+        let before = ws.update_in(cx, |ws, _, _| dot_at(ws.graph.as_ref().unwrap(), 0).x);
+        assert!(f32::from(before) > board - PEEK_W, "it starts under the panel");
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(0, window, cx));
+        let after = ws.update_in(cx, |ws, window, _| {
+            (dot_at(ws.graph.as_ref().unwrap(), 0).x, ws.graph_board_width(window))
+        });
+        assert!(
+            f32::from(after.0) < after.1,
+            "and ends inside the narrowed board: {:?} < {}",
+            after.0,
+            after.1
+        );
+    }
+
+    /// Walking a backlink moves the peek without leaving the graph --
+    /// the point of the panel is that you can follow the vault around
+    /// without a tab opening under you.
+    #[gpui::test]
+    fn walking_a_backlink_moves_the_peek(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("hub.md"), "# Hub\n").unwrap();
+        std::fs::write(root.path().join("spoke.md"), "# Spoke\n\n[[hub]]\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let (hub, spoke) = ws.update_in(cx, |ws, _, _| {
+            let nodes = ws.graph.as_ref().unwrap().nodes();
+            let ix = |name: &str| nodes.iter().position(|n| n.path.ends_with(name)).expect(name);
+            (ix("hub.md"), ix("spoke.md"))
+        });
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(hub, window, cx));
+        let rows = ws.update_in(cx, |ws, _, _| ws.graph_peek_backlinks(hub));
+        assert_eq!(rows, vec![(spoke, "spoke".to_string())], "one note links here");
+        ws.update_in(cx, |ws, window, cx| ws.graph_peek(rows[0].0, window, cx));
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.is_some(), "still on the board");
+            assert_eq!(ws.graph.as_ref().unwrap().peek, Some(spoke), "the peek walked");
+            assert_eq!(ws.tabs.len(), 0, "and no tab opened");
+        });
+    }
+
+    /// Opening a note from the graph used to throw the layout away, so
+    /// coming back re-simulated from scratch and landed you somewhere
+    /// else entirely. The view you left is the view you return to.
+    #[gpui::test]
+    fn reopening_the_graph_returns_the_view_you_left(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        // Settle, then move the view somewhere recognisable.
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_mut().unwrap();
+            g.zoom = 1.7;
+            g.pan = (42.0, -17.0);
+            g.filter.query = "alpha".into();
+        });
+        let positions: Vec<(f32, f32)> = ws.update_in(cx, |ws, _, _| {
+            ws.graph.as_ref().unwrap().nodes().iter().map(|n| (n.x, n.y)).collect()
+        });
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph.is_none(), "the note is open, the graph closed");
+            assert_eq!(ws.tabs.len(), 1);
+        });
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.zoom, 1.7, "the zoom you left");
+            assert_eq!(g.pan, (42.0, -17.0), "the pan you left");
+            assert_eq!(g.filter.query, "alpha", "and what it was narrowed to");
+            let now: Vec<(f32, f32)> = g.nodes().iter().map(|n| (n.x, n.y)).collect();
+            assert_eq!(now, positions, "no re-simulation");
+        });
+    }
+
+    /// A layout that no longer describes the vault is worse than no
+    /// layout: restoring it would show a note that has been deleted, or
+    /// leave a new one out entirely.
+    #[gpui::test]
+    fn a_note_added_while_away_rebuilds_the_graph(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| ws.graph.as_mut().unwrap().zoom = 1.7);
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        // A note arrives while the graph is put away.
+        let added = root.path().join("b.md");
+        std::fs::write(&added, "# Beta\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[added], cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.nodes().len(), 2, "the new note is in the graph");
+            assert_ne!(g.zoom, 1.7, "and the stale layout was not restored");
+        });
+    }
+
+    /// The count is not the vault. Adding a link between two notes that
+    /// both already exist moves no dots in or out, so a count-only key
+    /// restores a layout whose edge list is a description of the vault
+    /// as it was -- connectivity drawn that is not on disk.
+    #[gpui::test]
+    fn a_link_added_while_away_rebuilds_the_graph(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.md");
+        std::fs::write(&a, "# Alpha\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_mut().unwrap();
+            assert_eq!(g.edges().len(), 0, "nothing links anything yet");
+            g.zoom = 1.7;
+        });
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph_cache.is_some(), "put away, not thrown"));
+        // Alpha starts pointing at Beta while the graph is away. Two
+        // notes before, two notes after.
+        std::fs::write(&a, "# Alpha\n\n[[b]]\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[a.clone()], cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.nodes().len(), 2, "still two notes");
+            assert_ne!(g.zoom, 1.7, "so the stale layout was not restored");
+            assert_eq!(g.edges().len(), 1, "and the link on disk is drawn");
+        });
+    }
+
+    /// A delete and a create outside the app leave the count where it
+    /// was, and `after_path_change` never fires -- it is only reached by
+    /// an in-app rename or move. A count-only key restores a layout that
+    /// describes neither vault: a dot for the note that is gone, none
+    /// for the note that arrived.
+    #[gpui::test]
+    fn a_swap_while_away_rebuilds_the_graph(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n").unwrap();
+        let gone = root.path().join("b.md");
+        std::fs::write(&gone, "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| ws.graph.as_mut().unwrap().zoom = 1.7);
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph_cache.is_some(), "put away, not thrown"));
+        // One out, one in: the count says nothing changed.
+        let arrived = root.path().join("c.md");
+        std::fs::remove_file(&gone).unwrap();
+        std::fs::write(&arrived, "# Gamma\n").unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.on_fs_events(&[gone.clone(), arrived.clone()], cx));
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.nodes().len(), 2, "two notes, as before");
+            assert_ne!(g.zoom, 1.7, "so the stale layout was not restored");
+            let paths: Vec<&Path> = g.nodes().iter().map(|n| n.path.as_path()).collect();
+            assert!(!paths.contains(&gone.as_path()), "the deleted note has no dot");
+            assert!(paths.contains(&arrived.as_path()), "and the new one has one");
+        });
+    }
+
+    /// The measurement harness for the graph's render pass. Not an
+    /// assertion about anything: structural tests cannot prove "smooth",
+    /// and a timing assertion in CI is a flake generator -- so this is
+    /// `#[ignore]`d, prints, and asserts only that a vault was actually
+    /// loaded.
+    ///
+    /// ```sh
+    /// SUPERMD_GRAPH_VAULT=$HOME/notes \
+    ///   cargo test --bin supermd graph_view_timing -- --ignored --nocapture
+    /// ```
+    ///
+    /// Measured at the fit-to-window zoom with the layout still warm --
+    /// the frame the whole render pass was written for, where nothing
+    /// can be culled.
+    #[gpui::test]
+    #[ignore = "measurement; run: SUPERMD_GRAPH_VAULT=<vault> cargo test --bin supermd graph_view_timing -- --ignored --nocapture"]
+    fn graph_view_timing(cx: &mut TestAppContext) {
+        /// How many samples each number is the best and the median of.
+        /// One sample of a 16ms budget is noise.
+        const SAMPLES: usize = 21;
+        let Some(vault) = std::env::var_os("SUPERMD_GRAPH_VAULT") else {
+            eprintln!("SKIP: set SUPERMD_GRAPH_VAULT to a real vault");
+            return;
+        };
+        let vault = PathBuf::from(vault);
+        let _home = temp_home();
+        let scan = std::time::Instant::now();
+        let (ws, cx) = open_workspace(cx, &vault);
+        let scanned = scan.elapsed();
+        let open = std::time::Instant::now();
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let opened = open.elapsed();
+        let (nodes, edges, zoom) = ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().expect("the vault opened a graph");
+            (g.nodes().len(), g.edges().len(), g.zoom)
+        });
+        assert!(nodes > 0, "{} produced no nodes", vault.display());
+
+        // The ticker only runs while the layout still has motion in it,
+        // and a settled step returns early -- which is not the frame
+        // worth measuring. Reheat, and read the render and the step at
+        // the same temperature.
+        let mut renders: Vec<std::time::Duration> = Vec::new();
+        let mut steps: Vec<std::time::Duration> = Vec::new();
+        let mut labels = 0usize;
+        for _ in 0..SAMPLES {
+            ws.update_in(cx, |ws, window, cx| {
+                let g = ws.graph.as_mut().unwrap();
+                g.sim.reheat(0.3);
+                let t = std::time::Instant::now();
+                let element = ws.render_graph(window, cx);
+                renders.push(t.elapsed());
+                drop(element);
+                let g = ws.graph.as_mut().unwrap();
+                let t = std::time::Instant::now();
+                g.sim.step();
+                steps.push(t.elapsed());
+                labels = g.label_count;
+            });
+        }
+        let stat = |mut v: Vec<std::time::Duration>| {
+            v.sort();
+            (v[0], v[v.len() / 2])
+        };
+        let (render_best, render_mid) = stat(renders);
+        let (step_best, step_mid) = stat(steps);
+        // The board is one canvas: whatever the vault's size, the render
+        // builds that one element plus the labels it did not cull. At
+        // the fit zoom `label_opacity` is 0, so it builds none.
+        let elements = 1 + labels;
+        eprintln!("\n=== graph: {} ===", vault.display());
+        eprintln!("  nodes {nodes} · edges {edges} · fit zoom {zoom:.3}");
+        eprintln!("  index scan          {scanned:>12.1?}");
+        eprintln!("  open + seed + fit   {opened:>12.1?}");
+        eprintln!("  render_graph        {render_best:>12.1?}  (best of {SAMPLES}, median {render_mid:.1?})");
+        eprintln!("  sim.step            {step_best:>12.1?}  (best of {SAMPLES}, median {step_mid:.1?})");
+        eprintln!("  graph elements      {elements:>12}  (1 canvas + {labels} labels)\n");
+    }
+
+    /// A rename rewrites every link in the vault, so a cached layout
+    /// from before it describes a set of paths that no longer exist --
+    /// and the node count alone would not notice.
+    #[gpui::test]
+    fn a_rename_drops_the_cached_view(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("a.md");
+        std::fs::write(&old, "# Alpha\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_node(0, window, cx));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph_cache.is_some(), "put away, not thrown"));
+        let new = root.path().join("renamed.md");
+        std::fs::rename(&old, &new).unwrap();
+        ws.update_in(cx, |ws, _, cx| ws.after_path_change(&old, &new, cx));
+        ws.update_in(cx, |ws, _, _| {
+            assert!(ws.graph_cache.is_none(), "a move invalidates the layout");
+        });
+    }
+
     /// `FsEntry.ignored` is computed and tested; this is the only test
     /// that anything *reads* it. Without the dim, an ignored file looks
     /// exactly like an indexed one and the sidebar quietly stops being
@@ -7080,11 +9519,35 @@ pub(crate) mod tests {
     #[test]
     fn an_ignored_sidebar_row_is_dimmed() {
         let t = crate::theme::Theme::dark();
-        assert_eq!(sidebar_row_color(true, false, &t), t.fg_muted, "an ignored file recedes");
-        assert_eq!(sidebar_row_color(true, true, &t), t.fg_muted, "an ignored folder too");
-        assert_ne!(sidebar_row_color(false, false, &t), t.fg_muted, "an indexed file does not");
-        assert_eq!(sidebar_row_color(false, false, &t), t.fg);
-        assert_eq!(sidebar_row_color(false, true, &t), t.fg_strong, "folders lead");
+        assert_eq!(sidebar_row_color(true, false, false, &t), t.fg_muted, "an ignored file recedes");
+        assert_eq!(sidebar_row_color(true, true, false, &t), t.fg_muted, "an ignored folder too");
+        assert_ne!(
+            sidebar_row_color(false, false, false, &t),
+            t.fg_muted,
+            "an indexed file does not"
+        );
+        assert_eq!(sidebar_row_color(false, false, false, &t), t.fg);
+        assert_eq!(sidebar_row_color(false, true, false, &t), t.fg_strong, "folders lead");
+    }
+
+    /// ...but the file you have open is not receding. It carries the
+    /// accent bar and the selection background; dimming its name makes
+    /// the one row that answers "where am I?" the hardest to read, and
+    /// leaves it disagreeing with its own icon, which `seti_tint_muted`
+    /// already brightens to the accent when the row is active.
+    #[test]
+    fn the_open_row_is_never_dimmed_even_when_ignored() {
+        let t = crate::theme::Theme::dark();
+        assert_eq!(
+            sidebar_row_color(true, false, true, &t),
+            t.fg,
+            "an ignored file you have open reads like any other open file"
+        );
+        assert_ne!(sidebar_row_color(true, false, true, &t), t.fg_muted);
+        // The rule the icon already followed, stated once here so the
+        // two cannot drift apart again.
+        assert_eq!(seti_tint_muted(&t, false), t.fg_muted, "icon dims at rest");
+        assert_ne!(seti_tint_muted(&t, true), t.fg_muted, "and brightens when active");
     }
 
     #[gpui::test]
@@ -8141,6 +10604,222 @@ pub(crate) mod tests {
         cx.update(|_, app| assert!(ws.read(app).theme_picker.is_none()));
     }
 
+    /// The filter is case-insensitive and matches anywhere in the name:
+    /// the only thing that keeps a twenty-eight theme list navigable.
+    #[test]
+    fn theme_picker_filter_matches_anywhere_case_insensitively() {
+        let themes: Vec<(String, bool)> = vec![
+            ("Rosé Pine Moon".into(), true),
+            ("Catppuccin Latte".into(), false),
+            ("Catppuccin Mocha".into(), true),
+            ("Ayu Light".into(), false),
+        ];
+        let names = |filter: &str| -> Vec<String> {
+            theme_picker_rows(&themes, filter)
+                .into_iter()
+                .map(|i| themes[i].0.clone())
+                .collect()
+        };
+        // No filter: everything, lights before darks.
+        assert_eq!(
+            names(""),
+            ["Catppuccin Latte", "Ayu Light", "Rosé Pine Moon", "Catppuccin Mocha"]
+        );
+        // Anywhere in the name, in either case.
+        assert_eq!(names("moon"), ["Rosé Pine Moon"]);
+        assert_eq!(names("MOON"), ["Rosé Pine Moon"]);
+        assert_eq!(names("Cat"), ["Catppuccin Latte", "Catppuccin Mocha"]);
+        assert_eq!(names("light"), ["Ayu Light"]);
+        // Nothing matching leaves the list empty -- and so nothing to commit.
+        assert!(names("zzz").is_empty());
+    }
+
+    /// Filtering must lose neither anchor: the selection follows the
+    /// *theme*, not the row number, so clearing the filter keeps the
+    /// same theme highlighted; and `saved_theme` still holds what was
+    /// active when the picker opened, so Escape restores it.
+    #[gpui::test]
+    fn theme_picker_filtering_keeps_selection_and_cancel_baseline(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let initial = cx.update(|_, app| theme(app));
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        // "ayu" leaves exactly the two Ayu themes, light row first.
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter("ayu".into(), cx));
+        let shown = cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker open");
+            let state = app.global::<crate::theme::ThemeState>();
+            picker.order.iter().map(|&i| state.themes[i].name.clone()).collect::<Vec<_>>()
+        });
+        assert_eq!(shown, ["Ayu Light", "Ayu Dark"], "the list shows only matches");
+
+        // Arrows still preview, and what they preview is the row the
+        // cursor is on -- not the theme sitting at that index in the
+        // unfiltered list.
+        let assert_preview_matches_row = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| {
+                let w = ws.read(app);
+                let picker = w.theme_picker.as_ref().expect("picker open");
+                let state = app.global::<crate::theme::ThemeState>();
+                let selected = &state.themes[picker.order[picker.pos]];
+                assert!(
+                    Arc::ptr_eq(&theme(app), &selected.theme),
+                    "the highlighted row is the theme being previewed"
+                );
+                selected.name.clone()
+            })
+        };
+        assert_eq!(assert_preview_matches_row(cx), "Ayu Light");
+        ws.update_in(cx, |ws, window, cx| ws.theme_picker_down(&ThemePickerDown, window, cx));
+        assert_eq!(assert_preview_matches_row(cx), "Ayu Dark");
+        ws.update_in(cx, |ws, window, cx| ws.theme_picker_up(&ThemePickerUp, window, cx));
+        let picked = assert_preview_matches_row(cx);
+        assert_eq!(picked, "Ayu Light");
+
+        // Clearing restores the full list with the same theme selected.
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter(String::new(), cx));
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker open");
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(picker.order.len(), state.themes.len(), "every theme is back");
+            assert_eq!(
+                state.themes[picker.order[picker.pos]].name, picked,
+                "selection followed the theme, not the row number"
+            );
+        });
+
+        // A filter matching nothing commits nothing.
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter("zzz".into(), cx));
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(ws.read(app).theme_picker.is_some(), "nothing to commit, picker stays open");
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(state.settings.dark_theme, crate::settings::Settings::default().dark_theme);
+            assert_eq!(
+                state.settings.light_theme,
+                crate::settings::Settings::default().light_theme
+            );
+        });
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_cancel(&ThemePickerCancel, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(
+                Arc::ptr_eq(&theme(app), &initial),
+                "escape after filtering restores the theme the picker opened on"
+            );
+        });
+    }
+
+    /// Narrowing the list to nothing has to reach the screen. The
+    /// no-match path previews nothing and commits nothing, so asking
+    /// for a frame is the only thing it does -- and it did not do it:
+    /// the emptied rows and the "no themes match" line stayed one
+    /// frame behind, invisible until some unrelated event repainted.
+    #[gpui::test]
+    fn filtering_to_no_matches_asks_for_a_repaint(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+        let repaints = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let _watch = cx.update(|_, app| {
+            let seen = repaints.clone();
+            app.observe(&ws, move |_, _| seen.set(seen.get() + 1))
+        });
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        cx.run_until_parked();
+
+        let before = repaints.get();
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter("zzz".into(), cx));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker open");
+            assert!(picker.order.is_empty(), "\"zzz\" matches no theme");
+        });
+        assert!(
+            repaints.get() > before,
+            "an emptied list still needs a frame to draw, and none was asked for"
+        );
+
+        // A filter that does match repaints too, and did before.
+        let before = repaints.get();
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_set_filter("ayu".into(), cx));
+        cx.run_until_parked();
+        assert!(repaints.get() > before, "a narrowed list needs a frame as well");
+    }
+
+    /// The appearance control in the theme picker persists and applies
+    /// immediately -- unlike the theme list, which only previews until
+    /// confirm. It survives a fresh load from disk, and re-resolves the
+    /// active theme without waiting for a confirm step.
+    #[gpui::test]
+    fn set_appearance_persists_and_refreshes_immediately(cx: &mut TestAppContext) {
+        let home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // The test harness starts every window on the dark theme (see
+        // `install_test_globals`), so picking Light is the choice that
+        // actually flips something -- picking Dark would look the same
+        // whether or not this applied at all.
+        cx.update(|_, app| assert!(theme(app).is_dark, "harness starts on dark"));
+        ws.update_in(cx, |ws, _, cx| {
+            ws.set_appearance(crate::settings::Appearance::Light, cx)
+        });
+        cx.update(|_, app| {
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(state.settings.appearance, crate::settings::Appearance::Light);
+            assert!(!theme(app).is_dark, "applies immediately, no confirm step needed");
+        });
+
+        let dir = home._dir.path().join(".supermd");
+        let on_disk = crate::settings::load(&dir);
+        assert_eq!(
+            on_disk.appearance,
+            crate::settings::Appearance::Light,
+            "persisted to disk, not just the live global"
+        );
+    }
+
+    /// Choosing an appearance is already committed (persisted + live)
+    /// the instant it's clicked -- unlike scrolling the theme list,
+    /// which only previews until confirm. Escape must not revert it:
+    /// that would be exactly the "says Light, goes dark" lie the whole
+    /// feature exists to avoid, just triggered by closing the popup
+    /// instead of by flux.
+    #[gpui::test]
+    fn escaping_the_picker_after_choosing_appearance_keeps_the_choice(cx: &mut TestAppContext) {
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        ws.update_in(cx, |ws, _, cx| {
+            ws.set_appearance(crate::settings::Appearance::Light, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_cancel(&ThemePickerCancel, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(ws.read(app).theme_picker.is_none());
+            assert!(!theme(app).is_dark, "escape keeps the just-chosen appearance");
+        });
+    }
+
     #[gpui::test]
     fn theme_picker_confirm_persists_the_choice(cx: &mut TestAppContext) {
         let home = temp_home();
@@ -8177,6 +10856,148 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(settings.contains(&picked_name), "picked theme persisted: {settings}");
+    }
+
+    /// What the picker previewed is what confirm gives you.
+    ///
+    /// `theme_picker_apply` previews by setting `ActiveTheme` to the
+    /// highlighted theme, whatever its appearance. Confirm used to
+    /// write only the matching slot and re-resolve, and
+    /// `ThemeState::resolve` reads the slot for the appearance in
+    /// force -- so with Dark set, highlighting a light theme turned
+    /// the app light and Enter turned it straight back. The dialog said
+    /// both things at once: the Light/Dark/System control at the top,
+    /// nine light and nineteen dark rows below it.
+    ///
+    /// The previously shipped test only ever confirmed a theme whose
+    /// appearance already matched what `resolve` would choose, so it
+    /// could not see this. This one sets the appearance explicitly
+    /// first, which is the case that lied.
+    #[gpui::test]
+    fn confirming_a_theme_of_the_other_appearance_keeps_what_was_previewed(
+        cx: &mut TestAppContext,
+    ) {
+        let home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        ws.update_in(cx, |ws, _, cx| {
+            ws.set_appearance(crate::settings::Appearance::Dark, cx)
+        });
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        // Row 0: `theme_picker_rows` lists every light theme first, so
+        // this is the appearance the setting says the app is not in.
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_apply(0, cx));
+        let previewed = cx.update(|_, app| theme(app));
+        assert!(!previewed.is_dark, "previewing a light theme under Dark");
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        cx.update(|_, app| {
+            assert!(
+                Arc::ptr_eq(&theme(app), &previewed),
+                "confirm kept a different theme than the preview showed"
+            );
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(
+                state.settings.appearance,
+                crate::settings::Appearance::Light,
+                "the appearance follows the picked theme"
+            );
+        });
+        let on_disk = crate::settings::load(&home._dir.path().join(".supermd"));
+        assert_eq!(on_disk.appearance, crate::settings::Appearance::Light, "and persists");
+    }
+
+    /// ...and confirming a theme that already matches leaves the
+    /// appearance setting exactly where it was.
+    ///
+    /// The appearance write above is what makes previewed-is-what-you-get
+    /// true, and it is only *needed* when the picked theme disagrees with
+    /// the appearance in force. Written unconditionally it pinned
+    /// everybody: `Light` and `Dark` short-circuit ahead of
+    /// `flux.auto_dark` and `system_dark` in `resolved_dark`, so a flux
+    /// user on the default `System` who picked their dark theme at night
+    /// got `appearance := Dark` forever and the next morning the app no
+    /// longer came back to light. `auto_dark` never fired again. Same
+    /// shape for plain OS-following.
+    ///
+    /// So this is the case that must *not* move the setting -- and the
+    /// morning at the end of the test is the actual regression, not just
+    /// the field it came from.
+    #[gpui::test]
+    fn confirming_a_theme_that_already_matches_leaves_the_appearance_alone(
+        cx: &mut TestAppContext,
+    ) {
+        let home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let (ws, cx) = open_workspace(cx, root.path());
+
+        // A flux user on the default System, at night: dark is in force
+        // because `auto_dark` says so, not because anything explicit
+        // does -- `system_dark` is false underneath it.
+        cx.update(|_, app| {
+            let state = app.global_mut::<crate::theme::ThemeState>();
+            state.settings.appearance = crate::settings::Appearance::System;
+            state.settings.flux.enabled = true;
+            state.settings.flux.auto_dark = true;
+            state.system_dark = false;
+            state.flux_blend = 1.0;
+            assert!(
+                app.global::<crate::theme::ThemeState>().resolved_dark(),
+                "flux night decides here, and it says dark"
+            );
+            crate::theme::refresh_active_theme(app);
+        });
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.toggle_theme_picker(&ToggleThemePicker, window, cx)
+        });
+        // A dark theme: its appearance already agrees with what
+        // `resolve` would choose, so there is nothing to pin.
+        let (pos, picked_name) = cx.update(|_, app| {
+            let w = ws.read(app);
+            let picker = w.theme_picker.as_ref().expect("picker should be open");
+            let state = app.global::<crate::theme::ThemeState>();
+            let pos = picker
+                .order
+                .iter()
+                .position(|&i| state.themes[i].theme.is_dark)
+                .expect("a dark theme ships");
+            (pos, state.themes[picker.order[pos]].name.clone())
+        });
+        ws.update_in(cx, |ws, _, cx| ws.theme_picker_apply(pos, cx));
+        cx.update(|_, app| assert!(theme(app).is_dark, "previewing a dark theme"));
+
+        ws.update_in(cx, |ws, window, cx| {
+            ws.theme_picker_confirm(&ThemePickerConfirm, window, cx)
+        });
+        cx.update(|_, app| {
+            let state = app.global::<crate::theme::ThemeState>();
+            assert_eq!(state.settings.dark_theme, picked_name, "the slot still took the name");
+            assert_eq!(
+                state.settings.appearance,
+                crate::settings::Appearance::System,
+                "confirming a theme that already matches must not pin the appearance"
+            );
+            assert!(theme(app).is_dark, "and it is the picked theme that is showing");
+        });
+        let on_disk = crate::settings::load(&home._dir.path().join(".supermd"));
+        assert_eq!(
+            on_disk.appearance,
+            crate::settings::Appearance::System,
+            "nothing pinned on disk either"
+        );
+
+        // The regression itself: morning still comes.
+        cx.update(|_, app| {
+            app.global_mut::<crate::theme::ThemeState>().flux_blend = 0.0;
+            crate::theme::refresh_active_theme(app);
+            assert!(!theme(app).is_dark, "auto_dark still fires -- the app returns to light");
+        });
     }
 
     /// Every persisted setting is a read-modify-write against *disk*.
@@ -8450,6 +11271,221 @@ pub(crate) mod tests {
         });
     }
 
+    fn active_preview(ws: &Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> Entity<Reader> {
+        cx.update(|_, app| {
+            let w = ws.read(app);
+            let Some(Tab::Editor { view: EditorView::Preview(reader), .. }) = w.tabs.get(w.active)
+            else {
+                panic!("active tab is not a preview")
+            };
+            reader.clone()
+        })
+    }
+
+    /// The editor has toggled checkboxes since the marker carried a
+    /// toggle payload. The reading view drew the same glyph and did
+    /// nothing with it. A toggle there is written through the editor
+    /// that owns the file -- its buffer, its save -- and changes one
+    /// byte on disk: not the brackets, not the CRLF line endings.
+    #[gpui::test]
+    fn clicking_a_checkbox_in_the_reading_view_toggles_the_file(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\r\n- [x] two\r\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        let reader = active_preview(&ws, cx);
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "- [x] one\r\n- [x] two\r\n",
+            "the file is the truth"
+        );
+        let editor = active_editor(&ws, cx);
+        cx.update(|_, app| {
+            let ed = editor.read(app);
+            assert_eq!(ed.text(), "- [x] one\r\n- [x] two\r\n", "the buffer agrees with the disk");
+            assert!(!ed.save.is_dirty(), "already saved, nothing pending");
+        });
+
+        // Back in the editor, one undo takes the click back.
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        cx.dispatch_action(crate::editor::Undo);
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).text(), "- [ ] one\r\n- [x] two\r\n", "one undo step")
+        });
+    }
+
+    /// A checkbox click the editor cannot apply says so.
+    ///
+    /// `Reader::toggle_task` flips the glyph and *then* emits, so the
+    /// box moves before anyone has agreed to it. When the buffer behind
+    /// the preview has moved on, `apply_reader_edit` writes nothing and
+    /// resets the reader from the buffer -- which put the glyph back.
+    /// Flip, unflip, no explanation: the exact shape Task 14 built
+    /// `show_command_error` for, in the one place that could see it.
+    #[gpui::test]
+    fn a_refused_checkbox_click_says_why(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        // Move the buffer on behind the preview's back: the reader still
+        // holds the text it was built from, so its `before` no longer
+        // matches and the write is refused.
+        let editor = active_editor(&ws, cx);
+        editor.update_in(cx, |ed, _, cx| ed.replace_and_save(0..0, "intro\n\n", cx));
+        cx.run_until_parked();
+
+        let reader = active_preview(&ws, cx);
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let msg = ws.read(app).command_error.clone().expect("the refusal reached the user");
+            assert!(msg.contains("checkbox"), "says what refused: {msg}");
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "intro\n\n- [ ] one\n",
+            "and nothing was written"
+        );
+        cx.update(|_, app| {
+            assert_eq!(
+                reader.read(app).source(),
+                "intro\n\n- [ ] one\n",
+                "the preview catches up, so the next click can succeed"
+            );
+        });
+    }
+
+    /// Decided with the user: a checkbox click is a one-byte change on
+    /// disk. An enabled format-on-save formatter used to run on it --
+    /// rewriting the file out of sight, adding a second undo step, and
+    /// jumping the caret to the end of the document.
+    #[gpui::test]
+    fn a_reading_view_toggle_skips_the_formatter(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let dir = crate::settings::config_dir();
+        let mut settings = crate::settings::load(&dir);
+        settings.format_on_save = true;
+        crate::settings::save(&dir, &settings).unwrap();
+
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\n- [x] two\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        let editor = active_editor(&ws, cx);
+        editor.update(cx, |ed, _| ed.test_formatter = Some(|s: &str| s.to_uppercase()));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+
+        active_preview(&ws, cx).update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [x] one\n- [x] two\n", "one byte");
+
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        cx.dispatch_action(crate::editor::Undo);
+        assert_eq!(
+            cx.update(|_, app| editor.read(app).text()),
+            "- [ ] one\n- [x] two\n",
+            "one undo step takes the click back"
+        );
+
+        // The formatter is live for an ordinary save -- the toggle is
+        // what skipped it, not a formatter that never ran.
+        editor.update(cx, |ed, cx| ed.flush(cx));
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [ ] ONE\n- [X] TWO\n");
+    }
+
+    /// Save hooks still run on a toggle (they are always on, not opt-in),
+    /// and one can change the buffer. The preview has to follow, or its
+    /// next click fails the staleness check and is silently dropped.
+    #[gpui::test]
+    fn after_a_hook_rewrites_the_save_the_next_click_still_lands(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\n- [ ] two\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        let editor = active_editor(&ws, cx);
+        editor.update(cx, |ed, _| {
+            ed.test_save_hook = Some(|s: &str| {
+                if s.ends_with("<!-- saved -->\n") {
+                    s.to_string()
+                } else {
+                    format!("{s}<!-- saved -->\n")
+                }
+            })
+        });
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        let reader = active_preview(&ws, cx);
+
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        reader.update(cx, |r, cx| r.toggle_task(1, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "- [x] one\n- [x] two\n<!-- saved -->\n",
+            "both clicks landed, and the hook ran"
+        );
+        cx.update(|_, app| {
+            assert_eq!(reader.read(app).source(), editor.read(app).text(), "the preview follows");
+        });
+    }
+
+    /// A preview can outlive the text it was built from. If the buffer
+    /// moved on, the Nth task in the preview may not be the Nth task in
+    /// the file: nothing is written, and the preview re-renders from the
+    /// buffer so the next click lands on the right box.
+    #[gpui::test]
+    fn a_stale_preview_writes_nothing_and_catches_up(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let (root, _a, _b) = workspace_fixture();
+        let path = root.path().join("todo.md");
+        std::fs::write(&path, "- [ ] one\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_path(&path, window, cx));
+        ws.update_in(cx, |ws, window, cx| ws.toggle_preview(&TogglePreview, window, cx));
+        cx.run_until_parked();
+        let reader = active_preview(&ws, cx);
+        let editor = active_editor(&ws, cx);
+        // The buffer changes under the open preview (a reload, a plugin).
+        editor.update(cx, |ed, cx| ed.replace_and_save(0..0, "- [ ] zero\n", cx));
+        cx.run_until_parked();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+
+        reader.update(cx, |r, cx| r.toggle_task(0, cx));
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), on_disk, "nothing written");
+        cx.update(|_, app| {
+            assert_eq!(editor.read(app).text(), "- [ ] zero\n- [ ] one\n");
+            let doc = &reader.read(app).document;
+            let crate::markdown::Block::List { items, .. } = &doc.blocks[0] else {
+                panic!("{:?}", doc.blocks)
+            };
+            assert_eq!(items.len(), 2, "the preview re-rendered from the buffer");
+            assert!(items.iter().all(|i| i.checked == Some(false)));
+        });
+    }
+
     #[gpui::test]
     fn toggle_preview_flips_the_active_editor_tab(cx: &mut TestAppContext) {
         let _home = temp_home();
@@ -8691,6 +11727,20 @@ pub(crate) mod tests {
         assert_eq!(seti_tint(SetiColor::Red, &t), t.accent);
         assert_eq!(seti_tint(SetiColor::White, &t), t.fg);
         assert_eq!(seti_tint(SetiColor::Yellow, &t), t.syntax.kind);
+    }
+
+    /// Chrome icons go quiet so the file list stops competing with the
+    /// document; the open file's icon takes the accent, which is how
+    /// you can see at a glance which one it is.
+    #[test]
+    fn chrome_icons_are_muted_and_the_active_one_takes_the_accent() {
+        let t = crate::theme::Theme::light();
+        assert_eq!(seti_tint_muted(&t, false), t.fg_muted);
+        assert_eq!(seti_tint_muted(&t, false), t.fg_muted);
+        assert_eq!(seti_tint_muted(&t, true), t.accent);
+        // The full-colour mapping survives for the finder, where telling
+        // file types apart quickly is the actual task.
+        assert_eq!(seti_tint(SetiColor::Blue, &t), t.syntax.function);
     }
 
     #[test]

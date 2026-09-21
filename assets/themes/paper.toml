@@ -2,18 +2,38 @@ name = "Paper"
 appearance = "light"
 
 [colors]
-bg = "#ffffff"
+bg = "#f4f3f1"
 fg = "#37352f"
 fg_strong = "#1d1c19"
-fg_muted = "#8f8d87"
+# Four levels down from #8f8d87: the ground is no longer white, and the
+# old value only just held 3:1 against white.
+# Darker than it was, twice over. #8b8983 failed on panel_bg -- the
+# sidebar and tab strip -- at 2.94:1, and #85837d then failed on a
+# selected row at 2.67:1. Muted ink has to read on all five surfaces it
+# is painted on; the selected row is the far end of the ramp and the
+# one that binds.
+fg_muted = "#787671"
 accent = "#dd4c4f"
 link = "#dd4c4f"
 code_bg = "#f6f5f3"
 code_fg = "#484744"
-border = "#e9e8e5"
-panel_bg = "#f7f6f4"
-hover_bg = "#edecea"
-selected_bg = "#e6e4e0"
+# Also darkened, or the hairline vanishes against the stepped-down
+# panel.
+border = "#e0dfdc"
+# Paper is a white-page theme, so the page keeps the white and the desk
+# gives it up: a pure-white ground leaves the page nowhere brighter to
+# go, and a page darker than its desk is a hole, not a sheet. Every
+# chrome surface steps down with the ground, because every one of them
+# was tuned against white.
+page_bg = "#ffffff"
+# Neutral warm-grey. Paper has no hue of its own to protect.
+shadow = "#33312d2e"
+# Overlays float above the page and are never darker than it. The page is
+# white, so they share it and the shadow does the lifting.
+floating_bg = "#ffffff"
+panel_bg = "#ecebe9"
+hover_bg = "#e1e0dd"
+selected_bg = "#dbd8d2"
 find_match_bg = "#ffe9a3"
 find_active_bg = "#ffc94d"
 

@@ -6,8 +6,60 @@
 //! the block model is designed to survive that swap.
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+/// Where a Markdown image destination points, resolved against the
+/// document that wrote it.
+///
+/// The editor and the reading view both draw images, and both used to
+/// need this: the editor grew it inline in `render_image` and the
+/// reading view never grew it at all, so one drew a picture where the
+/// other wrote the picture's name (#57). One implementation, two
+/// callers -- a second copy is how the two views drift apart again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageSource {
+    /// An `http://` or `https://` URL. Nothing is checked: the
+    /// renderer's own loader fetches it.
+    Remote(String),
+    /// A file that is there.
+    Local(PathBuf),
+    /// A local destination with nothing behind it. Named rather than
+    /// left as an `exists()` call at each site, so both views agree
+    /// that a broken link is a thing you can see.
+    Missing(PathBuf),
+}
+
+/// Whether the markup at `range` is the whole line it sits on, leading
+/// and trailing whitespace aside.
+///
+/// This is the single rule that separates a picture from a word. The
+/// editor's projection (`editor::blocks`) and the reading view's block
+/// model both ask it, because a document that renders two ways is the
+/// bug (#57) -- and two copies of one rule is how it comes back.
+pub fn is_whole_line(source: &str, range: Range<usize>) -> bool {
+    let start = source[..range.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let end = source[range.start..]
+        .find('\n')
+        .map(|i| range.start + i)
+        .unwrap_or(source.len());
+    source[start..end].trim() == &source[range]
+}
+
+/// Resolve an image destination the way the editor always has: remote
+/// URLs pass through, everything else is relative to the directory of
+/// the document that wrote the link.
+pub fn resolve_image(dest: &str, doc: Option<&Path>) -> ImageSource {
+    if dest.starts_with("http://") || dest.starts_with("https://") {
+        return ImageSource::Remote(dest.to_string());
+    }
+    let path = doc
+        .and_then(|p| p.parent())
+        .map(|dir| dir.join(dest))
+        .unwrap_or_else(|| PathBuf::from(dest));
+    if path.exists() { ImageSource::Local(path) } else { ImageSource::Missing(path) }
+}
 
 /// Inline style flags for a span of text within a block.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +100,11 @@ pub struct InlineText {
 pub struct ListItem {
     /// Some(done) for task-list items, None for plain items.
     pub checked: Option<bool>,
+    /// For a task item, which task it is: its position among every
+    /// task in the document, in source order. `task_toggle` finds a
+    /// task by the same number, so the reading view can hand it back
+    /// without knowing any byte offsets.
+    pub task: Option<usize>,
     pub blocks: Vec<Block>,
 }
 
@@ -66,6 +123,17 @@ pub enum Block {
     List { start: Option<u64>, items: Vec<ListItem> },
     Table { head: Vec<InlineText>, rows: Vec<Vec<InlineText>> },
     Rule,
+    /// A metadata block at the very top of the file, delimiters
+    /// stripped. Kept as literal text: this is not frontmatter support
+    /// (no tags, aliases or properties), only the end of a misparse.
+    FrontMatter(String),
+    /// A block of raw HTML, as written. Shown literally, never rendered.
+    Html(String),
+    /// An image whose markup is the whole line -- a picture in its own
+    /// right, not a word. An image among words is not this: it stays a
+    /// placeholder inside its paragraph, because a picture cannot sit
+    /// inside a line of prose. `editor::blocks` draws the same line.
+    Image { alt: String, dest: String },
 }
 
 #[derive(Debug, Default)]
@@ -80,6 +148,9 @@ struct InlineBuilder {
     /// Byte offset where the currently-open link began, and where it
     /// points. Nested links are not a thing in CommonMark.
     open_link: Option<(usize, String)>,
+    /// Byte offset where the separator for the most recent line break
+    /// began, while it is still the last thing pushed. See `mark`.
+    last_break: Option<usize>,
 }
 
 impl InlineBuilder {
@@ -89,6 +160,33 @@ impl InlineBuilder {
         if !style.is_plain() {
             self.out.spans.push((start..self.out.text.len(), style));
         }
+        self.last_break = None;
+    }
+
+    /// Pushes the separator a line break becomes -- a space for a soft
+    /// one, a newline for a hard one.
+    ///
+    /// A line break joins two runs of words. With nothing before it
+    /// there is nothing to join, which is what a paragraph looks like
+    /// once a block image has been lifted out of its first line, so
+    /// the separator is dropped. Otherwise it is remembered: it exists
+    /// only for the content that follows it, and `mark` hands that
+    /// content the right place to be undone from.
+    fn push_break(&mut self, s: &str) {
+        if self.is_empty() {
+            return;
+        }
+        let start = self.out.text.len();
+        self.out.text.push_str(s);
+        self.last_break = Some(start);
+    }
+
+    /// Where the content pushed next begins, for `truncate`: behind a
+    /// trailing line-break separator, because that separator is part
+    /// of joining what follows on -- lift the picture out and the
+    /// space or newline before it has nothing left to join.
+    fn mark(&self) -> usize {
+        self.last_break.unwrap_or(self.out.text.len())
     }
 
     fn is_empty(&self) -> bool {
@@ -97,6 +195,25 @@ impl InlineBuilder {
 
     fn begin_link(&mut self, dest: String) {
         self.open_link = Some((self.out.text.len(), dest));
+    }
+
+    /// Drop everything pushed since `mark`, spans and links included.
+    ///
+    /// An image's placeholder and alt text go in optimistically at
+    /// `Start(Image)`, because whether it is a picture or a word is
+    /// only settled at `End(Image)` -- a nested image can take the
+    /// decision away. This is the undo.
+    fn truncate(&mut self, mark: usize) {
+        self.out.text.truncate(mark);
+        self.last_break = None;
+        self.out.spans.retain_mut(|(r, _)| {
+            r.end = r.end.min(mark);
+            r.start < r.end
+        });
+        self.out.links.retain_mut(|(r, _)| {
+            r.end = r.end.min(mark);
+            r.start < r.end
+        });
     }
 
     fn end_link(&mut self) {
@@ -290,14 +407,105 @@ impl StyleStack {
 /// What produced the currently-open container of blocks.
 enum Frame {
     Quote,
-    Item { checked: Option<bool> },
+    Item { checked: Option<bool>, task: Option<usize> },
 }
 
-pub fn parse(source: &str) -> Document {
+/// Byte range of a YAML frontmatter block, if the source opens with
+/// one. Only at the very start, and only when it closes -- a `---`
+/// anywhere else is a thematic break and stays one.
+///
+/// The one definition shared by the reading path (`parse`), the
+/// editor's span and block passes, and link previews. The rules follow
+/// pulldown-cmark's own metadata scanner, which we cannot simply switch
+/// on: it accepts a block at the start of *any* paragraph, not only the
+/// file's.
+///
+/// - The first line is exactly `---` (trailing spaces allowed).
+/// - The next line is neither blank nor a closing delimiter, so a note
+///   that opens with a rule and a blank line is still that.
+/// - It closes on a line that is `---` or `...`; the range runs through
+///   that line's newline (or to the end of the file).
+///
+/// `\r\n` endings are accepted throughout and covered by the range,
+/// as is a leading UTF-8 byte-order mark.
+pub fn frontmatter_range(src: &str) -> Option<Range<usize>> {
+    fn delimiter(line: &str) -> &str {
+        line.trim_end_matches(['\r', '\n']).trim_end_matches([' ', '\t'])
+    }
+    // A byte-order mark is not content; the range covers it.
+    let bom = if src.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let mut lines = src[bom..].split_inclusive('\n');
+    let first = lines.next()?;
+    if delimiter(first) != "---" || !first.ends_with('\n') {
+        return None;
+    }
+    let mut offset = bom + first.len();
+    let mut inner_lines = 0usize;
+    for line in lines {
+        let d = delimiter(line);
+        let closes = d == "---" || d == "...";
+        if inner_lines == 0 && (closes || d.trim().is_empty()) {
+            return None;
+        }
+        offset += line.len();
+        if closes {
+            return Some(0..offset);
+        }
+        inner_lines += 1;
+    }
+    None
+}
+
+/// Where the Markdown body starts: after the frontmatter, else 0.
+pub fn body_start(src: &str) -> usize {
+    frontmatter_range(src).map_or(0, |r| r.end)
+}
+
+/// Whether an HTML block is nothing but closed `<!-- -->` comments and
+/// whitespace.
+fn only_comments(html: &str) -> bool {
+    let mut rest = html.trim();
+    while let Some(after) = rest.strip_prefix("<!--") {
+        let Some(end) = after.find("-->") else {
+            return false;
+        };
+        rest = after[end + 3..].trim_start();
+    }
+    rest.is_empty()
+}
+
+/// The parser options for the reading path. `task_toggle` must see
+/// exactly the tasks `parse` does, so both take them from here.
+fn options() -> Options {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    options
+}
+
+/// Byte range of the Nth task marker's state character, and what it
+/// should become. `None` when the index is past the last task.
+///
+/// The range is the single character between the brackets -- ` `, `x`
+/// or `X` -- so applying the edit changes one byte of the file and
+/// nothing else: not the brackets, not the line ending. Tasks are
+/// counted exactly as `parse` numbers `ListItem::task`: the body after
+/// any frontmatter, in source order, nested and quoted ones included,
+/// look-alikes in code excluded.
+pub fn task_toggle(src: &str, nth: usize) -> Option<(Range<usize>, &'static str)> {
+    let body = body_start(src);
+    let (_, marker) = Parser::new_ext(&src[body..], options())
+        .into_offset_iter()
+        .filter(|(event, _)| matches!(event, Event::TaskListMarker(_)))
+        .nth(nth)?;
+    let state = body + marker.start + 1;
+    let with = if src.as_bytes().get(state) == Some(&b' ') { "x" } else { " " };
+    Some((state..state + 1, with))
+}
+
+pub fn parse(source: &str) -> Document {
+    let options = options();
 
     // Open containers. The bottom Vec is the document itself; quotes and list
     // items push a new Vec and fold it into a Block when they close.
@@ -312,9 +520,28 @@ pub fn parse(source: &str) -> Document {
 
     let mut code: Option<(Option<String>, String)> = None;
 
+    // How many task markers have been seen, for `ListItem::task`.
+    let mut tasks_seen = 0usize;
+
+    // An HTML block in progress: its raw source, line by line.
+    let mut html: Option<String> = None;
+
     // Table state: header cells, body rows, row in progress.
     let mut table: Option<(Vec<InlineText>, Vec<Vec<InlineText>>)> = None;
     let mut table_row: Vec<InlineText> = Vec::new();
+
+    // Metadata first, then the body parsed on its own: parsing the
+    // whole file is what made the block a setext heading, and a fence
+    // marker inside it would otherwise swallow the document.
+    let body = body_start(source);
+    if body > 0 {
+        // Everything between the opening and closing delimiter lines.
+        let lines: Vec<&str> = source[..body].split_inclusive('\n').collect();
+        let inner: String = lines[1..lines.len() - 1].concat();
+        let inner = inner.replace("\r\n", "\n");
+        containers[0].push(Block::FrontMatter(inner.trim_end_matches('\n').to_string()));
+    }
+    let source = &source[body..];
 
     // Flush any loose inline content (tight list items have no Paragraph tag).
     fn flush_inline(inline: &mut Option<InlineBuilder>, containers: &mut [Vec<Block>]) {
@@ -328,7 +555,14 @@ pub fn parse(source: &str) -> Document {
         }
     }
 
-    for event in Parser::new_ext(source, options) {
+    // The image currently open, if any: its source range, the alt text
+    // gathered so far, its destination, and where the placeholder
+    // started in the inline builder. The slot is single and a nested
+    // image overwrites it, exactly as in `editor::blocks` -- that is
+    // what makes `![a ![b](c)](d)` a block in neither view.
+    let mut open_image: Option<(Range<usize>, String, String, Option<usize>)> = None;
+
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
         match event {
             // ── Leaf blocks with inline content ─────────────────────────
             Event::Start(Tag::Paragraph | Tag::Heading { .. }) => {
@@ -336,8 +570,13 @@ pub fn parse(source: &str) -> Document {
                 inline = Some(InlineBuilder::default());
             }
             Event::End(TagEnd::Paragraph) => {
+                // A paragraph whose only content was a block image has
+                // nothing left in it; an empty one would render as a
+                // blank gap under the picture.
                 if let Some(builder) = inline.take() {
-                    containers.last_mut().unwrap().push(Block::Paragraph(builder.finish()));
+                    if !builder.is_empty() {
+                        containers.last_mut().unwrap().push(Block::Paragraph(builder.finish()));
+                    }
                 }
             }
             Event::End(TagEnd::Heading(level)) => {
@@ -395,7 +634,7 @@ pub fn parse(source: &str) -> Document {
                 containers.last_mut().unwrap().push(Block::List { start, items });
             }
             Event::Start(Tag::Item) => {
-                frames.push(Frame::Item { checked: None });
+                frames.push(Frame::Item { checked: None, task: None });
                 containers.push(Vec::new());
                 // Tight list items carry inline content with no Paragraph tag.
                 inline = Some(InlineBuilder::default());
@@ -403,20 +642,24 @@ pub fn parse(source: &str) -> Document {
             Event::End(TagEnd::Item) => {
                 flush_inline(&mut inline, &mut containers);
                 let blocks = containers.pop().unwrap();
-                let checked = match frames.pop() {
-                    Some(Frame::Item { checked }) => checked,
-                    _ => None,
+                let (checked, task) = match frames.pop() {
+                    Some(Frame::Item { checked, task }) => (checked, task),
+                    _ => (None, None),
                 };
                 lists
                     .last_mut()
                     .expect("item outside list")
                     .1
-                    .push(ListItem { checked, blocks });
+                    .push(ListItem { checked, task, blocks });
             }
             Event::TaskListMarker(done) => {
-                if let Some(Frame::Item { checked }) = frames.last_mut() {
+                // Counted for every marker the parser reports, so the
+                // numbering cannot drift from `task_toggle`'s.
+                if let Some(Frame::Item { checked, task }) = frames.last_mut() {
                     *checked = Some(done);
+                    *task = Some(tasks_seen);
                 }
+                tasks_seen += 1;
             }
 
             // ── Tables ──────────────────────────────────────────────────
@@ -467,17 +710,47 @@ pub fn parse(source: &str) -> Document {
                     builder.end_link();
                 }
             }
-            Event::Start(Tag::Image { .. }) => {
-                // Phase 0: render images as a labeled placeholder of their alt text.
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                // An image among words is a placeholder of its alt
+                // text: a picture cannot sit inside a line of prose.
+                // Whether this one is that or a block of its own is
+                // settled at `End(Image)`, so the placeholder goes in
+                // now and comes back out there if it was a block.
                 styles.image += 1;
+                let mark = inline.as_ref().map(|b| b.mark());
                 if let Some(builder) = inline.as_mut() {
                     builder.push("🖼 ", styles.current());
                 }
+                open_image = Some((range, String::new(), dest_url.to_string(), mark));
             }
-            Event::End(TagEnd::Image) => styles.image -= 1,
+            Event::End(TagEnd::Image) => {
+                styles.image -= 1;
+                if let Some((range, alt, dest, mark)) = open_image.take() {
+                    if is_whole_line(source, range) {
+                        if let (Some(builder), Some(mark)) = (inline.as_mut(), mark) {
+                            builder.truncate(mark);
+                        }
+                        let resume = inline.is_some();
+                        flush_inline(&mut inline, &mut containers);
+                        containers
+                            .last_mut()
+                            .expect("container stack is never empty")
+                            .push(Block::Image { alt, dest });
+                        if resume {
+                            inline = Some(InlineBuilder::default());
+                        }
+                    }
+                }
+            }
 
             // ── Inline content ──────────────────────────────────────────
             Event::Text(text) => {
+                // Alt text is gathered from `Text` alone, the way
+                // `editor::blocks` gathers it, so a block image reads
+                // the same in both views.
+                if let Some((_, alt, _, _)) = open_image.as_mut() {
+                    alt.push_str(&text);
+                }
                 if let Some((_, buffer)) = code.as_mut() {
                     buffer.push_str(&text);
                 } else if let Some(builder) = inline.as_mut() {
@@ -492,12 +765,12 @@ pub fn parse(source: &str) -> Document {
             }
             Event::SoftBreak => {
                 if let Some(builder) = inline.as_mut() {
-                    builder.push(" ", SpanStyle::default());
+                    builder.push_break(" ");
                 }
             }
             Event::HardBreak => {
                 if let Some(builder) = inline.as_mut() {
-                    builder.push("\n", SpanStyle::default());
+                    builder.push_break("\n");
                 }
             }
 
@@ -506,7 +779,36 @@ pub fn parse(source: &str) -> Document {
                 containers.last_mut().unwrap().push(Block::Rule);
             }
 
-            // HTML, footnotes, math: out of scope for Phase 0.
+            // ── HTML blocks ─────────────────────────────────────────────
+            // Not rendered, but kept as the literal source. This arm used
+            // to be the catch-all below, and a pasted snippet vanished
+            // from the preview without a trace.
+            Event::Start(Tag::HtmlBlock) => {
+                flush_inline(&mut inline, &mut containers);
+                html = Some(String::new());
+            }
+            Event::Html(text) => {
+                if let Some(buffer) = html.as_mut() {
+                    buffer.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some(text) = html.take() {
+                    let text = text.replace("\r\n", "\n");
+                    if only_comments(&text) {
+                        // Invisible in every renderer, so hiding it
+                        // erases nothing (the `toc` plugin's markers).
+                        continue;
+                    }
+                    containers
+                        .last_mut()
+                        .unwrap()
+                        .push(Block::Html(text.trim_end_matches('\n').to_string()));
+                }
+            }
+
+            // Inline HTML (a separate question from the block-level issue
+            // above), footnotes, math: out of scope.
             _ => {}
         }
     }
@@ -748,10 +1050,18 @@ mod tests {
         assert_eq!(inline.spans, vec![(0..1, code), (2..3, strike), (4..5, link)]);
     }
 
+    /// The placeholder is what an image among words looks like. It
+    /// used to be what *every* image looked like, standalone ones
+    /// included -- this test read `![alt text](img.png)` on its own
+    /// line, which is now the picture itself (see
+    /// `a_standalone_image_is_its_own_block`). The alt text stays
+    /// italic either way.
     #[test]
     fn image_renders_placeholder_with_italic_alt() {
-        let Block::Paragraph(inline) = parse_one("![alt text](img.png)") else { panic!("expected paragraph") };
-        assert_eq!(inline.text, "\u{1f5bc} alt text");
+        let Block::Paragraph(inline) = parse_one("see ![alt text](img.png)") else {
+            panic!("expected paragraph")
+        };
+        assert_eq!(inline.text, "see \u{1f5bc} alt text");
         assert!(inline.spans.iter().all(|(_, s)| s.italic));
         assert_eq!(inline.spans.last().unwrap().0.end, inline.text.len());
     }
@@ -823,6 +1133,81 @@ mod tests {
         assert_eq!(items[2].checked, None);
     }
 
+    /// Apply what `task_toggle` asks for, the way a caller would.
+    fn toggled(src: &str, nth: usize) -> Option<String> {
+        let (range, with) = task_toggle(src, nth)?;
+        let mut out = src.to_string();
+        out.replace_range(range, with);
+        Some(out)
+    }
+
+    /// A toggle is one byte: the state character between the brackets.
+    /// Nothing else in the file moves.
+    #[test]
+    fn task_toggle_flips_exactly_the_state_character() {
+        let src = "- [ ] one\n- [x] two\n";
+        assert_eq!(task_toggle(src, 0), Some((3..4, "x")));
+        assert_eq!(task_toggle(src, 1), Some((13..14, " ")));
+        assert_eq!(task_toggle(src, 2), None, "past the last task");
+        assert_eq!(toggled(src, 0).as_deref(), Some("- [x] one\n- [x] two\n"));
+        assert_eq!(toggled(src, 1).as_deref(), Some("- [ ] one\n- [ ] two\n"));
+        // An upper-case X is checked too, and unchecks the same way.
+        assert_eq!(toggled("* [X] up\n", 0).as_deref(), Some("* [ ] up\n"));
+        // Windows line endings are left exactly as they were.
+        assert_eq!(
+            toggled("- [ ] a\r\n- [ ] b\r\n", 1).as_deref(),
+            Some("- [ ] a\r\n- [x] b\r\n")
+        );
+        assert_eq!(task_toggle("no tasks here\n", 0), None);
+    }
+
+    /// Only real tasks count: not a look-alike in a fence, not one in
+    /// the metadata block, and nested or quoted ones in document order.
+    #[test]
+    fn task_toggle_counts_what_the_parser_calls_a_task() {
+        let src = "---\n- [ ] meta\n---\n```\n- [ ] code\n```\n- [ ] a\n  - [x] nested\n> - [ ] quoted\n1. [ ] ordered\n";
+        let at = |needle: &str| src.find(needle).unwrap() + 1;
+        assert_eq!(task_toggle(src, 0), Some((at("[ ] a"), "x")).map(|(s, w)| (s..s + 1, w)));
+        assert_eq!(task_toggle(src, 1), Some((at("[x] nested")..at("[x] nested") + 1, " ")));
+        assert_eq!(task_toggle(src, 2), Some((at("[ ] quoted")..at("[ ] quoted") + 1, "x")));
+        assert_eq!(task_toggle(src, 3), Some((at("[ ] ordered")..at("[ ] ordered") + 1, "x")));
+        assert_eq!(task_toggle(src, 4), None);
+    }
+
+    /// The reading view numbers each task it draws from `ListItem::task`,
+    /// and the toggle finds the Nth task on its own. They must agree, or
+    /// a click flips a different box than the one under the pointer.
+    #[test]
+    fn parsed_task_indices_match_the_toggle_targets() {
+        let src = "---\na: 1\n---\n- [ ] a\n  - [x] b\n    - plain\n    - [ ] c\n\n> - [X] d\n\n- e\n- [ ] f\n";
+        fn walk(blocks: &[Block], out: &mut Vec<(Option<usize>, Option<bool>)>) {
+            for b in blocks {
+                match b {
+                    Block::List { items, .. } => {
+                        for item in items {
+                            out.push((item.task, item.checked));
+                            walk(&item.blocks, out);
+                        }
+                    }
+                    Block::Quote(inner) => walk(inner, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut seen = Vec::new();
+        walk(&parse(src).blocks, &mut seen);
+        let tasks: Vec<_> = seen.iter().filter(|(t, _)| t.is_some()).collect();
+        assert_eq!(tasks.len(), 5, "{seen:?}");
+        for (i, (task, checked)) in tasks.iter().enumerate() {
+            assert_eq!(*task, Some(i), "numbered in the order they are drawn");
+            let (range, with) = task_toggle(src, i).expect("the toggle finds it");
+            let state = &src[range];
+            assert_eq!(*checked == Some(true), state != " ", "task {i} is the same box");
+            assert_eq!(with == " ", *checked == Some(true));
+        }
+        assert!(seen.iter().all(|(t, c)| t.is_some() == c.is_some()), "plain items have no index");
+    }
+
     #[test]
     fn nested_list_lives_inside_parent_item() {
         let Block::List { items, .. } = parse_one("- outer\n  - inner") else { panic!("expected list") };
@@ -862,10 +1247,197 @@ mod tests {
         assert!(matches!(doc.blocks[1], Block::Rule));
     }
 
+    /// The delimited block at the top of a file is metadata, not a
+    /// heading. CommonMark's setext rule turns it into one, which is
+    /// why a note's title line used to render as the loudest thing on
+    /// the page.
     #[test]
-    fn html_is_ignored() {
-        let doc = parse("<div>raw</div>");
-        assert!(doc.blocks.is_empty());
+    fn frontmatter_is_its_own_block_not_a_heading() {
+        let src = "---\ntitle: Weekly Review\ntags: [planning]\n---\n\n# Real Heading\n\nBody.\n";
+        let doc = parse(src);
+        let Some(Block::FrontMatter(inner)) = doc.blocks.first() else {
+            panic!("first block is frontmatter, got {:?}", doc.blocks.first())
+        };
+        assert_eq!(inner, "title: Weekly Review\ntags: [planning]", "the metadata, delimiters gone");
+        let headings: Vec<_> = doc
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Heading { level, content } => Some((*level, content.text.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings, vec![(1, "Real Heading".to_string())], "only the real heading");
+        assert!(
+            !doc.blocks.iter().any(|b| matches!(b, Block::Rule)),
+            "neither delimiter survives as a rule"
+        );
+    }
+
+    /// Only at the very start, and only when it closes. A --- further
+    /// down is a thematic break and must stay one.
+    #[test]
+    fn frontmatter_is_recognised_only_at_the_top_and_only_when_closed() {
+        assert_eq!(frontmatter_range("---\na: 1\n---\nbody\n"), Some(0..13));
+        assert_eq!(frontmatter_range("---\na: 1\n..."), Some(0..12), "`...` closes, EOF ends");
+        assert!(frontmatter_range("\n---\na: 1\n---\n").is_none(), "not at the top");
+        assert!(frontmatter_range("---\na: 1\nnever closes\n").is_none(), "unclosed");
+        assert!(frontmatter_range("body\n\n---\n\nmore\n").is_none(), "a real rule");
+        assert!(frontmatter_range("").is_none());
+        // A document that opens with a break, a blank line, and later a
+        // setext underline is ordinary Markdown, not metadata: the
+        // first line inside must be neither blank nor the close.
+        assert!(frontmatter_range("---\n\nPara\n---\n").is_none(), "blank first line");
+        assert!(frontmatter_range("---\n---\n").is_none(), "two rules, not an empty block");
+        assert!(frontmatter_range("----\na: 1\n---\n").is_none(), "four hyphens is a rule");
+        assert!(frontmatter_range("   ---\na: 1\n---\n").is_none(), "indented");
+        // A byte-order mark before the opening line is not content; the
+        // range covers it so the body still starts after the block.
+        assert_eq!(frontmatter_range("\u{feff}---\na: 1\n---\nbody\n"), Some(0..16));
+        let Some(Block::FrontMatter(inner)) =
+            parse("\u{feff}---\na: 1\n---\n# H\n").blocks.first().cloned()
+        else {
+            panic!("BOM frontmatter")
+        };
+        assert_eq!(inner, "a: 1");
+    }
+
+    /// Windows line endings and trailing spaces on a delimiter are the
+    /// same block; the range still covers every byte of it.
+    #[test]
+    fn frontmatter_tolerates_crlf_and_trailing_spaces() {
+        let src = "--- \r\na: 1\r\n---\r\nbody\r\n";
+        assert_eq!(frontmatter_range(src), Some(0..17));
+        let Some(Block::FrontMatter(inner)) = parse(src).blocks.first().cloned() else {
+            panic!("crlf frontmatter")
+        };
+        assert_eq!(inner, "a: 1");
+    }
+
+    /// A fence opened inside the metadata must not run on into the
+    /// body: the body is parsed on its own.
+    #[test]
+    fn a_fence_marker_inside_frontmatter_does_not_swallow_the_body() {
+        let doc = parse("---\nnote: ```\n```\n---\n# Body\n");
+        assert!(matches!(doc.blocks.first(), Some(Block::FrontMatter(_))));
+        assert!(
+            doc.blocks.iter().any(|b| matches!(b, Block::Heading { level: 1, .. })),
+            "the body heading survives: {:?}",
+            doc.blocks
+        );
+    }
+
+    /// Unclosed, the opening --- is what CommonMark says it is.
+    #[test]
+    fn an_unclosed_opening_stays_a_rule() {
+        let doc = parse("---\n\nbody\n");
+        assert!(matches!(doc.blocks.first(), Some(Block::Rule)), "{:?}", doc.blocks);
+    }
+
+    /// HTML is not rendered, but it is never erased. The old behaviour
+    /// dropped the block entirely, so a pasted snippet vanished from
+    /// the preview with nothing to show the user it had gone.
+    #[test]
+    fn html_blocks_are_kept_as_literal_text() {
+        let doc = parse("<div>raw</div>\n");
+        let Some(Block::Html(s)) = doc.blocks.first() else {
+            panic!("got {:?}", doc.blocks.first())
+        };
+        assert_eq!(s, "<div>raw</div>", "the source survives, trailing newline dropped");
+    }
+
+    /// A multi-line block keeps every line, in order, and the Markdown
+    /// around it still parses as Markdown.
+    #[test]
+    fn a_multi_line_html_block_keeps_every_line() {
+        let doc = parse("intro\n\n<details>\n<summary>More</summary>\nhidden\n</details>\n\n# After\n");
+        let kinds: Vec<_> = doc.blocks.iter().map(|b| match b {
+            Block::Paragraph(_) => "p",
+            Block::Html(_) => "html",
+            Block::Heading { .. } => "h",
+            _ => "other",
+        }).collect();
+        assert_eq!(kinds, ["p", "html", "h"]);
+        let Block::Html(s) = &doc.blocks[1] else { unreachable!() };
+        assert_eq!(s, "<details>\n<summary>More</summary>\nhidden\n</details>");
+    }
+
+    /// Containers hold HTML blocks too; they must not vanish there either.
+    #[test]
+    fn html_inside_a_quote_or_list_item_survives() {
+        let doc = parse("> <div>q</div>\n");
+        let Block::Quote(inner) = &doc.blocks[0] else { panic!("{:?}", doc.blocks) };
+        assert!(matches!(&inner[0], Block::Html(s) if s == "<div>q</div>"), "{inner:?}");
+
+        let doc = parse("- item\n\n  <div>l</div>\n");
+        let Block::List { items, .. } = &doc.blocks[0] else { panic!("{:?}", doc.blocks) };
+        assert!(
+            items[0].blocks.iter().any(|b| matches!(b, Block::Html(s) if s == "<div>l</div>")),
+            "{:?}",
+            items[0].blocks
+        );
+
+        // A tight item's text has no paragraph tag of its own; the HTML
+        // that interrupts it must land after it, not before.
+        let doc = parse("- a\n  <div>t</div>\n");
+        let Block::List { items, .. } = &doc.blocks[0] else { panic!("{:?}", doc.blocks) };
+        assert!(
+            matches!(
+                items[0].blocks.as_slice(),
+                [Block::Paragraph(p), Block::Html(h)] if p.text == "a" && h == "<div>t</div>"
+            ),
+            "{:?}",
+            items[0].blocks
+        );
+    }
+
+    /// A comment is invisible in every Markdown renderer, so hiding one
+    /// erases nothing -- and the seeded `toc` plugin writes a pair of
+    /// them around every table of contents, which drew as two empty
+    /// code boxes. Only a block that is nothing *but* comments hides:
+    /// real HTML beside a comment is still content.
+    #[test]
+    fn html_comments_stay_invisible_but_their_neighbours_do_not() {
+        let doc = parse("<!-- toc -->\n- [A](#a)\n<!-- /toc -->\n\n# A\n");
+        assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Html(_))), "{:?}", doc.blocks);
+        assert!(matches!(doc.blocks.first(), Some(Block::List { .. })), "the TOC itself stays");
+
+        let doc = parse("<!--\nmulti\nline\n-->\n\n<!-- a --> <!-- b -->\n");
+        assert!(doc.blocks.is_empty(), "{:?}", doc.blocks);
+
+        // The parser ends a comment block at its `-->` line, so HTML on
+        // the next line is its own block, and stays.
+        let doc = parse("<!-- note -->\n<div>kept</div>\n");
+        assert!(
+            matches!(doc.blocks.as_slice(), [Block::Html(s)] if s == "<div>kept</div>"),
+            "{:?}",
+            doc.blocks
+        );
+        // HTML after a comment in the same block keeps the whole block.
+        let doc = parse("<!-- note --><div>kept</div>\n");
+        assert!(
+            matches!(doc.blocks.as_slice(), [Block::Html(s)] if s == "<!-- note --><div>kept</div>"),
+            "{:?}",
+            doc.blocks
+        );
+        // Comments on both sides do not make the middle invisible.
+        let doc = parse("<!-- a --><div>x</div><!-- b -->\n");
+        assert!(matches!(doc.blocks.as_slice(), [Block::Html(_)]), "{:?}", doc.blocks);
+        // The shipped guide the toc plugin maintains renders no boxes.
+        let guide = parse(include_str!("../examples/vault/Guide/Plugins.md"));
+        assert!(!guide.blocks.iter().any(|b| matches!(b, Block::Html(_))));
+        // An unclosed comment is not provably invisible text; keep it.
+        let doc = parse("<!-- never closed\n");
+        assert!(matches!(doc.blocks.as_slice(), [Block::Html(_)]), "{:?}", doc.blocks);
+    }
+
+    /// Inline HTML is a different issue and keeps its old behaviour: the
+    /// paragraph around it is intact and no block appears.
+    #[test]
+    fn inline_html_is_not_a_block() {
+        let doc = parse("a <b>bold</b> c\n");
+        assert_eq!(doc.blocks.len(), 1);
+        assert!(matches!(&doc.blocks[0], Block::Paragraph(_)));
     }
 
     #[test]
@@ -882,8 +1454,184 @@ mod tests {
                 Block::Code { .. } => "code",
                 Block::Table { .. } => "table",
                 Block::Rule => "rule",
+                Block::FrontMatter(_) => "frontmatter",
+                Block::Html(_) => "html",
+                Block::Image { .. } => "image",
             })
             .collect();
         assert_eq!(kinds, ["heading", "paragraph", "list", "quote", "code"]);
+    }
+
+    /// A standalone image is a block, not a run of text. The editor has
+    /// drawn the picture since images became a claimed block; the
+    /// reading view answered `🖼 ` and the alt text for the same
+    /// document (#57).
+    #[test]
+    fn a_standalone_image_is_its_own_block() {
+        let doc = parse("Before\n\n![A city](city.png)\n\nAfter\n");
+        assert!(
+            doc.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Image { dest, alt } if dest == "city.png" && alt == "A city")),
+            "standalone image did not become a block: {:?}",
+            doc.blocks
+        );
+    }
+
+    /// An image among words keeps the inline placeholder -- a picture
+    /// cannot sit inside a line of prose.
+    #[test]
+    fn an_inline_image_keeps_its_placeholder() {
+        let doc = parse("Text with ![a pic](p.png) inside.\n");
+        assert!(
+            !doc.blocks.iter().any(|b| matches!(b, Block::Image { .. })),
+            "inline image became a block: {:?}",
+            doc.blocks
+        );
+        let Block::Paragraph(inline) = &doc.blocks[0] else { panic!("{:?}", doc.blocks) };
+        assert!(inline.text.contains('🖼'), "inline placeholder lost: {}", inline.text);
+    }
+
+    /// The rule ignores the whitespace around the markup. An image
+    /// indented under the paragraph above it, or one a stray trailing
+    /// space follows, is still the only thing on its line -- and both
+    /// views ask this one question, so a change here moves them
+    /// together and the agreement test above cannot see it.
+    #[test]
+    fn the_whole_line_rule_ignores_surrounding_whitespace() {
+        assert!(is_whole_line("  ![a](b.png)  ", 2..13), "indented and trailed");
+        assert!(is_whole_line("![a](b.png)", 0..11), "bare");
+        assert!(!is_whole_line("see ![a](b.png)", 4..15), "among words");
+        let doc = parse("words\n\n  ![indented](i.png)\n");
+        assert!(
+            doc.blocks.iter().any(|b| matches!(b, Block::Image { .. })),
+            "an indented image is still alone on its line: {:?}",
+            doc.blocks
+        );
+    }
+
+    /// A picture lifted out of the middle of a paragraph leaves the
+    /// words on either side of it intact: no blank paragraph where it
+    /// used to be, and no stray indent on what followed it, which is
+    /// what the line break between them would otherwise become.
+    #[test]
+    fn words_around_a_lifted_picture_survive_it() {
+        let doc = parse("words\n![pic](p.png)\nmore\n");
+        let kinds: Vec<&str> = doc
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Block::Paragraph(_) => "paragraph",
+                Block::Image { .. } => "image",
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["paragraph", "image", "paragraph"], "{:?}", doc.blocks);
+        let Block::Paragraph(before) = &doc.blocks[0] else { unreachable!() };
+        // The space the line break pushed to join "words" to the
+        // picture belonged to the picture: it goes when it does.
+        assert_eq!(before.text, "words");
+        let Block::Paragraph(after) = &doc.blocks[2] else { unreachable!() };
+        assert_eq!(after.text, "more");
+        // A hard break is the same story with a newline for a
+        // separator, on both sides of the picture.
+        let doc = parse("words  \n![pic](p.png)  \nmore\n");
+        let [Block::Paragraph(before), Block::Image { .. }, Block::Paragraph(after)] =
+            &doc.blocks[..]
+        else {
+            panic!("hard breaks around a picture: {:?}", doc.blocks)
+        };
+        assert_eq!(before.text, "words");
+        assert_eq!(after.text, "more");
+        // A picture alone in its paragraph leaves nothing at all behind.
+        assert_eq!(parse("![only](o.png)\n").blocks.len(), 1);
+    }
+
+    /// Whether an image is a block is decided in `editor::blocks` for
+    /// the editor; the reading view has to reach the same verdict on
+    /// the same source or one view draws a picture where the other
+    /// writes its name. This is the same rule, not a second one.
+    #[test]
+    fn block_images_agree_with_the_editors_rule() {
+        fn reading(blocks: &[Block], out: &mut Vec<(String, String)>) {
+            for b in blocks {
+                match b {
+                    Block::Image { alt, dest } => out.push((alt.clone(), dest.clone())),
+                    Block::Quote(inner) => reading(inner, out),
+                    Block::List { items, .. } => {
+                        for item in items {
+                            reading(&item.blocks, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for src in [
+            "![alone](a.png)\n",
+            "see ![a](b.png) here\n",
+            "words\n![after](c.png)\n",
+            "![before](c.png)\nwords\n",
+            "![a ![b](c)](d)\n",
+            "- ![in a list](l.png)\n",
+            "> ![quoted](q.png)\n",
+            "  ![indented](i.png)\n",
+            "---\ntitle: t\n---\n\n![past frontmatter](f.png)\n",
+            "```\n![fenced](x.png)\n```\n",
+            "![one](1.png)\n![two](2.png)\n",
+            "![titled](t.png \"a title\")\n",
+            "# ![in a heading](h.png)\n",
+        ] {
+            let mut mine = Vec::new();
+            reading(&parse(src).blocks, &mut mine);
+            let editors: Vec<(String, String)> = crate::editor::blocks::blocks(src)
+                .into_iter()
+                .filter_map(|b| match b.kind {
+                    crate::editor::blocks::BlockKind::Image { alt, dest } => Some((alt, dest)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(mine, editors, "the two views disagreed on {src:?}");
+        }
+    }
+
+    #[test]
+    fn a_remote_image_resolves_without_touching_the_disk() {
+        assert_eq!(
+            resolve_image("https://example.com/a.png", Some(Path::new("/nowhere/doc.md"))),
+            ImageSource::Remote("https://example.com/a.png".to_string())
+        );
+        assert_eq!(
+            resolve_image("http://example.com/a.png", None),
+            ImageSource::Remote("http://example.com/a.png".to_string())
+        );
+    }
+
+    #[test]
+    fn a_local_image_resolves_against_the_documents_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = dir.path().join("assets");
+        std::fs::create_dir(&assets).unwrap();
+        std::fs::write(assets.join("pic.png"), b"not really a png").unwrap();
+        let doc = dir.path().join("notes").join("note.md");
+        std::fs::create_dir(dir.path().join("notes")).unwrap();
+        assert_eq!(
+            resolve_image("../assets/pic.png", Some(&doc)),
+            ImageSource::Local(dir.path().join("notes").join("../assets/pic.png"))
+        );
+    }
+
+    /// A broken link has to look deliberate. Rendering nothing reads as
+    /// a broken app; the editor says `— file not found` and the reading
+    /// view needs the same answer, so the missing case is named here
+    /// rather than left to each caller's `exists()` check.
+    #[test]
+    fn a_missing_local_image_resolves_to_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("note.md");
+        assert_eq!(
+            resolve_image("gone.png", Some(&doc)),
+            ImageSource::Missing(dir.path().join("gone.png"))
+        );
     }
 }

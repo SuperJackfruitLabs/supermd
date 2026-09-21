@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Tag, TagEnd};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockKind {
@@ -26,16 +26,6 @@ pub struct BlockInfo {
     pub kind: BlockKind,
 }
 
-/// The line (byte range, newline excluded) containing byte `offset`.
-fn line_containing(source: &str, offset: usize) -> Range<usize> {
-    let start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let end = source[offset..]
-        .find('\n')
-        .map(|i| offset + i)
-        .unwrap_or(source.len());
-    start..end
-}
-
 pub fn blocks(source: &str) -> Vec<BlockInfo> {
     if source.len() > crate::editor::spans::MAX_STYLED_BYTES {
         return Vec::new();
@@ -44,9 +34,7 @@ pub fn blocks(source: &str) -> Vec<BlockInfo> {
 
     // Tables and images from the event stream.
     let mut image: Option<(Range<usize>, String, String)> = None;
-    for (event, range) in
-        Parser::new_ext(source, crate::editor::spans::markdown_options()).into_offset_iter()
-    {
+    for (event, range) in crate::editor::spans::body_events(source) {
         match event {
             Event::Start(Tag::Table(_)) => {
                 let mut r = range;
@@ -63,9 +51,10 @@ pub fn blocks(source: &str) -> Vec<BlockInfo> {
             }
             Event::End(TagEnd::Image) => {
                 if let Some((range, alt, dest)) = image.take() {
-                    // Block image only when the markup is the whole line.
-                    let line = line_containing(source, range.start);
-                    if source[line].trim() == &source[range.clone()] {
+                    // Block image only when the markup is the whole
+                    // line. The rule lives in `markdown` so the reading
+                    // view asks the same question, not a similar one.
+                    if crate::markdown::is_whole_line(source, range.clone()) {
                         out.push(BlockInfo { range, kind: BlockKind::Image { alt, dest } });
                     }
                 }
@@ -305,6 +294,17 @@ mod tests {
         assert!(is_separator_row("|:-:|----:|"));
         assert!(!is_separator_row("| a | b |"));
         assert!(!is_separator_row(""));
+    }
+
+    /// The projector's block scan skips the metadata the same way: a
+    /// fence marker or an image line up there claims nothing.
+    #[test]
+    fn frontmatter_projects_no_blocks() {
+        let src = "---\n![x](y.png)\n```\n---\n\n|a|b|\n|-|-|\n";
+        let all = blocks(src);
+        assert_eq!(all.len(), 1, "only the body's table: {all:?}");
+        assert_eq!(all[0].kind, BlockKind::Table);
+        assert_eq!(&src[all[0].range.clone()], "|a|b|\n|-|-|");
     }
 
     #[test]

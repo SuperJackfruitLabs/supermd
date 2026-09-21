@@ -1,0 +1,48 @@
+# Generated from base16 by `cargo run --example import_base16`.
+# Do not edit by hand: regenerate instead, and let the contrast
+# guards in src/theme.rs decide whether the result ships.
+#
+# Scheme: Kanagawa by Tommaso Laurenzi (https://github.com/rebelot)
+# Source: tinted-theming/schemes (MIT), vendored at
+# assets/base16/kanagawa.yaml -- see assets/base16/README.md.
+#
+# Each colour is tagged with the slot it came from, or `derived`
+# where the mapping took its own step from the ground.
+
+name = "Kanagawa"
+appearance = "dark"
+
+[colors]
+bg = "#17171e"                # derived
+page_bg = "#1f1f28"           # base00
+panel_bg = "#131319"          # derived
+floating_bg = "#23232c"       # derived
+hover_bg = "#292931"          # derived
+selected_bg = "#223249"       # base02
+border = "#223249"            # base02
+code_bg = "#2d2d35"           # derived
+code_fg = "#dcd7ba"           # base05
+fg = "#dcd7ba"                # base05
+fg_strong = "#edebdc"         # derived
+fg_muted = "#7d7b84"          # derived
+accent = "#7e9cd8"            # base0D
+link = "#7e9cd8"              # base0D
+find_match_bg = "#504023"     # derived
+find_active_bg = "#755e33"    # derived
+shadow = "#10101457"          # derived, translucent
+diff_added_bg = "#2f3434"     # derived
+diff_added_fg = "#8ba482"     # derived
+diff_deleted_bg = "#3d252d"   # derived
+diff_deleted_fg = "#d68083"   # derived
+
+[syntax]
+keyword = "#957fb8"           # base0E
+function = "#7e9cd8"          # base0D
+type = "#c0a36e"              # base0A
+string = "#76946a"            # base0B
+comment = "#5b5b71"           # derived
+constant = "#ffa066"          # base09
+property = "#c34043"          # base08
+operator = "#dcd7ba"          # base05
+tag = "#c34043"               # base08
+attribute = "#c0a36e"         # base0A

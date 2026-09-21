@@ -7,6 +7,7 @@ use gpui::{
     Focusable, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
 
+use crate::elevation::Elevated as _;
 use crate::input::TextInput;
 use crate::theme::theme;
 
@@ -205,11 +206,9 @@ impl Render for Palette {
             .max_w(gpui::relative(0.9))
             .h(px(400.))
             .flex_none()
-            .bg(t.panel_bg)
             .border_1()
             .border_color(t.border)
-            .rounded_lg()
-            .shadow_lg()
+            .elevated(crate::elevation::Overlay::Palette, &t)
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -226,7 +225,11 @@ impl Render for Palette {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .py_1()
+                    .pt_1()
+                    // A full corner radius, not py_1's 4px: gpui clips to a
+                    // square, so a selected last row would otherwise paint
+                    // over the container's rounded bottom corners.
+                    .pb(crate::elevation::corner_inset(crate::elevation::Overlay::Palette))
                     .flex()
                     .flex_col()
                     .child(div().flex_1().min_h_0().child(list))
