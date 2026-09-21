@@ -8,10 +8,15 @@ Release notes are written here first. The GitHub release body is
 generated from commit subjects, which for 0.0.16 produced a single line
 linking a pull request and had to be rewritten by hand afterwards.
 
-## [Unreleased]
+## [0.0.17] - 2026-09-21
 
 ### Added
 
+- A workspace graph you can read and stay in. Hovering a node names it
+  and its neighbours at any zoom; resting on one shows a card with its
+  title, an excerpt and its link counts. Clicking peeks into a panel
+  beside the graph instead of replacing it, and walking a backlink from
+  there moves the peek without leaving the view.
 - A visual language of surfaces: the document is a page resting on the
   ground, with page, border and shadow tokens derived for any theme that
   does not define them, and a surface of its own for everything that
@@ -25,6 +30,10 @@ linking a pull request and had to be rewritten by hand afterwards.
 
 ### Changed
 
+- The graph board paints as a single canvas rather than an element per
+  node: at a few thousand notes a frame went from 6.3ms to 70µs, and the
+  view from 11,308 elements to one. Unlinked notes now dim rather than
+  crowding the structure they surround.
 - The sidebar, outline and status bar read as one ground; the active tab
   is the page's own edge; the page is inset left, right and bottom.
 - Overlays share one shadow vocabulary, and tables lose their interior
@@ -35,6 +44,9 @@ linking a pull request and had to be rewritten by hand afterwards.
 
 ### Fixed
 
+- Opening a note from the graph no longer throws the graph away. The
+  layout, pan, zoom and filter survive, so reopening it lands exactly
+  where you left rather than re-simulating from scratch.
 - The reading view renders images, renders HTML blocks as literal text
   instead of dropping them, keeps HTML comments invisible, and toggles
   checkboxes.
@@ -67,5 +79,6 @@ linking a pull request and had to be rewritten by hand afterwards.
   window) — inline calls from a plugin declaring it fail with a named
   error instead of silently seeing an empty `/workspace`.
 
-[Unreleased]: https://github.com/SuperJackfruitLabs/supermd/compare/v0.0.16...HEAD
+[Unreleased]: https://github.com/SuperJackfruitLabs/supermd/compare/v0.0.17...HEAD
+[0.0.17]: https://github.com/SuperJackfruitLabs/supermd/releases/tag/v0.0.17
 [0.0.16]: https://github.com/SuperJackfruitLabs/supermd/releases/tag/v0.0.16
