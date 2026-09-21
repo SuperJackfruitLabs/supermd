@@ -789,6 +789,13 @@ struct GraphViewState {
     hover: crate::graph::Hover,
     /// What the pointer is doing to `hovered`, as of the last event.
     hover_state: crate::graph::Hovering,
+    /// Wakes the card when the pointer has come to rest. `Hover::at` is
+    /// a pure state machine and the board's mouse-move handler is its
+    /// only caller, so the dwell used to be tested only when a move
+    /// arrived: a pointer that stopped never crossed it, and the card
+    /// appeared on the next twitch instead of on the rest. This is the
+    /// one-shot that asks again at the moment the dwell is up.
+    card_timer: Option<gpui::Task<()>>,
     /// Title and excerpt per note, for the hover card. Read off disk
     /// when the dwell earns a card and kept, so re-resting on a dot
     /// costs nothing; cleared wholesale on any fs event, because an
@@ -5032,6 +5039,10 @@ impl Workspace {
                 // Its ticker is a task from the previous open; the
                 // layout is picked up again below, from settled or not.
                 cached.ticker = None;
+                // And its card timer belongs to a pointer that has been
+                // somewhere else since: waking it now would card a node
+                // nobody is pointing at.
+                cached.card_timer = None;
                 self.graph = Some(cached);
                 window.focus(&self.graph_focus);
                 self.graph_tick(cx);
@@ -5055,6 +5066,7 @@ impl Workspace {
             picker: None,
             hover: Default::default(),
             hover_state: crate::graph::Hovering::Idle,
+            card_timer: None,
             preview_cache: Default::default(),
             #[cfg(test)]
             label_count: 0,
@@ -6030,11 +6042,52 @@ impl Workspace {
                     // used to say, now that there are no per-node
                     // elements to say it.
                     let hit = graph.picker.as_ref().and_then(|p| p.pick(x, y));
-                    let hovering = graph.hover.at(hit, std::time::Instant::now());
+                    let now = std::time::Instant::now();
+                    let hovering = graph.hover.at(hit, now);
+                    // Arriving on a dot, as opposed to sliding around on
+                    // one already lit: that is what starts a dwell, and
+                    // what has to be woken from.
+                    let arrived = matches!(hovering, crate::graph::Hovering::Lit(_))
+                        && graph.hover_state != hovering;
                     if graph.hovered != hit || graph.hover_state != hovering {
                         graph.hovered = hit;
                         graph.hover_state = hovering;
                         cx.notify();
+                    }
+                    match hovering {
+                        // Off the dots. The pending wake goes with the
+                        // pointer: dropping the task cancels it, the way
+                        // `ticker` is cancelled, so no card can arrive
+                        // for a node that has already been left.
+                        crate::graph::Hovering::Idle => graph.card_timer = None,
+                        crate::graph::Hovering::Lit(ix) if arrived => {
+                            // The timer is the clock here, so it hands
+                            // `Hover` the instant it was set to wake
+                            // for rather than the one it woke at: a late
+                            // wake cannot un-earn a card, and the delay
+                            // stays testable without sleeping. The rule
+                            // itself is still `Hover`'s.
+                            let due = now + crate::graph::CARD_DWELL;
+                            graph.card_timer = Some(cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(crate::graph::CARD_DWELL).await;
+                                this.update(cx, |this, cx| {
+                                    // The graph may have been dismissed,
+                                    // or the pointer moved on without a
+                                    // move event this handler saw.
+                                    let Some(graph) = this.graph.as_mut() else { return };
+                                    if graph.hovered != Some(ix) {
+                                        return;
+                                    }
+                                    let rested = graph.hover.at(Some(ix), due);
+                                    if graph.hover_state != rested {
+                                        graph.hover_state = rested;
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                            }));
+                        }
+                        crate::graph::Hovering::Lit(_) | crate::graph::Hovering::Carded(_) => {}
                     }
                     // Dragging a node: convert the pointer back into
                     // layout space and pin the node there. The rest of
@@ -8995,6 +9048,108 @@ pub(crate) mod tests {
         ws.update_in(cx, |ws, _, _| {
             assert!(ws.graph.as_ref().unwrap().preview_cache.is_empty(), "stale after a save");
         });
+    }
+
+    /// A card is earned by resting, not by twitching. `Hover::at` is
+    /// only consulted from the board's mouse-move handler, so a pointer
+    /// that arrived and then held still never crossed the dwell: the
+    /// card waited for the next movement that happened to land 400ms
+    /// late, which reads as flakiness rather than as a rule. There is
+    /// deliberately no second mouse event below -- only time passes,
+    /// which is the whole point of the test.
+    #[gpui::test]
+    fn resting_on_a_dot_cards_it_with_no_further_movement(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nBody.\n\n[[b]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let at = ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().expect("graph open");
+            let at = dot_at(g, 0);
+            let hit = g.picker.as_ref().unwrap().pick(f32::from(at.x), f32::from(at.y));
+            assert_eq!(hit, Some(0), "the pointer lands on the dot that was painted");
+            at
+        });
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.hover_state, crate::graph::Hovering::Lit(0), "lit on arrival");
+            assert!(g.preview_cache.is_empty(), "no card, and nothing read for one");
+        });
+        // Nothing moves. The dwell elapses on its own.
+        cx.executor()
+            .advance_clock(crate::graph::CARD_DWELL + std::time::Duration::from_millis(1));
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.hover_state, crate::graph::Hovering::Carded(0), "carded by resting");
+            assert_eq!(g.preview_cache.len(), 1, "and the card read its note");
+        });
+    }
+
+    /// The wake belongs to the pointer that asked for it. Leaving the
+    /// dot before the dwell is up has to call it off -- otherwise a card
+    /// arrives for a node the pointer is no longer anywhere near -- and
+    /// one still pending when the graph goes away must find nothing and
+    /// do nothing rather than panic.
+    #[gpui::test]
+    fn a_pending_card_dies_with_the_pointer_that_asked_for_it(cx: &mut TestAppContext) {
+        let _home = temp_home();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# Alpha\n\nBody.\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# Beta\n").unwrap();
+        let (ws, cx) = open_workspace(cx, root.path());
+        ws.update_in(cx, |ws, window, cx| ws.open_graph_view(window, cx));
+        cx.run_until_parked();
+        let (on, off) = ws.update_in(cx, |ws, window, _| {
+            let board = ws.graph_board_width(window);
+            let height = f32::from(window.viewport_size().height);
+            let g = ws.graph.as_ref().expect("graph open");
+            let on = dot_at(g, 0);
+            let picker = g.picker.as_ref().unwrap();
+            assert_eq!(picker.pick(f32::from(on.x), f32::from(on.y)), Some(0));
+            // Bare board beside the dot. Found rather than assumed: the
+            // layout decides where the dots are, and a point that turns
+            // out to be another dot would test the wrong thing.
+            let off = [(40.0, 40.0), (-40.0, 40.0), (40.0, -40.0), (-40.0, -40.0)]
+                .into_iter()
+                .map(|(dx, dy)| (f32::from(on.x) + dx, f32::from(on.y) + dy))
+                .find(|&(x, y)| {
+                    x > 80.0 && y > 80.0 && x < board - 20.0 && y < height - 20.0
+                        && picker.pick(x, y).is_none()
+                })
+                .expect("somewhere beside the dot is bare board");
+            (on, point(px(off.0), px(off.1)))
+        });
+        // On the dot, then off it again well inside the dwell.
+        cx.simulate_mouse_move(on, None, gpui::Modifiers::none());
+        cx.simulate_mouse_move(off, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            // Also the proof that the leave reached the handler at all.
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.hover_state, crate::graph::Hovering::Idle, "the pointer left");
+        });
+        cx.executor().advance_clock(crate::graph::CARD_DWELL * 2);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| {
+            let g = ws.graph.as_ref().unwrap();
+            assert_eq!(g.hover_state, crate::graph::Hovering::Idle, "and stays left");
+            assert!(g.preview_cache.is_empty(), "so no card was ever built");
+        });
+        // Back on the dot, then the whole view is dismissed with the
+        // wake still pending: it must find no graph and say nothing.
+        cx.simulate_mouse_move(on, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, window, cx| ws.graph_dismiss(&GraphDismiss, window, cx));
+        cx.executor()
+            .advance_clock(crate::graph::CARD_DWELL * 2);
+        cx.run_until_parked();
+        ws.update_in(cx, |ws, _, _| assert!(ws.graph.is_none(), "closed, and still closed"));
     }
 
     /// Clicking a node used to replace the whole window. Now it opens
