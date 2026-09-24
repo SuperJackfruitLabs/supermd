@@ -8,6 +8,9 @@ Identify the smallest source document, exact input sequence, selection, expected
 behavior, actual behavior, product revision and host that reproduce the defect.
 Read the checkout's CLAUDE.md and inspect the relevant implementation; an older
 issue or screenshot is evidence of that observation, not the current binary.
+Before reporting that a checkout, file or result is absent, list the working
+directory: a search for the names you expected shows only that those patterns
+matched nothing.
 
 ## Find the owning stage
 
